@@ -1,0 +1,10 @@
+name = "claude-session-viewer"
+main = "worker/index.ts"
+compatibility_date = "2024-01-01"
+
+assets = { directory = "./dist" }
+
+[[kv_namespaces]]
+binding = "SESSIONS_KV"
+id = "PLACEHOLDER_KV_ID"
+preview_id = "PLACEHOLDER_KV_PREVIEW_ID"

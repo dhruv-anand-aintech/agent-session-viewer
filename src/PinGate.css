@@ -1,0 +1,27 @@
+.pin-gate {
+  display: flex; align-items: center; justify-content: center;
+  height: 100vh; background: #0d0d0f;
+}
+.pin-card {
+  background: #141416; border: 1px solid #2a2a2e; border-radius: 12px;
+  padding: 40px 48px; display: flex; flex-direction: column; align-items: center; gap: 16px;
+  min-width: 280px;
+}
+.pin-title { font-size: 18px; font-weight: 700; color: #e8e8ea; }
+.pin-subtitle { font-size: 13px; color: #6b6b72; }
+.pin-form { display: flex; flex-direction: column; gap: 12px; width: 100%; margin-top: 8px; }
+.pin-input {
+  padding: 12px 16px; border-radius: 8px;
+  border: 1px solid #2a2a2e; background: #1c1c1f; color: #e8e8ea;
+  font-size: 20px; letter-spacing: 0.3em; text-align: center;
+  outline: none; width: 100%;
+}
+.pin-input:focus { border-color: #d97706; }
+.pin-error { color: #f87171; font-size: 12px; text-align: center; }
+.pin-btn {
+  padding: 12px; border-radius: 8px;
+  background: #d97706; color: #fff; border: none;
+  font-size: 14px; font-weight: 600; cursor: pointer; transition: opacity 0.15s;
+}
+.pin-btn:hover:not(:disabled) { opacity: 0.85; }
+.pin-btn:disabled { opacity: 0.4; cursor: not-allowed; }
