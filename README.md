@@ -73,8 +73,19 @@ npm run dev:api    # Local API proxy (optional)
 ## Deploying changes
 
 ```bash
-npm run deploy     # tsc + vite build + wrangler deploy
+SESSIONS_KV_ID=<id> SESSIONS_KV_PREVIEW_ID=<preview_id> npm run deploy
 ```
+
+`deploy.mjs` patches `wrangler.toml` with your KV IDs, runs the build and deploy, then restores the placeholders — keeping the repo clean for sharing.
+
+Store these in a local `.env` file (already gitignored via `*.local`) or export them in your shell profile:
+
+```bash
+export SESSIONS_KV_ID=e61e79fc...
+export SESSIONS_KV_PREVIEW_ID=e5f103b9...
+```
+
+Then just run `npm run deploy`.
 
 ## Architecture
 
