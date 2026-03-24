@@ -572,6 +572,17 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 
+function useIsMobile() {
+  const [mobile, setMobile] = useState(() => window.matchMedia("(max-width: 640px)").matches)
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 640px)")
+    const handler = (e: MediaQueryListEvent) => setMobile(e.matches)
+    mq.addEventListener("change", handler)
+    return () => mq.removeEventListener("change", handler)
+  }, [])
+  return mobile
+}
+
 function Sidebar({ projects, selected, onSelect, width, onDragStart, mobileOpen, onMobileClose }: {
   projects: ProjectData[]
   selected: { project: string; session: string } | null
@@ -581,6 +592,7 @@ function Sidebar({ projects, selected, onSelect, width, onDragStart, mobileOpen,
   mobileOpen: boolean
   onMobileClose: () => void
 }) {
+  const isMobile = useIsMobile()
   // Default: flat (not grouped)
   const [grouped, setGrouped] = useState(() => localStorage.getItem("sidebarGrouped") === "true")
 
@@ -601,7 +613,7 @@ function Sidebar({ projects, selected, onSelect, width, onDragStart, mobileOpen,
   return (
     <>
       {mobileOpen && <div className="sidebar-backdrop" onClick={onMobileClose} />}
-    <nav className={`sidebar${mobileOpen ? " mobile-open" : ""}`} style={{ width }}>
+    <nav className={`sidebar${mobileOpen ? " mobile-open" : ""}`} style={isMobile ? undefined : { width }}>
       <div className="sidebar-title">
         Sessions
         <div className="sidebar-view-toggle">

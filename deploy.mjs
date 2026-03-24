@@ -3,22 +3,35 @@
  * Deploy helper — patches wrangler.toml with real KV IDs from env, deploys,
  * then restores the placeholders so the repo stays clean.
  *
- * Required env vars:
- *   SESSIONS_KV_ID          — KV namespace ID
- *   SESSIONS_KV_PREVIEW_ID  — KV preview namespace ID
+ * KV IDs are loaded from (in priority order):
+ *   1. Environment variables: SESSIONS_KV_ID, SESSIONS_KV_PREVIEW_ID
+ *   2. .env file in the project root
  *
  * Usage:
- *   SESSIONS_KV_ID=abc123 SESSIONS_KV_PREVIEW_ID=def456 node deploy.mjs
+ *   node deploy.mjs
  */
 
-import { readFileSync, writeFileSync } from "node:fs"
+import { readFileSync, writeFileSync, existsSync } from "node:fs"
 import { execSync } from "node:child_process"
+import { fileURLToPath } from "node:url"
+import path from "node:path"
+
+const root = path.dirname(fileURLToPath(import.meta.url))
+
+// Load .env file if present (simple KEY=VALUE parser, no dependencies needed)
+const envPath = path.join(root, ".env")
+if (existsSync(envPath)) {
+  for (const line of readFileSync(envPath, "utf8").split("\n")) {
+    const m = line.match(/^\s*([A-Z_][A-Z0-9_]*)\s*=\s*(.+?)\s*$/)
+    if (m && !process.env[m[1]]) process.env[m[1]] = m[2]
+  }
+}
 
 const kvId = process.env.SESSIONS_KV_ID
 const kvPreviewId = process.env.SESSIONS_KV_PREVIEW_ID
 
 if (!kvId || !kvPreviewId) {
-  console.error("❌  Set SESSIONS_KV_ID and SESSIONS_KV_PREVIEW_ID before deploying.")
+  console.error("❌  Set SESSIONS_KV_ID and SESSIONS_KV_PREVIEW_ID in .env or as environment variables.")
   console.error("    Run `node setup.mjs` once to create the namespaces and get these values.")
   process.exit(1)
 }
