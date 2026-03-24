@@ -254,7 +254,10 @@ function buildResultMap(content: ContentBlock[]): Map<string, string> {
   return map
 }
 
-function AssistantMessage({ content }: { content: string | ContentBlock[] }) {
+function AssistantMessage({ content, nextMsg }: { content: string | ContentBlock[]; nextMsg?: SessionMessage }) {
+  // Tool results live in the NEXT user message — merge both sources
+  const nextContent = Array.isArray(nextMsg?.message?.content) ? nextMsg.message.content as ContentBlock[] : []
+
   if (typeof content === "string") {
     const len = charCount(content)
     return (
@@ -266,8 +269,8 @@ function AssistantMessage({ content }: { content: string | ContentBlock[] }) {
     )
   }
 
-  // Build result map so tool cards can show their results inline
-  const resultMap = buildResultMap(content)
+  // Build result map from both same-message tool_results (rare) and next-message tool_results
+  const resultMap = new Map([...buildResultMap(content), ...buildResultMap(nextContent)])
   const blocks = content.filter(b => b.type !== "tool_result")
   const totalLen = blocks.reduce((s, b) => s + (b.type === "text" ? (b.text?.length ?? 0) : 0), 0)
 
@@ -323,7 +326,7 @@ function UserMessage({ content }: { content: string | ContentBlock[] }) {
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-export default function PrettyMessageBlock({ msg }: { msg: SessionMessage }) {
+export default function PrettyMessageBlock({ msg, nextMsg }: { msg: SessionMessage; nextMsg?: SessionMessage }) {
   if (msg.type === "file-history-snapshot") return null
   if (msg.type === "progress") return null  // hide progress events in pretty mode
   const role = msg.message?.role
@@ -336,14 +339,14 @@ export default function PrettyMessageBlock({ msg }: { msg: SessionMessage }) {
         <div className="pp-subagent-body">
           {role === "user"
             ? <UserMessage content={msg.message.content} />
-            : <AssistantMessage content={msg.message.content} />}
+            : <AssistantMessage content={msg.message.content} nextMsg={nextMsg} />}
         </div>
       </div>
     )
   }
 
   if (role === "user") return <UserMessage content={msg.message.content} />
-  return <AssistantMessage content={msg.message.content} />
+  return <AssistantMessage content={msg.message.content} nextMsg={nextMsg} />
 }
 
 export function charCountMsg(msg: SessionMessage): number {
