@@ -32,6 +32,21 @@
   min-width: 0;
 }
 
+/* ── Sub-agent (sidechain) block ─────────────────────────────────────────── */
+.pp-subagent-row {
+  margin: 4px 16px;
+  border-left: 2px solid hsla(263, 50%, 60%, 0.35);
+  padding-left: 10px;
+  opacity: 0.85;
+}
+.pp-subagent-label {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.05em;
+  color: hsl(263, 50%, 70%);
+  margin-bottom: 2px;
+}
+.pp-subagent-body .pp-user-row { padding-left: 0; padding-right: 0; }
+.pp-subagent-body .pp-assistant-row { padding-left: 0; }
+
 /* ── Turn wrapper (groups user+assistant into conversation turn) ──────────── */
 .pp-turn { padding: 8px 0 8px; }
 

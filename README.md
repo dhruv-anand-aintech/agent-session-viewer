@@ -2,16 +2,44 @@
 
 A live viewer for your local Claude Code sessions — browse conversations, see tool calls, thinking blocks, and markdown-rendered assistant responses in a faithful dark-mode UI.
 
-Sessions are streamed to a Cloudflare Worker (KV storage) by a local daemon that watches your `~/.claude/projects/` directory.
+Sessions are streamed to a Cloudflare Worker (KV storage) by a local daemon that watches your `~/.claude/projects/` directory. Works on desktop and mobile.
 
 ## Features
 
 - **Live updates** — sessions appear as you work; SSE streaming keeps the UI current
 - **Pretty mode** — markdown rendering, thinking pills, tool call cards (Bash, Read, Edit, Write, Search…)
+- **Sub-agent runs marked** — messages from Claude Code sub-agents (sidechain sessions) are visually distinguished with a `⤷ sub-agent` indicator and indented left border
 - **Flat or grouped sidebar** — all sessions sorted by last activity, or grouped by project
 - **Session renaming** — give sessions memorable names via the pencil icon
+- **Mobile-friendly** — slide-in sidebar drawer, back button, responsive layout
 - **PIN-protected** — simple cookie auth so you can expose the viewer remotely
-- **Nanoclaw support** *(optional)* — syncs WhatsApp/Telegram Claude agent sessions from a [nanoclaw](https://github.com/your/nanoclaw) install
+- **Claw bot support** *(optional)* — syncs WhatsApp/Telegram Claude agent sessions from any supported claw tool installation
+
+## Claw bot integration
+
+Claude Session Viewer supports the full family of **claw-type messaging bots** — local AI agents that run Claude via WhatsApp or Telegram and store their session data in a standard directory layout.
+
+Supported tools (auto-detected from `~/toolname`):
+
+| Tool | Env var override |
+|---|---|
+| **nanoclaw** *(primary)* | `NANOCLAW_DIR` |
+| openclaw | `OPENCLAW_DIR` |
+| picoclaw | `PICOCLAW_DIR` |
+| femtoclaw | `FEMTOCLAW_DIR` |
+| attoclaw | `ATTOCLAW_DIR` |
+| kiloclaw | `KILOCLAW_DIR` |
+| megaclaw | `MEGACLAW_DIR` |
+| zeroclaw | `ZEROCLAW_DIR` |
+| microclaw | `MICROCLAW_DIR` |
+| rawclaw | `RAWCLAW_DIR` |
+
+Each detected tool syncs two types of data:
+
+- **Chat sessions** — flat message history from the SQLite database (`store/messages.db`), surfaced as a `toolname-telegram` or `toolname-whatsapp` project
+- **Agent sessions** — rich Claude Code JSONL files from `data/sessions/`, including thinking blocks, tool calls, and full agent reasoning, surfaced as `toolname-agent-telegram` etc.
+
+Path overrides can also be set via the **Settings** panel (⚙ in the top bar) without editing env vars.
 
 ## Requirements
 
@@ -53,15 +81,20 @@ node daemon/watch.mjs --worker <url> --pin <pin>
 
 The daemon does an initial sync of all existing sessions, then watches `~/.claude/projects/**/*.jsonl` for live changes.
 
-## Nanoclaw integration (optional)
-
-If you run [nanoclaw](https://github.com/your/nanoclaw) (a WhatsApp/Telegram Claude agent), the daemon can also sync those conversations:
+### With claw tool support
 
 ```bash
+# Auto-detected if ~/nanoclaw exists — or specify explicitly:
 WORKER_URL=... AUTH_PIN=... NANOCLAW_DIR=/path/to/nanoclaw npm run daemon
+
+# Multiple tools at once:
+WORKER_URL=... AUTH_PIN=... \
+  NANOCLAW_DIR=/path/to/nanoclaw \
+  OPENCLAW_DIR=/path/to/openclaw \
+  npm run daemon
 ```
 
-This syncs both the flat chat messages and the rich agent sessions (thinking blocks, tool calls) stored as Claude Code JSONL files inside your nanoclaw directory.
+The daemon polls each tool's SQLite DB every 5 seconds and file-watches the agent JSONL sessions for instant updates.
 
 ## Local development
 
@@ -78,7 +111,7 @@ SESSIONS_KV_ID=<id> SESSIONS_KV_PREVIEW_ID=<preview_id> npm run deploy
 
 `deploy.mjs` patches `wrangler.toml` with your KV IDs, runs the build and deploy, then restores the placeholders — keeping the repo clean for sharing.
 
-Store these in a local `.env` file (already gitignored via `*.local`) or export them in your shell profile:
+Store these in your shell profile or a local env file:
 
 ```bash
 export SESSIONS_KV_ID=e61e79fc...
@@ -90,10 +123,12 @@ Then just run `npm run deploy`.
 ## Architecture
 
 ```
-~/.claude/projects/**/*.jsonl
+~/.claude/projects/**/*.jsonl       (Claude Code sessions + sub-agent sidechains)
+~/nanoclaw/store/messages.db        (claw bot chat history)
+~/nanoclaw/data/sessions/**/*.jsonl (claw bot agent sessions)
          │
          ▼
-  daemon/watch.mjs          (local file watcher)
+  daemon/watch.mjs          (local file watcher + SQLite poller)
          │  PUT /api/sync (X-Auth-Pin header)
          ▼
   Cloudflare Worker          (worker/index.ts)
@@ -109,4 +144,7 @@ Then just run `npm run deploy`.
 |---|---|---|
 | `WORKER_URL` | `--worker` | URL of your deployed Cloudflare Worker |
 | `AUTH_PIN` | `--pin` | PIN set during `node setup.mjs` |
-| `NANOCLAW_DIR` | `--nanoclaw` | Path to nanoclaw repo (optional) |
+| `NANOCLAW_DIR` | `--nanoclaw` | Path to nanoclaw repo *(primary claw tool)* |
+| `OPENCLAW_DIR` | `--openclaw` | Path to openclaw repo |
+| `PICOCLAW_DIR` | `--picoclaw` | Path to picoclaw repo |
+| *(any `{NAME}_DIR`)* | `--{name}` | Any other supported claw tool |
