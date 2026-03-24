@@ -4,6 +4,7 @@ import type { SessionMessage, ContentBlock } from "./types"
 interface Props {
   msg: SessionMessage
   index: number
+  nextMsg?: SessionMessage
 }
 
 function ThinkingBlock({ text }: { text: string }) {
