@@ -15,6 +15,7 @@ interface SessionMeta {
   gitBranch?: string
   isActive: boolean
   isSidechain?: boolean
+  agentType?: string
   firstName?: string
   customName?: string
 }
@@ -433,7 +434,11 @@ function SessionItem({ s, projectPath, isSelected, onSelect }: {
 
   const displayName = s.customName || s.firstName || s.id.slice(0, 8)
   // Tooltip: show full first message on hover, fallback to session ID
-  const tooltip = s.firstName ? `${s.firstName}\n\n${s.id}` : s.id
+  const tooltip = [
+    s.agentType ? `[${s.agentType}]` : null,
+    s.firstName,
+    s.id,
+  ].filter(Boolean).join("\n\n")
 
   function startEdit(e: React.MouseEvent) {
     e.stopPropagation()

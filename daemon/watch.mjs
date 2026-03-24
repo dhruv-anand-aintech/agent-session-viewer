@@ -106,10 +106,31 @@ function parseJsonl(filePath) {
   } catch { return null }
 }
 
+function normProjectDir(absDir) {
+  return absDir.replace(homedir(), "").replace(/\//g, "-").replace(/^-/, "")
+}
+
 async function syncSession(filePath) {
   const sessionId = path.basename(filePath, ".jsonl")
   const projectAbsDir = path.dirname(filePath)
-  const projectDir = projectAbsDir.replace(homedir(), "").replace(/\//g, "-").replace(/^-/, "")
+
+  // Subagent sessions live at: {projectDir}/{parentSessionId}/subagents/agent-{id}.jsonl
+  // Detect this by checking if grandparent dir basename is a session UUID and parent is "subagents"
+  const isSubagent = path.basename(projectAbsDir) === "subagents"
+  let projectDir, agentDescription, agentType
+  if (isSubagent) {
+    // Navigate up: subagents/ → parentSession/ → projectDir/
+    const parentProjectAbsDir = path.dirname(path.dirname(projectAbsDir))
+    projectDir = normProjectDir(parentProjectAbsDir)
+    // Read the companion .meta.json for agent description and type
+    try {
+      const meta = JSON.parse(fs.readFileSync(filePath.replace(".jsonl", ".meta.json"), "utf8"))
+      agentDescription = meta.description
+      agentType = meta.agentType
+    } catch { /* meta file optional */ }
+  } else {
+    projectDir = normProjectDir(projectAbsDir)
+  }
 
   const messages = parseJsonl(filePath)
   if (!messages) { log(`⚠  Failed to parse ${filePath}`); return }
@@ -148,8 +169,10 @@ async function syncSession(filePath) {
     gitBranch: last?.gitBranch ?? messages.find(m => m.gitBranch)?.gitBranch,
     version: last?.version,
     isActive: true,
-    firstName: firstUserText(),
-    isSidechain: conversationMsgs.length > 0 && sidechainMsgs.length / conversationMsgs.length > 0.5,
+    // Subagents: use description from .meta.json as the display name
+    firstName: agentDescription ?? firstUserText(),
+    isSidechain: isSubagent || (conversationMsgs.length > 0 && sidechainMsgs.length / conversationMsgs.length > 0.5),
+    agentType: agentType ?? undefined,
   }
 
   const payload = { meta, msgs: messages }
@@ -164,7 +187,7 @@ async function syncSession(filePath) {
       body: JSON.stringify(payload),
     })
     if (resp.ok) {
-      log(`✓ synced ${projectDir}/${sessionId.slice(0, 8)} (${messages.length} msgs)`)
+      log(`✓ synced ${isSubagent ? "⤷ " : ""}${projectDir}/${sessionId.slice(0, 8)} (${messages.length} msgs)`)
     } else {
       log(`✗ sync failed ${resp.status}: ${await resp.text()}`)
     }
@@ -194,10 +217,21 @@ async function initialSync() {
   for (const dir of dirs) {
     const dirPath = path.join(PROJECTS_DIR, dir)
     if (!fs.statSync(dirPath).isDirectory()) continue
-    const files = fs.readdirSync(dirPath).filter(f => f.endsWith(".jsonl"))
-    for (const f of files) {
+
+    // Sync root session JSONL files
+    for (const f of fs.readdirSync(dirPath).filter(f => f.endsWith(".jsonl"))) {
       await syncSession(path.join(dirPath, f))
       count++
+    }
+
+    // Sync subagent sessions: {projectDir}/{sessionId}/subagents/agent-*.jsonl
+    for (const sessionDir of fs.readdirSync(dirPath)) {
+      const subagentsDir = path.join(dirPath, sessionDir, "subagents")
+      if (!fs.existsSync(subagentsDir)) continue
+      for (const f of fs.readdirSync(subagentsDir).filter(f => f.endsWith(".jsonl"))) {
+        await syncSession(path.join(subagentsDir, f))
+        count++
+      }
     }
   }
   log(`Initial sync complete: ${count} sessions`)
