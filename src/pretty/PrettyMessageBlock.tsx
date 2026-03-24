@@ -300,6 +300,19 @@ export default function PrettyMessageBlock({ msg }: { msg: SessionMessage }) {
   const role = msg.message?.role
   if (!role || !msg.message) return null
 
+  if (msg.isSidechain) {
+    return (
+      <div className="pp-subagent-row">
+        <div className="pp-subagent-label">⤷ sub-agent</div>
+        <div className="pp-subagent-body">
+          {role === "user"
+            ? <UserMessage content={msg.message.content} />
+            : <AssistantMessage content={msg.message.content} />}
+        </div>
+      </div>
+    )
+  }
+
   if (role === "user") return <UserMessage content={msg.message.content} />
   return <AssistantMessage content={msg.message.content} />
 }

@@ -478,8 +478,7 @@ function SessionItem({ s, projectPath, isSelected, onSelect }: {
           <button className="ss-rename-btn" onClick={startEdit} title="Rename">✎</button>
           <div className="ss-meta">
             <span className="ss-count">
-              {s.messageCount}
-              {s.userMessageCount != null && <span className="ss-user-count"> · {s.userMessageCount}u</span>}
+              {s.userMessageCount != null ? `${s.userMessageCount}/${s.messageCount}` : s.messageCount}
             </span>
             {s.lastActivity && <span className="ss-time">{relativeTime(s.lastActivity)}</span>}
           </div>

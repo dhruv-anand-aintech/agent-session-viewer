@@ -82,6 +82,10 @@ export default {
       const existing = await env.SESSIONS_KV.get(`meta/${projectPath}/${sessionId}`, "json") as Record<string, unknown> | null
       if (existing?.customName) meta.customName = existing.customName
       meta.isActive = true
+      // Backfill userMessageCount from msgs if daemon didn't compute it
+      if (meta.userMessageCount == null) {
+        meta.userMessageCount = (msgs as Array<{type?: string}>).filter(m => m.type === "user").length
+      }
       await env.SESSIONS_KV.put(`meta/${projectPath}/${sessionId}`, JSON.stringify(meta))
       await env.SESSIONS_KV.put(`msgs/${projectPath}/${sessionId}`, JSON.stringify(msgs))
       return new Response(JSON.stringify({ ok: true }), { headers: corsHeaders({ "Content-Type": "application/json" }) })
