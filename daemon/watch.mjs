@@ -8,12 +8,20 @@
  *
  * Usage:  node daemon/watch.mjs [--worker <url>] [--pin <pin>]
  *   or:   WORKER_URL=... AUTH_PIN=... node daemon/watch.mjs
+ *
+ * Claw tool integration (nanoclaw is the primary supported tool):
+ *   --nanoclaw <path>    nanoclaw repo dir (highest priority, checked first)
+ *   NANOCLAW_DIR=<path>  env var alternative
+ *   --openclaw / --picoclaw / etc. work the same way for other claw tools.
+ * Auto-detection also checks ~/toolname and ~/.toolname for each known tool.
+ * Path overrides saved in the viewer's settings UI are also read at startup.
  */
 
 import fs from "node:fs"
 import path from "node:path"
 import { watch } from "node:fs"
 import { homedir } from "node:os"
+import { execFileSync } from "node:child_process"
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -25,15 +33,66 @@ const AUTH_PIN   = argGet("--pin")    ?? process.env.AUTH_PIN ?? ""
 const PROJECTS_DIR = path.join(homedir(), ".claude", "projects")
 const DEBOUNCE_MS = 600
 
-// Nanoclaw integration (optional) — set NANOCLAW_DIR to your nanoclaw repo path
-const NANOCLAW_DIR = argGet("--nanoclaw") ?? process.env.NANOCLAW_DIR ?? ""
-
 if (!WORKER_URL) {
   console.error("❌  WORKER_URL not set. Set --worker <url> or WORKER_URL env var.")
   process.exit(1)
 }
 if (!AUTH_PIN) {
   console.error("⚠  AUTH_PIN not set — syncs will be rejected by worker. Set --pin or AUTH_PIN env var.")
+}
+
+// ── Known claw tools ──────────────────────────────────────────────────────────
+// Each tool is assumed to share the same directory structure as nanoclaw:
+//   {dir}/store/messages.db   — SQLite chat database
+//   {dir}/data/sessions/      — JSONL agent session files
+//
+// Detection order (first match wins):
+//   1. CLI flag   --{name}
+//   2. Env var    {NAME}_DIR
+//   3. Settings stored in the viewer (fetched at startup from /api/settings)
+//   4. Auto-detect: ~/toolname  or  ~/.toolname
+
+const KNOWN_CLAW_TOOLS = [
+  "nanoclaw",
+  "openclaw",
+  "picoclaw",
+  "femtoclaw",
+  "attoclaw",
+  "kiloclaw",
+  "megaclaw",
+  "zeroclaw",
+  "microclaw",
+  "rawclaw",
+]
+
+function autoDetectDir(name) {
+  const candidates = [
+    path.join(homedir(), name),
+    path.join(homedir(), `.${name}`),
+  ]
+  return candidates.find(d => fs.existsSync(d)) ?? ""
+}
+
+function resolveClawDir(name, settingsOverrides = {}) {
+  return (
+    argGet(`--${name}`) ??
+    process.env[`${name.toUpperCase().replace(/-/g, "_")}_DIR`] ??
+    settingsOverrides[name] ??
+    autoDetectDir(name) ??
+    ""
+  )
+}
+
+// ── Fetch settings from Worker at startup ─────────────────────────────────────
+
+async function fetchSettings() {
+  try {
+    const r = await fetch(`${WORKER_URL}/api/settings`, {
+      headers: { "X-Auth-Pin": AUTH_PIN },
+    })
+    if (r.ok) return await r.json()
+  } catch { /* ignore — settings are optional */ }
+  return {}
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -76,11 +135,14 @@ async function syncSession(filePath) {
   }
 
   // Build lightweight meta
+  const conversationMsgs = messages.filter(m => m.type === "user" || m.type === "assistant")
+  const userMsgs = messages.filter(m => m.type === "user")
   const last = messages[messages.length - 1]
   const meta = {
     id: sessionId,
     projectPath: projectDir,
-    messageCount: messages.filter(m => m.type === "user" || m.type === "assistant").length,
+    messageCount: conversationMsgs.length,
+    userMessageCount: userMsgs.length,
     lastActivity: last?.timestamp ?? new Date().toISOString(),
     gitBranch: last?.gitBranch ?? messages.find(m => m.gitBranch)?.gitBranch,
     version: last?.version,
@@ -141,45 +203,44 @@ async function initialSync() {
 
 // ── File watcher ──────────────────────────────────────────────────────────────
 
-function startWatcher() {
+function startWatcher(activeTools) {
   if (!fs.existsSync(PROJECTS_DIR)) {
     log(`Projects dir not found: ${PROJECTS_DIR}`); return
   }
 
   log(`Watching ${PROJECTS_DIR}`)
 
-  watch(PROJECTS_DIR, { recursive: true }, (event, filename) => {
+  watch(PROJECTS_DIR, { recursive: true }, (_event, filename) => {
     if (!filename?.endsWith(".jsonl")) return
     const full = path.join(PROJECTS_DIR, filename)
     if (!fs.existsSync(full)) return
     scheduleSync(full)
   })
 
-  // Also watch nanoclaw agent session JSONL files
-  if (fs.existsSync(NANOCLAW_DATA_DIR)) {
-    watch(NANOCLAW_DATA_DIR, { recursive: true }, (event, filename) => {
-      if (!filename?.endsWith(".jsonl")) return
-      // Trigger a nanoclaw poll when any agent session changes
-      pollNanoclaw().catch(() => {})
-    })
-    log(`Watching nanoclaw agent sessions at ${NANOCLAW_DATA_DIR}`)
+  // Also watch each active claw tool's agent session JSONL files
+  for (const tool of activeTools) {
+    if (fs.existsSync(tool.dataDir)) {
+      watch(tool.dataDir, { recursive: true }, (_event, filename) => {
+        if (!filename?.endsWith(".jsonl")) return
+        pollClawTool(tool).catch(() => {})
+      })
+      log(`Watching ${tool.name} agent sessions at ${tool.dataDir}`)
+    }
   }
 }
 
-// ── Nanoclaw SQLite poller ────────────────────────────────────────────────────
+// ── Generic claw tool SQLite poller ──────────────────────────────────────────
 
-import { execFileSync } from "node:child_process"
+const CLAW_POLL_MS = 5000
+const clawLastSync = new Map()    // `${toolName}:${chatJid}` → last message id
+const clawAgentLastSync = new Map() // `${toolName}:${groupFolder}/${file}` → mtime
 
-const NANOCLAW_DB = NANOCLAW_DIR ? path.join(NANOCLAW_DIR, "store", "messages.db") : ""
-const NANOCLAW_POLL_MS = 5000
-const nanoclawLastSync = new Map() // chatJid → last message id synced
-
-function sqliteQuery(sql) {
+function sqliteQuery(dbPath, sql) {
   try {
-    const out = execFileSync("sqlite3", ["-json", NANOCLAW_DB, sql], { encoding: "utf8" })
+    const out = execFileSync("sqlite3", ["-json", dbPath, sql], { encoding: "utf8" })
     return JSON.parse(out.trim() || "[]")
   } catch (e) {
-    log(`⚠  sqlite3 error: ${e.stderr?.slice(0, 120) ?? e.message}`)
+    log(`⚠  sqlite3 error (${dbPath}): ${e.stderr?.slice(0, 120) ?? e.message}`)
     return []
   }
 }
@@ -193,16 +254,18 @@ function inferChannel(jid, channelFromDb) {
   return "whatsapp"
 }
 
-async function syncNanoclawChat(chatJid, chatName, channel) {
+async function syncClawChat(tool, chatJid, chatName, channel) {
   const messages = sqliteQuery(
+    tool.dbPath,
     `SELECT id, chat_jid, sender_name, content, timestamp, is_from_me, is_bot_message
      FROM messages WHERE chat_jid='${chatJid.replace(/'/g, "''")}' ORDER BY timestamp ASC`
   )
   if (!messages.length) return
 
   const lastId = messages[messages.length - 1].id
-  if (nanoclawLastSync.get(chatJid) === lastId) return // no change
-  nanoclawLastSync.set(chatJid, lastId)
+  const cacheKey = `${tool.name}:${chatJid}`
+  if (clawLastSync.get(cacheKey) === lastId) return // no change
+  clawLastSync.set(cacheKey, lastId)
 
   // Convert to SessionMessage format
   const sessionMsgs = messages.map(m => ({
@@ -225,13 +288,15 @@ async function syncNanoclawChat(chatJid, chatName, channel) {
     ? firstUserMsg.message.content.replace(/^\*\*[^*]+\*\*:\s*/, "").slice(0, 80)
     : null
 
-  const projectPath = `nanoclaw-${channel}`
+  const userMsgCount = sessionMsgs.filter(m => m.message.role === "user").length
+  const projectPath = `${tool.name}-${channel}`
   const encodedJid = encodeJid(chatJid)
 
   const meta = {
     id: encodedJid,
     projectPath,
     messageCount: messages.length,
+    userMessageCount: userMsgCount,
     lastActivity: messages[messages.length - 1].timestamp,
     isActive: true,
     firstName: firstText,
@@ -247,25 +312,17 @@ async function syncNanoclawChat(chatJid, chatName, channel) {
       body: JSON.stringify({ meta, msgs: sessionMsgs }),
     })
     if (resp.ok) {
-      log(`✓ nanoclaw [${channel}] ${chatName || chatJid} (${messages.length} msgs)`)
+      log(`✓ ${tool.name} [${channel}] ${chatName || chatJid} (${messages.length} msgs)`)
     } else {
-      log(`✗ nanoclaw sync failed ${resp.status}`)
+      log(`✗ ${tool.name} sync failed ${resp.status}`)
     }
   } catch (e) {
-    log(`✗ nanoclaw fetch error: ${e.message}`)
+    log(`✗ ${tool.name} fetch error: ${e.message}`)
   }
 }
 
-// ── Nanoclaw agent session syncer ─────────────────────────────────────────────
-// Each registered group has a persistent Claude Code session JSONL at:
-//   data/sessions/{folder}/.claude/projects/-workspace-group/{session_id}.jsonl
-// This contains thinking, tool calls, and full agent reasoning — much richer than the DB.
-
-const NANOCLAW_DATA_DIR = NANOCLAW_DIR ? path.join(NANOCLAW_DIR, "data", "sessions") : ""
-const nanoclawAgentLastSync = new Map() // group_folder → last mtime
-
-async function syncNanoclawAgentSession(groupFolder, chatJid, chatName, channel) {
-  const projectsDir = path.join(NANOCLAW_DATA_DIR, groupFolder, ".claude", "projects", "-workspace-group")
+async function syncClawAgentSession(tool, groupFolder, chatJid, chatName, channel) {
+  const projectsDir = path.join(tool.dataDir, groupFolder, ".claude", "projects", "-workspace-group")
   if (!fs.existsSync(projectsDir)) return
 
   const jsonlFiles = fs.readdirSync(projectsDir).filter(f => f.endsWith(".jsonl"))
@@ -278,16 +335,15 @@ async function syncNanoclawAgentSession(groupFolder, chatJid, chatName, channel)
 
   const filePath = path.join(projectsDir, sessionFile)
   const mtime = fs.statSync(filePath).mtimeMs
-  const cacheKey = `${groupFolder}/${sessionFile}`
-  if (nanoclawAgentLastSync.get(cacheKey) === mtime) return // no change
-  nanoclawAgentLastSync.set(cacheKey, mtime)
+  const cacheKey = `${tool.name}:${groupFolder}/${sessionFile}`
+  if (clawAgentLastSync.get(cacheKey) === mtime) return // no change
+  clawAgentLastSync.set(cacheKey, mtime)
 
   const messages = parseJsonl(filePath)
   if (!messages) return
 
   const sessionId = path.basename(sessionFile, ".jsonl")
 
-  // Extract first non-system user text as display name
   function firstUserText() {
     for (const m of messages) {
       if (m.type !== "user") continue
@@ -296,24 +352,25 @@ async function syncNanoclawAgentSession(groupFolder, chatJid, chatName, channel)
       const raw = typeof content === "string" ? content
         : Array.isArray(content) ? content.filter(b => b.type === "text").map(b => b.text).join(" ")
         : ""
-      // Strip XML context wrappers
       const stripped = raw
         .replace(/<[^>]+>[^<]*<\/[^>]+>/g, " ")
         .replace(/<[^>]+>/g, " ")
-        // Also strip <messages> XML block
         .replace(/\s+/g, " ").trim()
       if (stripped.length > 2) return stripped.slice(0, 80)
     }
     return null
   }
 
+  const conversationMsgs = messages.filter(m => m.type === "user" || m.type === "assistant")
+  const userMsgs = messages.filter(m => m.type === "user")
   const last = messages[messages.length - 1]
-  const projectPath = `nanoclaw-agent-${channel}`
+  const projectPath = `${tool.name}-agent-${channel}`
 
   const meta = {
     id: sessionId,
     projectPath,
-    messageCount: messages.filter(m => m.type === "user" || m.type === "assistant").length,
+    messageCount: conversationMsgs.length,
+    userMessageCount: userMsgs.length,
     lastActivity: last?.timestamp ?? new Date().toISOString(),
     gitBranch: last?.gitBranch,
     isActive: true,
@@ -330,23 +387,22 @@ async function syncNanoclawAgentSession(groupFolder, chatJid, chatName, channel)
       body: JSON.stringify({ meta, msgs: messages }),
     })
     if (resp.ok) {
-      log(`✓ nanoclaw-agent [${channel}] ${chatName || chatJid} session ${sessionId.slice(0, 8)} (${messages.length} msgs)`)
+      log(`✓ ${tool.name}-agent [${channel}] ${chatName || chatJid} session ${sessionId.slice(0, 8)} (${messages.length} msgs)`)
     } else {
-      log(`✗ nanoclaw-agent sync failed ${resp.status}`)
+      log(`✗ ${tool.name}-agent sync failed ${resp.status}`)
     }
   } catch (e) {
-    log(`✗ nanoclaw-agent fetch error: ${e.message}`)
+    log(`✗ ${tool.name}-agent fetch error: ${e.message}`)
   }
 }
 
-async function pollNanoclaw() {
-  if (!NANOCLAW_DB || !fs.existsSync(NANOCLAW_DB)) return
+async function pollClawTool(tool) {
+  if (!tool.dbPath || !fs.existsSync(tool.dbPath)) return
 
-  // Get all registered groups
-  const registeredGroups = sqliteQuery(`SELECT jid, name, folder FROM registered_groups`)
+  const registeredGroups = sqliteQuery(tool.dbPath, `SELECT jid, name, folder FROM registered_groups`)
 
-  // Sync flat chat messages from DB (for non-main chats)
   const chats = sqliteQuery(
+    tool.dbPath,
     `SELECT c.jid, c.name, c.channel
      FROM chats c
      WHERE EXISTS (SELECT 1 FROM messages m WHERE m.chat_jid = c.jid)
@@ -354,30 +410,58 @@ async function pollNanoclaw() {
   )
   for (const chat of chats) {
     const channel = inferChannel(chat.jid, chat.channel)
-    await syncNanoclawChat(chat.jid, chat.name, channel)
+    await syncClawChat(tool, chat.jid, chat.name, channel)
   }
 
-  // Sync rich agent sessions (thinking, tools) for registered groups
   for (const rg of registeredGroups) {
     const channel = inferChannel(rg.jid, null)
-    await syncNanoclawAgentSession(rg.folder, rg.jid, rg.name, channel)
+    await syncClawAgentSession(tool, rg.folder, rg.jid, rg.name, channel)
   }
 }
 
-function startNanoclawPoller() {
-  if (!NANOCLAW_DB || !fs.existsSync(NANOCLAW_DB)) {
-    if (NANOCLAW_DIR) log(`Nanoclaw DB not found at ${NANOCLAW_DB} — nanoclaw sync disabled`)
-    return
+function startClawPollers(activeTools) {
+  for (const tool of activeTools) {
+    if (!tool.dbPath || !fs.existsSync(tool.dbPath)) {
+      if (tool.dir) log(`${tool.name} DB not found at ${tool.dbPath} — ${tool.name} sync disabled`)
+      continue
+    }
+    log(`Polling ${tool.name} DB every ${CLAW_POLL_MS / 1000}s (${tool.dbPath})`)
+    setInterval(() => pollClawTool(tool).catch(() => {}), CLAW_POLL_MS)
   }
-  log(`Polling nanoclaw DB every ${NANOCLAW_POLL_MS / 1000}s`)
-  setInterval(pollNanoclaw, NANOCLAW_POLL_MS)
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 log(`Daemon starting — worker: ${WORKER_URL}`)
+
+// Read path overrides stored via the settings UI
+const storedSettings = await fetchSettings()
+const toolPaths = storedSettings.toolPaths ?? {}
+
+// Build active tool list from detection
+const activeTools = KNOWN_CLAW_TOOLS.map(name => {
+  const dir = resolveClawDir(name, toolPaths)
+  return {
+    name,
+    dir,
+    dbPath: dir ? path.join(dir, "store", "messages.db") : "",
+    dataDir: dir ? path.join(dir, "data", "sessions") : "",
+  }
+}).filter(t => t.dir)
+
+if (activeTools.length > 0) {
+  log(`Detected claw tools: ${activeTools.map(t => t.name).join(", ")}`)
+} else {
+  log("No claw tools detected (set NANOCLAW_DIR etc. to enable)")
+}
+
 await initialSync()
-await pollNanoclaw()
-startWatcher()
-startNanoclawPoller()
+
+// Initial poll for all active tools
+for (const tool of activeTools) {
+  await pollClawTool(tool).catch(() => {})
+}
+
+startWatcher(activeTools)
+startClawPollers(activeTools)
 log("Watching for changes… (Ctrl+C to stop)")

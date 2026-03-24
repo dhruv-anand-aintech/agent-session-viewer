@@ -9,12 +9,26 @@ interface SessionMeta {
   id: string
   projectPath: string
   messageCount: number
+  userMessageCount?: number
   lastActivity: string
   version?: string
   gitBranch?: string
   isActive: boolean
   firstName?: string
   customName?: string
+}
+
+function relativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime()
+  if (isNaN(diff)) return ""
+  const m = Math.floor(diff / 60000)
+  if (m < 1) return "now"
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h`
+  const d = Math.floor(h / 24)
+  if (d < 7) return `${d}d`
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" })
 }
 
 interface ProjectData {
@@ -143,15 +157,21 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
   const hasEarlier = win ? win.startIdx > 0 : false
   const hasLater = win ? win.startIdx + win.msgs.length < win.total : false
 
+  // Lock refs prevent the IntersectionObserver from firing a new load
+  // while a previous load is still being processed, avoiding runaway loops.
+  const loadingEarlierRef = useRef(false)
+  const loadingLaterRef = useRef(false)
+
   function loadEarlier() {
     if (!win || win.startIdx === 0) return
     const full = fullRef.current
     const newStart = Math.max(0, win.startIdx - adaptivePage(full, win.startIdx))
-    const newMsgs = full.slice(newStart, win.startIdx + win.msgs.length)
+    // Keep the existing bottom boundary — don't evict messages from the bottom end
+    const existingEnd = win.startIdx + win.msgs.length
+    const newMsgs = full.slice(newStart, existingEnd)
+    // Only trim from the bottom if we exceed MAX_DOM
     const trimmed = newMsgs.length > MAX_DOM ? newMsgs.slice(0, MAX_DOM) : newMsgs
-    const endIdx = newStart + trimmed.length
     setWin({ msgs: trimmed, startIdx: newStart, total: win.total })
-    return { prevHeight: 0, newStart, endIdx }
   }
 
   function loadLater() {
@@ -170,13 +190,13 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
     }
   }
 
-  return { win, loading, hasEarlier, hasLater, loadEarlier, loadLater, fullRef }
+  return { win, loading, hasEarlier, hasLater, loadEarlier, loadLater, fullRef, loadingEarlierRef, loadingLaterRef }
 }
 
 // ── Session pane ──────────────────────────────────────────────────────────────
 
-function SessionPane({ projectDir, sessionMeta }: { projectDir: string; sessionMeta: SessionMeta }) {
-  const { win, loading, hasEarlier, hasLater, loadEarlier, loadLater } =
+function SessionPane({ projectDir, sessionMeta, onBack }: { projectDir: string; sessionMeta: SessionMeta; onBack?: () => void }) {
+  const { win, loading, hasEarlier, hasLater, loadEarlier, loadLater, loadingEarlierRef, loadingLaterRef } =
     useWindowedMessages(projectDir, sessionMeta.id, sessionMeta.isActive)
   const bottomRef = useRef<HTMLDivElement>(null)
   const topSentinelRef = useRef<HTMLDivElement>(null)
@@ -185,15 +205,39 @@ function SessionPane({ projectDir, sessionMeta }: { projectDir: string; sessionM
   const [autoScroll, setAutoScroll] = useState(true)
   const [prettyMode, setPrettyMode] = useState(true)
   const pendingPrevNav = useRef(false)
+  const initialScrollDone = useRef(false)
 
+  // On first load, instantly jump to bottom (no smooth — avoids seeing the top flash)
   useEffect(() => {
-    if (autoScroll && win) bottomRef.current?.scrollIntoView({ behavior: "smooth" })
+    if (win && !initialScrollDone.current) {
+      initialScrollDone.current = true
+      const el = scrollRef.current
+      if (el) el.scrollTop = el.scrollHeight
+    }
+  }, [win])
+
+  // After initial load, smooth-follow new messages only if already at bottom.
+  // We skip the very first win update (handled by the instant-scroll above).
+  const prevWinLenRef = useRef(0)
+  useEffect(() => {
+    if (!win || !initialScrollDone.current) return
+    const newLen = win.msgs.length
+    if (autoScroll && newLen > prevWinLenRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" })
+    }
+    prevWinLenRef.current = newLen
   }, [win, autoScroll])
 
   const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget
     setAutoScroll(el.scrollHeight - el.scrollTop - el.clientHeight < 40)
   }, [])
+
+  function jumpToBottom() {
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+    setAutoScroll(true)
+  }
 
   function loadEarlierPreserveScroll() {
     const el = scrollRef.current
@@ -204,13 +248,20 @@ function SessionPane({ projectDir, sessionMeta }: { projectDir: string; sessionM
     })
   }
 
-  // IntersectionObserver: auto load earlier when top sentinel visible
+  // IntersectionObserver: auto load earlier when top sentinel visible.
+  // loadingEarlierRef prevents re-entrant loads while a load is in flight.
   useEffect(() => {
     if (!hasEarlier) return
     const sentinel = topSentinelRef.current
     if (!sentinel) return
     const obs = new IntersectionObserver(
-      ([entry]) => { if (entry.isIntersecting) loadEarlierPreserveScroll() },
+      ([entry]) => {
+        if (entry.isIntersecting && !loadingEarlierRef.current) {
+          loadingEarlierRef.current = true
+          loadEarlierPreserveScroll()
+          setTimeout(() => { loadingEarlierRef.current = false }, 400)
+        }
+      },
       { root: scrollRef.current, threshold: 0.1 }
     )
     obs.observe(sentinel)
@@ -218,13 +269,20 @@ function SessionPane({ projectDir, sessionMeta }: { projectDir: string; sessionM
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasEarlier, win?.startIdx])
 
-  // IntersectionObserver: auto load later when bottom sentinel visible (for evicted tail)
+  // IntersectionObserver: auto load later when bottom sentinel visible (for evicted tail).
+  // loadingLaterRef prevents re-entrant loads.
   useEffect(() => {
     if (!hasLater) return
     const sentinel = bottomSentinelRef.current
     if (!sentinel) return
     const obs = new IntersectionObserver(
-      ([entry]) => { if (entry.isIntersecting) loadLater() },
+      ([entry]) => {
+        if (entry.isIntersecting && !loadingLaterRef.current) {
+          loadingLaterRef.current = true
+          loadLater()
+          setTimeout(() => { loadingLaterRef.current = false }, 400)
+        }
+      },
       { root: scrollRef.current, threshold: 0.1 }
     )
     obs.observe(sentinel)
@@ -306,14 +364,18 @@ function SessionPane({ projectDir, sessionMeta }: { projectDir: string; sessionM
   return (
     <div className="session-pane">
       <div className="session-header">
+        {onBack && <button className="back-btn" onClick={onBack} title="Back to sessions">←</button>}
         <span className="session-id">{sessionMeta.id.slice(0, 8)}</span>
-        {sessionMeta.gitBranch && <span className="git-branch">⎇ {sessionMeta.gitBranch}</span>}
+        {sessionMeta.gitBranch && <span className="git-branch hide-mobile">⎇ {sessionMeta.gitBranch}</span>}
         {sessionMeta.isActive && <span className="active-badge">● Live</span>}
-        <span className="msg-count">{sessionMeta.messageCount} messages</span>
+        <span className="msg-count hide-mobile">{sessionMeta.messageCount} messages</span>
         <div className="user-nav">
           <button className="user-nav-btn" onClick={jumpToFirst} title="Jump to first message">⤒</button>
           <button className="user-nav-btn" onClick={() => navUserMsg("prev")} title="Previous user message">↑</button>
           <button className="user-nav-btn" onClick={() => navUserMsg("next")} title="Next user message">↓</button>
+          {!autoScroll && (
+            <button className="user-nav-btn jump-bottom-btn" onClick={jumpToBottom} title="Jump to bottom">⤓</button>
+          )}
         </div>
         <div className="mode-toggle">
           <button className={`mode-toggle-btn ${prettyMode ? "" : "active"}`} onClick={() => setPrettyMode(false)}>Raw</button>
@@ -411,24 +473,102 @@ function SessionItem({ s, projectPath, isSelected, onSelect }: {
         />
       ) : (
         <>
-          <span className="ss-name">{displayName}</span>
           {s.isActive && <span className="ss-live">●</span>}
-          <span className="ss-count">{s.messageCount}</span>
+          <span className="ss-name">{displayName}</span>
           <button className="ss-rename-btn" onClick={startEdit} title="Rename">✎</button>
+          <div className="ss-meta">
+            <span className="ss-count">
+              {s.messageCount}
+              {s.userMessageCount != null && <span className="ss-user-count"> · {s.userMessageCount}u</span>}
+            </span>
+            {s.lastActivity && <span className="ss-time">{relativeTime(s.lastActivity)}</span>}
+          </div>
         </>
       )}
     </div>
   )
 }
 
+// ── Settings modal ────────────────────────────────────────────────────────────
+
+const KNOWN_CLAW_TOOLS = [
+  "nanoclaw", "openclaw", "picoclaw", "femtoclaw", "attoclaw",
+  "kiloclaw", "megaclaw", "zeroclaw", "microclaw", "rawclaw",
+]
+
+function SettingsModal({ onClose }: { onClose: () => void }) {
+  const [toolPaths, setToolPaths] = useState<Record<string, string>>({})
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    fetch("/api/settings", { credentials: "include" })
+      .then(r => r.ok ? r.json() : {})
+      .then((s: Record<string, unknown>) => setToolPaths((s.toolPaths as Record<string, string>) ?? {}))
+      .catch(() => {})
+  }, [])
+
+  async function save() {
+    setSaving(true)
+    try {
+      await fetch("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ toolPaths }),
+      })
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="settings-overlay" onClick={onClose}>
+      <div className="settings-modal" onClick={e => e.stopPropagation()}>
+        <div className="settings-header">
+          <span className="settings-title">Settings</span>
+          <button className="settings-close" onClick={onClose}>✕</button>
+        </div>
+        <div className="settings-body">
+          <div className="settings-section-label">Claw Tool Paths</div>
+          <div className="settings-hint">
+            Leave blank to auto-detect (checks <code>~/toolname</code>).
+            Restart the daemon after changing paths.
+          </div>
+          {KNOWN_CLAW_TOOLS.map(name => (
+            <div key={name} className="settings-row">
+              <label className="settings-label">{name}</label>
+              <input
+                className="settings-input"
+                placeholder={`e.g. /Users/you/${name}`}
+                value={toolPaths[name] ?? ""}
+                onChange={e => setToolPaths(p => ({ ...p, [name]: e.target.value }))}
+              />
+            </div>
+          ))}
+        </div>
+        <div className="settings-footer">
+          <button className="settings-save-btn" onClick={save} disabled={saving}>
+            {saved ? "Saved!" : saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 
-function Sidebar({ projects, selected, onSelect, width, onDragStart }: {
+function Sidebar({ projects, selected, onSelect, width, onDragStart, mobileOpen, onMobileClose }: {
   projects: ProjectData[]
   selected: { project: string; session: string } | null
   onSelect: (p: string, s: string) => void
   width: number
   onDragStart: (e: React.PointerEvent) => void
+  mobileOpen: boolean
+  onMobileClose: () => void
 }) {
   // Default: flat (not grouped)
   const [grouped, setGrouped] = useState(() => localStorage.getItem("sidebarGrouped") === "true")
@@ -442,8 +582,15 @@ function Sidebar({ projects, selected, onSelect, width, onDragStart }: {
     .flatMap(p => p.sessions.map(s => ({ s, projectPath: p.path })))
     .sort((a, b) => String(b.s.lastActivity ?? "").localeCompare(String(a.s.lastActivity ?? "")))
 
+  function handleSelect(p: string, s: string) {
+    onSelect(p, s)
+    onMobileClose()
+  }
+
   return (
-    <nav className="sidebar" style={{ width }}>
+    <>
+      {mobileOpen && <div className="sidebar-backdrop" onClick={onMobileClose} />}
+    <nav className={`sidebar${mobileOpen ? " mobile-open" : ""}`} style={{ width }}>
       <div className="sidebar-title">
         Sessions
         <div className="sidebar-view-toggle">
@@ -461,7 +608,7 @@ function Sidebar({ projects, selected, onSelect, width, onDragStart }: {
                 s={s}
                 projectPath={project.path}
                 isSelected={selected?.session === s.id}
-                onSelect={() => onSelect(project.path, s.id)}
+                onSelect={() => handleSelect(project.path, s.id)}
               />
             ))}
           </div>
@@ -473,13 +620,14 @@ function Sidebar({ projects, selected, onSelect, width, onDragStart }: {
             s={s}
             projectPath={projectPath}
             isSelected={selected?.session === s.id}
-            onSelect={() => onSelect(projectPath, s.id)}
+            onSelect={() => handleSelect(projectPath, s.id)}
           />
         ))
       )}
       {projects.length === 0 && <div className="sidebar-empty">No sessions found</div>}
       <div className="sidebar-resize-handle" onPointerDown={onDragStart} />
     </nav>
+    </>
   )
 }
 
@@ -492,6 +640,8 @@ const SIDEBAR_DEFAULT = 220
 export default function App() {
   const { projects, connected } = useProjects()
   const [selected, setSelected] = useState<{ project: string; session: string } | null>(null)
+  const [showSettings, setShowSettings] = useState(false)
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = localStorage.getItem("sidebarWidth")
     return saved ? Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Number(saved))) : SIDEBAR_DEFAULT
@@ -535,16 +685,32 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
+        <button className="topbar-menu-btn" onClick={() => setMobileSidebarOpen(o => !o)} title="Sessions">☰</button>
         <span className="topbar-title">Claude Session Viewer</span>
         <span className={`conn-badge ${connected ? "conn-on" : "conn-off"}`}>
           {connected ? "● Live" : "○ Polling"}
         </span>
+        <button className="topbar-settings-btn" onClick={() => setShowSettings(true)} title="Settings">⚙</button>
       </header>
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
       <div className="main">
-        <Sidebar projects={projects} selected={selected} onSelect={(p, s) => setSelected({ project: p, session: s })} width={sidebarWidth} onDragStart={onDragStart} />
+        <Sidebar
+          projects={projects}
+          selected={selected}
+          onSelect={(p, s) => setSelected({ project: p, session: s })}
+          width={sidebarWidth}
+          onDragStart={onDragStart}
+          mobileOpen={mobileSidebarOpen}
+          onMobileClose={() => setMobileSidebarOpen(false)}
+        />
         <div className="content">
           {activeMeta && activeProject
-            ? <SessionPane key={activeMeta.id} projectDir={activeProject.path} sessionMeta={activeMeta} />
+            ? <SessionPane
+                key={activeMeta.id}
+                projectDir={activeProject.path}
+                sessionMeta={activeMeta}
+                onBack={() => setMobileSidebarOpen(true)}
+              />
             : <div className="empty-state">Select a session from the sidebar</div>}
         </div>
       </div>
