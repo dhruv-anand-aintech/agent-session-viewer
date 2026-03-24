@@ -402,7 +402,7 @@ function SessionPane({ projectDir, sessionMeta, onBack }: { projectDir: string; 
             </div>
           </div>
         )}
-        {visible.map((msg, i) => <Block key={msg.uuid ?? i} msg={msg} index={i} />)}
+        {visible.map((msg, i) => <Block key={msg.uuid ?? i} msg={msg} index={i} nextMsg={visible[i + 1]} />)}
         {!loading && hasLater && (
           <div>
             <div ref={bottomSentinelRef} style={{ height: 1 }} />

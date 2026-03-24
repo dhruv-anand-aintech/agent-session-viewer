@@ -110,6 +110,16 @@ function normProjectDir(absDir) {
   return absDir.replace(homedir(), "").replace(/\//g, "-").replace(/^-/, "")
 }
 
+/** Returns true only for genuine human-typed user turns (not tool-result-only messages) */
+function isRealUserMsg(m) {
+  if (m.type !== "user") return false
+  const content = m.message?.content
+  if (!content) return false
+  if (typeof content === "string") return content.trim().length > 0
+  if (!Array.isArray(content)) return false
+  return content.some(b => b.type !== "tool_result")
+}
+
 async function syncSession(filePath) {
   const sessionId = path.basename(filePath, ".jsonl")
   const projectAbsDir = path.dirname(filePath)
@@ -157,7 +167,7 @@ async function syncSession(filePath) {
 
   // Build lightweight meta
   const conversationMsgs = messages.filter(m => m.type === "user" || m.type === "assistant")
-  const userMsgs = messages.filter(m => m.type === "user")
+  const userMsgs = messages.filter(isRealUserMsg)
   const sidechainMsgs = messages.filter(m => m.isSidechain)
   const last = messages[messages.length - 1]
   const meta = {
@@ -398,7 +408,7 @@ async function syncClawAgentSession(tool, groupFolder, chatJid, chatName, channe
   }
 
   const conversationMsgs = messages.filter(m => m.type === "user" || m.type === "assistant")
-  const userMsgs = messages.filter(m => m.type === "user")
+  const userMsgs = messages.filter(isRealUserMsg)
   const sidechainMsgs = messages.filter(m => m.isSidechain)
   const last = messages[messages.length - 1]
   const projectPath = `${tool.name}-agent-${channel}`

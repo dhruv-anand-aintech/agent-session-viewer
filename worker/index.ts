@@ -84,7 +84,15 @@ export default {
       meta.isActive = true
       // Backfill userMessageCount from msgs if daemon didn't compute it
       if (meta.userMessageCount == null) {
-        meta.userMessageCount = (msgs as Array<{type?: string}>).filter(m => m.type === "user").length
+        meta.userMessageCount = (msgs as Array<{type?: string; message?: {content?: unknown}}>)
+          .filter(m => {
+            if (m.type !== "user") return false
+            const c = m.message?.content
+            if (!c) return false
+            if (typeof c === "string") return (c as string).trim().length > 0
+            if (!Array.isArray(c)) return false
+            return (c as Array<{type?: string}>).some(b => b.type !== "tool_result")
+          }).length
       }
       await env.SESSIONS_KV.put(`meta/${projectPath}/${sessionId}`, JSON.stringify(meta))
       await env.SESSIONS_KV.put(`msgs/${projectPath}/${sessionId}`, JSON.stringify(msgs))
