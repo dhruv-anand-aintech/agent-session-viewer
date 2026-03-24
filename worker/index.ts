@@ -104,6 +104,25 @@ export default {
       return new Response(JSON.stringify({ ok: true }), { headers: corsHeaders({ "Content-Type": "application/json" }) })
     }
 
+    // Settings — must be before the global cookie guard because daemon uses X-Auth-Pin
+    if (url.pathname === "/api/settings") {
+      if (request.method === "GET") {
+        if (!checkSyncAuth(request, env) && !checkAuth(request, env)) {
+          return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: corsHeaders({ "Content-Type": "application/json" }) })
+        }
+        const settings = await env.SESSIONS_KV.get("settings", "json") ?? {}
+        return Response.json(settings, { headers: corsHeaders() })
+      }
+      if (request.method === "PUT") {
+        if (!checkAuth(request, env)) {
+          return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: corsHeaders({ "Content-Type": "application/json" }) })
+        }
+        const body = await request.json() as Record<string, unknown>
+        await env.SESSIONS_KV.put("settings", JSON.stringify(body))
+        return Response.json({ ok: true }, { headers: corsHeaders() })
+      }
+    }
+
     if (url.pathname.startsWith("/api/") && !checkAuth(request, env)) {
       return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: new Headers({ "Content-Type": "application/json" }) })
     }
