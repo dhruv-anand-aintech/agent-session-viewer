@@ -137,6 +137,7 @@ async function syncSession(filePath) {
   // Build lightweight meta
   const conversationMsgs = messages.filter(m => m.type === "user" || m.type === "assistant")
   const userMsgs = messages.filter(m => m.type === "user")
+  const sidechainMsgs = messages.filter(m => m.isSidechain)
   const last = messages[messages.length - 1]
   const meta = {
     id: sessionId,
@@ -148,6 +149,7 @@ async function syncSession(filePath) {
     version: last?.version,
     isActive: true,
     firstName: firstUserText(),
+    isSidechain: conversationMsgs.length > 0 && sidechainMsgs.length / conversationMsgs.length > 0.5,
   }
 
   const payload = { meta, msgs: messages }
@@ -363,6 +365,7 @@ async function syncClawAgentSession(tool, groupFolder, chatJid, chatName, channe
 
   const conversationMsgs = messages.filter(m => m.type === "user" || m.type === "assistant")
   const userMsgs = messages.filter(m => m.type === "user")
+  const sidechainMsgs = messages.filter(m => m.isSidechain)
   const last = messages[messages.length - 1]
   const projectPath = `${tool.name}-agent-${channel}`
 
@@ -375,6 +378,7 @@ async function syncClawAgentSession(tool, groupFolder, chatJid, chatName, channe
     gitBranch: last?.gitBranch,
     isActive: true,
     firstName: chatName && chatName !== chatJid ? chatName : firstUserText(),
+    isSidechain: conversationMsgs.length > 0 && sidechainMsgs.length / conversationMsgs.length > 0.5,
     customName: null,
     channel,
     chatJid,

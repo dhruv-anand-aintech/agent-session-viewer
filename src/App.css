@@ -105,6 +105,9 @@ body { background: var(--bg-200); color: var(--text-100); height: 100vh; overflo
 
 .ss-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; font-size: 13px; line-height: 1.35; }
 .ss-live { color: var(--success); font-size: 8px; flex-shrink: 0; }
+.ss-subagent-icon { font-size: 11px; color: hsl(263, 50%, 65%); flex-shrink: 0; }
+.sidebar-session.sidechain { opacity: 0.65; padding-left: 22px; }
+.sidebar-session.sidechain.active { opacity: 1; }
 .ss-meta { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
 .ss-count { font-size: 10px; color: var(--text-400); }
 .ss-time { font-size: 10px; color: var(--text-400); opacity: 0.7; }

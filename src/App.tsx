@@ -14,8 +14,14 @@ interface SessionMeta {
   version?: string
   gitBranch?: string
   isActive: boolean
+  isSidechain?: boolean
   firstName?: string
   customName?: string
+}
+
+function isRecentlyActive(iso: string): boolean {
+  const diff = Date.now() - new Date(iso).getTime()
+  return !isNaN(diff) && diff < 5 * 60 * 1000 // active within last 5 minutes
 }
 
 function relativeTime(iso: string): string {
@@ -197,7 +203,7 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
 
 function SessionPane({ projectDir, sessionMeta, onBack }: { projectDir: string; sessionMeta: SessionMeta; onBack?: () => void }) {
   const { win, loading, hasEarlier, hasLater, loadEarlier, loadLater, loadingEarlierRef, loadingLaterRef } =
-    useWindowedMessages(projectDir, sessionMeta.id, sessionMeta.isActive)
+    useWindowedMessages(projectDir, sessionMeta.id, isRecentlyActive(sessionMeta.lastActivity))
   const bottomRef = useRef<HTMLDivElement>(null)
   const topSentinelRef = useRef<HTMLDivElement>(null)
   const bottomSentinelRef = useRef<HTMLDivElement>(null)
@@ -367,7 +373,7 @@ function SessionPane({ projectDir, sessionMeta, onBack }: { projectDir: string; 
         {onBack && <button className="back-btn" onClick={onBack} title="Back to sessions">←</button>}
         <span className="session-id">{sessionMeta.id.slice(0, 8)}</span>
         {sessionMeta.gitBranch && <span className="git-branch hide-mobile">⎇ {sessionMeta.gitBranch}</span>}
-        {sessionMeta.isActive && <span className="active-badge">● Live</span>}
+        {isRecentlyActive(sessionMeta.lastActivity) && <span className="active-badge">● Live</span>}
         <span className="msg-count hide-mobile">{sessionMeta.messageCount} messages</span>
         <div className="user-nav">
           <button className="user-nav-btn" onClick={jumpToFirst} title="Jump to first message">⤒</button>
@@ -456,7 +462,7 @@ function SessionItem({ s, projectPath, isSelected, onSelect }: {
 
   return (
     <div
-      className={`sidebar-session ${isSelected ? "active" : ""}`}
+      className={`sidebar-session ${isSelected ? "active" : ""} ${s.isSidechain ? "sidechain" : ""}`}
       onClick={onSelect}
       title={tooltip}
     >
@@ -473,7 +479,8 @@ function SessionItem({ s, projectPath, isSelected, onSelect }: {
         />
       ) : (
         <>
-          {s.isActive && <span className="ss-live">●</span>}
+          {isRecentlyActive(s.lastActivity) && <span className="ss-live">●</span>}
+          {s.isSidechain && <span className="ss-subagent-icon" title="Sub-agent session">⤷</span>}
           <span className="ss-name">{displayName}</span>
           <button className="ss-rename-btn" onClick={startEdit} title="Rename">✎</button>
           <div className="ss-meta">
