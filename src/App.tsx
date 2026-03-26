@@ -44,6 +44,21 @@ interface ProjectData {
   sessions: SessionMeta[]
 }
 
+interface Capabilities {
+  openPath: boolean
+}
+
+function useCapabilities(): Capabilities {
+  const [caps, setCaps] = useState<Capabilities>({ openPath: false })
+  useEffect(() => {
+    fetch("/api/capabilities")
+      .then(r => r.ok ? r.json() : {})
+      .then(c => setCaps({ openPath: !!c.openPath }))
+      .catch(() => {})
+  }, [])
+  return caps
+}
+
 function useProjects() {
   const [projects, setProjects] = useState<ProjectData[]>([])
   const [connected, setConnected] = useState(false)
@@ -202,7 +217,7 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
 
 // ── Session pane ──────────────────────────────────────────────────────────────
 
-function SessionPane({ projectDir, sessionMeta, onBack }: { projectDir: string; sessionMeta: SessionMeta; onBack?: () => void }) {
+function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projectDir: string; sessionMeta: SessionMeta; onBack?: () => void; capabilities: Capabilities }) {
   const { win, loading, hasEarlier, hasLater, loadEarlier, loadLater, loadingEarlierRef, loadingLaterRef } =
     useWindowedMessages(projectDir, sessionMeta.id, isRecentlyActive(sessionMeta.lastActivity))
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -373,6 +388,15 @@ function SessionPane({ projectDir, sessionMeta, onBack }: { projectDir: string; 
       <div className="session-header">
         {onBack && <button className="back-btn" onClick={onBack} title="Back to sessions">←</button>}
         <span className="session-id">{sessionMeta.id.slice(0, 8)}</span>
+        {capabilities.openPath && (
+          <button
+            className="session-path-btn hide-mobile"
+            onClick={() => fetch(`/api/open-path?project=${encodeURIComponent(projectDir)}&session=${sessionMeta.id}`).catch(() => {})}
+            title={`~/.claude/projects/${projectDir}/${sessionMeta.id}.jsonl`}
+          >
+            📄 {sessionMeta.id.slice(0, 8)}.jsonl
+          </button>
+        )}
         {sessionMeta.gitBranch && <span className="git-branch hide-mobile">⎇ {sessionMeta.gitBranch}</span>}
         {isRecentlyActive(sessionMeta.lastActivity) && <span className="active-badge">● Live</span>}
         <span className="msg-count hide-mobile">{sessionMeta.messageCount} messages</span>
@@ -433,10 +457,11 @@ function SessionItem({ s, projectPath, isSelected, onSelect }: {
   const inputRef = useRef<HTMLInputElement>(null)
 
   const displayName = s.customName || s.firstName || s.id.slice(0, 8)
-  // Tooltip: show full first message on hover, fallback to session ID
+  // Tooltip: show full display name, agent type, and session ID
   const tooltip = [
+    displayName,
     s.agentType ? `[${s.agentType}]` : null,
-    s.firstName,
+    s.firstName && s.firstName !== displayName ? s.firstName : null,
     s.id,
   ].filter(Boolean).join("\n\n")
 
@@ -469,7 +494,7 @@ function SessionItem({ s, projectPath, isSelected, onSelect }: {
     <div
       className={`sidebar-session ${isSelected ? "active" : ""} ${s.isSidechain ? "sidechain" : ""}`}
       onClick={onSelect}
-      title={tooltip}
+      data-tooltip={tooltip}
     >
       {editing ? (
         <input
@@ -662,6 +687,7 @@ const SIDEBAR_DEFAULT = 220
 
 export default function App() {
   const { projects, connected } = useProjects()
+  const capabilities = useCapabilities()
   const [selected, setSelected] = useState<{ project: string; session: string } | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
@@ -733,6 +759,7 @@ export default function App() {
                 projectDir={activeProject.path}
                 sessionMeta={activeMeta}
                 onBack={() => setMobileSidebarOpen(true)}
+                capabilities={capabilities}
               />
             : <div className="empty-state">Select a session from the sidebar</div>}
         </div>

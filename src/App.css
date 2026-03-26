@@ -99,6 +99,15 @@ body { background: var(--bg-200); color: var(--text-100); height: 100vh; overflo
   transition: background 0.1s, color 0.1s;
   position: relative;
 }
+.sidebar-session[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute; bottom: 100%; left: 0; margin-bottom: 4px;
+  background: var(--bg-000); color: var(--text-100);
+  padding: 4px 8px; border-radius: 4px; border: 0.5px solid var(--border-100);
+  font-size: 11px; white-space: pre-wrap; word-break: break-word;
+  max-width: 200px; z-index: 1000;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
 .sidebar-session:hover { background: hsla(255,100%,100%,0.04); color: var(--text-100); }
 .sidebar-session:hover .ss-rename-btn { opacity: 1; }
 .sidebar-session.active { color: var(--text-100); background: hsla(255,100%,100%,0.07); }
@@ -138,6 +147,8 @@ body { background: var(--bg-200); color: var(--text-100); height: 100vh; overflo
   background: var(--bg-100);
 }
 .session-id { font-family: var(--font-mono); font-size: 11px; color: var(--text-400); letter-spacing: 0.04em; }
+.session-path-btn { background: none; border: none; color: var(--text-400); font-size: 11px; cursor: pointer; padding: 2px 6px; border-radius: 4px; transition: all 0.12s; }
+.session-path-btn:hover { background: hsla(255,100%,100%,0.06); color: var(--text-200); }
 .git-branch { font-size: 11px; color: var(--text-400); }
 .active-badge { font-size: 10px; color: var(--success); }
 .msg-count { font-size: 11px; color: var(--text-400); margin-left: auto; }
@@ -150,7 +161,7 @@ body { background: var(--bg-200); color: var(--text-100); height: 100vh; overflo
 .jump-bottom-btn { color: var(--accent) !important; }
 
 /* ── Scroll area ──────────────────────────────────────────────────────────── */
-.messages-scroll { flex: 1; overflow-y: auto; padding: 8px 0; }
+.messages-scroll { flex: 1; overflow-y: auto; padding: 28px 0 8px; }
 .messages-scroll::-webkit-scrollbar { width: 4px; }
 .messages-scroll::-webkit-scrollbar-track { background: transparent; }
 .messages-scroll::-webkit-scrollbar-thumb { background: var(--border-100); border-radius: 2px; }

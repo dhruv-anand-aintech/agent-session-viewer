@@ -254,14 +254,15 @@ function buildResultMap(content: ContentBlock[]): Map<string, string> {
   return map
 }
 
-function AssistantMessage({ content, nextMsg }: { content: string | ContentBlock[]; nextMsg?: SessionMessage }) {
+function AssistantMessage({ content, nextMsg, timestamp }: { content: string | ContentBlock[]; nextMsg?: SessionMessage; timestamp?: string }) {
   // Tool results live in the NEXT user message — merge both sources
   const nextContent = Array.isArray(nextMsg?.message?.content) ? nextMsg.message.content as ContentBlock[] : []
 
   if (typeof content === "string") {
     const len = charCount(content)
     return (
-      <div className="pp-assistant-row">
+      <div className="pp-assistant-row" style={{ position: "relative" }}>
+        {timestamp && <span className="pp-timestamp">{timestamp}</span>}
         <CollapsibleMessage charLen={len}>
           <div className="pp-assistant-text"><MarkdownContent text={content} /></div>
         </CollapsibleMessage>
@@ -275,7 +276,8 @@ function AssistantMessage({ content, nextMsg }: { content: string | ContentBlock
   const totalLen = blocks.reduce((s, b) => s + (b.type === "text" ? (b.text?.length ?? 0) : 0), 0)
 
   return (
-    <div className="pp-assistant-row">
+    <div className="pp-assistant-row" style={{ position: "relative" }}>
+      {timestamp && <span className="pp-timestamp">{timestamp}</span>}
       <CollapsibleMessage charLen={totalLen}>
         <div className="pp-assistant-bubble">
           {blocks.map((b, i) => {
@@ -296,7 +298,7 @@ function parseSender(text: string): { sender: string | null; body: string } {
   return m ? { sender: m[1], body: m[2] } : { sender: null, body: text }
 }
 
-function UserMessage({ content }: { content: string | ContentBlock[] }) {
+function UserMessage({ content, timestamp }: { content: string | ContentBlock[]; timestamp?: string }) {
   const texts: string[] = []
 
   if (typeof content === "string") {
@@ -313,7 +315,8 @@ function UserMessage({ content }: { content: string | ContentBlock[] }) {
   const { sender, body } = parseSender(combined)
 
   return (
-    <div className="pp-user-row" data-user-turn="true">
+    <div className="pp-user-row" data-user-turn="true" style={{ position: "relative" }}>
+      {timestamp && <span className="pp-timestamp">{timestamp}</span>}
       <CollapsibleMessage charLen={combined.length}>
         <div className="pp-user-bubble">
           {sender && <span className="pp-sender-chip">{sender}</span>}
@@ -332,9 +335,12 @@ export default function PrettyMessageBlock({ msg, nextMsg }: { msg: SessionMessa
   const role = msg.message?.role
   if (!role || !msg.message) return null
 
+  const ts = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ""
+
   if (msg.isSidechain) {
     return (
-      <div className="pp-subagent-row">
+      <div className="pp-subagent-row" style={{ position: "relative" }}>
+        {ts && <span className="pp-timestamp">{ts}</span>}
         <div className="pp-subagent-label">⤷ sub-agent</div>
         <div className="pp-subagent-body">
           {role === "user"
@@ -345,8 +351,8 @@ export default function PrettyMessageBlock({ msg, nextMsg }: { msg: SessionMessa
     )
   }
 
-  if (role === "user") return <UserMessage content={msg.message.content} />
-  return <AssistantMessage content={msg.message.content} nextMsg={nextMsg} />
+  if (role === "user") return <UserMessage content={msg.message.content} timestamp={ts} />
+  return <AssistantMessage content={msg.message.content} nextMsg={nextMsg} timestamp={ts} />
 }
 
 export function charCountMsg(msg: SessionMessage): number {
