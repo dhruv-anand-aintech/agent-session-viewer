@@ -5,6 +5,10 @@
   display: flex;
   justify-content: flex-end;
   padding: 4px 16px 4px;
+  transition: background 0.1s;
+}
+.pp-user-row:hover {
+  background: hsla(255, 100%, 100%, 0.02);
 }
 .pp-user-bubble {
   max-width: 85%;
@@ -22,6 +26,10 @@
 .pp-assistant-row {
   display: flex;
   padding: 4px 16px 4px;
+  transition: background 0.1s;
+}
+.pp-assistant-row:hover {
+  background: hsla(255, 100%, 100%, 0.02);
 }
 .pp-assistant-bubble {
   display: flex;
@@ -38,6 +46,10 @@
   border-left: 2px solid hsla(263, 50%, 60%, 0.35);
   padding-left: 10px;
   opacity: 0.85;
+  transition: background 0.1s;
+}
+.pp-subagent-row:hover {
+  background: hsla(255, 100%, 100%, 0.02);
 }
 .pp-subagent-label {
   font-size: 10px; font-weight: 600; letter-spacing: 0.05em;
@@ -49,6 +61,20 @@
 
 /* ── Turn wrapper (groups user+assistant into conversation turn) ──────────── */
 .pp-turn { padding: 8px 0 8px; }
+
+/* ── Timestamp overlay ──────────────────────────────────────────────────── */
+.pp-timestamp {
+  position: absolute; top: -20px; left: 16px;
+  font-size: 10px; color: var(--text-400);
+  display: none; font-family: var(--font-mono); pointer-events: none;
+  background: var(--bg-100); padding: 2px 6px; border-radius: 3px;
+}
+.pp-user-row:hover .pp-timestamp,
+.pp-assistant-row:hover .pp-timestamp,
+.pp-subagent-row:hover .pp-timestamp {
+  display: block;
+  border: 0.5px solid var(--border-100);
+}
 
 /* ── Text & paths ────────────────────────────────────────────────────────── */
 .pp-text { margin: 0; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
@@ -162,14 +188,14 @@
 .pp-bash-cmd { font-family: var(--font-mono); font-size: 12px; color: hsl(140, 45%, 62%); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
 .pp-bash-body { border-top: 0.5px solid hsla(140, 40%, 30%, 0.15); background: hsla(140, 30%, 3%, 0.95); }
 .pp-bash-full-cmd { padding: 8px 12px; font-family: var(--font-mono); font-size: 12px; color: hsl(140, 45%, 62%); white-space: pre-wrap; word-break: break-word; border-bottom: 0.5px solid hsla(140, 40%, 30%, 0.15); margin: 0; }
-.pp-bash-result { padding: 8px 12px; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-200); white-space: pre-wrap; word-break: break-word; max-height: 280px; overflow-y: auto; line-height: 1.45; margin: 0; }
+.pp-bash-result { padding: 8px 12px; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-200); white-space: pre-wrap; word-break: break-word; line-height: 1.45; margin: 0; }
 
 /* ── File read ───────────────────────────────────────────────────────────── */
 .pp-file-read { border-color: hsla(210, 50%, 40%, 0.15); }
 .pp-file-read .pp-tool-header { background: hsla(210, 50%, 5%, 0.9); }
 .pp-file-name { font-weight: 600; color: hsl(210, 65%, 68%); font-family: var(--font-mono); font-size: 12px; }
 .pp-file-path-muted { font-size: 11px; color: var(--text-400); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
-.pp-file-body { padding: 8px 12px; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-200); background: var(--bg-300); white-space: pre-wrap; word-break: break-word; max-height: 280px; overflow-y: auto; line-height: 1.45; border-top: 0.5px solid var(--border-100); margin: 0; }
+.pp-file-body { padding: 8px 12px; font-family: var(--font-mono); font-size: 11.5px; color: var(--text-200); background: var(--bg-300); white-space: pre-wrap; word-break: break-word; line-height: 1.45; border-top: 0.5px solid var(--border-100); margin: 0; }
 
 /* ── File write ──────────────────────────────────────────────────────────── */
 .pp-file-write { border-color: hsla(40, 60%, 50%, 0.15); }
@@ -181,8 +207,8 @@
 .pp-file-edit .pp-tool-header { background: hsla(20, 45%, 5%, 0.9); }
 .pp-file-edit .pp-file-name { color: hsl(20, 65%, 65%); }
 .pp-diff-body { border-top: 0.5px solid var(--border-100); }
-.pp-diff-del { padding: 6px 12px; font-family: var(--font-mono); font-size: 11px; background: hsla(0, 60%, 7%, 0.9); color: hsl(0, 55%, 68%); white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow-y: auto; margin: 0; }
-.pp-diff-add { padding: 6px 12px; font-family: var(--font-mono); font-size: 11px; background: hsla(140, 50%, 4%, 0.9); color: hsl(140, 45%, 62%); white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow-y: auto; margin: 0; }
+.pp-diff-del { padding: 6px 12px; font-family: var(--font-mono); font-size: 11px; background: hsla(0, 60%, 7%, 0.9); color: hsl(0, 55%, 68%); white-space: pre-wrap; word-break: break-word; margin: 0; }
+.pp-diff-add { padding: 6px 12px; font-family: var(--font-mono); font-size: 11px; background: hsla(140, 50%, 4%, 0.9); color: hsl(140, 45%, 62%); white-space: pre-wrap; word-break: break-word; margin: 0; }
 
 /* ── Search / Web / Agent / MCP ──────────────────────────────────────────── */
 .pp-search { border-color: hsla(263, 40%, 50%, 0.15); }

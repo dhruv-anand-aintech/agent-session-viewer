@@ -22,6 +22,7 @@ import path from "node:path"
 import { watch } from "node:fs"
 import { homedir } from "node:os"
 import { execFileSync } from "node:child_process"
+import { stripXml } from "../shared-utils.mjs"
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -42,9 +43,18 @@ if (!AUTH_PIN) {
 }
 
 // ── Known claw tools ──────────────────────────────────────────────────────────
-// Each tool is assumed to share the same directory structure as nanoclaw:
+// Two storage layouts are supported:
+//
+//  "nanoclaw-style" (default):
 //   {dir}/store/messages.db   — SQLite chat database
-//   {dir}/data/sessions/      — JSONL agent session files
+//   {dir}/data/sessions/      — JSONL agent session files (Claude Code format)
+//
+//  "picoclaw-style":
+//   No SQLite DB — chats are stored as JSONL directly
+//   {dir}/workspace/sessions/ — JSONL session files ({key}.jsonl + {key}.meta.json)
+//   Message format per line: {role, content, tool_calls?, tool_call_id?}
+//   Meta format: {key, summary, skip, count, created_at, updated_at}
+//   Session key encodes channel: "telegram:123456789" (sanitized to filename)
 //
 // Detection order (first match wins):
 //   1. CLI flag   --{name}
@@ -64,6 +74,9 @@ const KNOWN_CLAW_TOOLS = [
   "microclaw",
   "rawclaw",
 ]
+
+// Tools that use picoclaw's workspace/sessions layout instead of nanoclaw's store/data layout.
+const PICOCLAW_STYLE_TOOLS = new Set(["picoclaw"])
 
 function autoDetectDir(name) {
   const candidates = [
@@ -155,11 +168,7 @@ async function syncSession(filePath) {
       const raw = typeof content === "string" ? content
         : Array.isArray(content) ? content.filter(b => b.type === "text").map(b => b.text).join(" ")
         : ""
-      // Strip XML tag contents (system-reminder, local-command-stdout, etc.)
-      const stripped = raw
-        .replace(/<[^>]+>[^<]*<\/[^>]+>/g, " ")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/\s+/g, " ").trim()
+      const stripped = stripXml(raw)
       if (stripped.length > 2) return stripped.slice(0, 80)
     }
     return null
@@ -398,10 +407,7 @@ async function syncClawAgentSession(tool, groupFolder, chatJid, chatName, channe
       const raw = typeof content === "string" ? content
         : Array.isArray(content) ? content.filter(b => b.type === "text").map(b => b.text).join(" ")
         : ""
-      const stripped = raw
-        .replace(/<[^>]+>[^<]*<\/[^>]+>/g, " ")
-        .replace(/<[^>]+>/g, " ")
-        .replace(/\s+/g, " ").trim()
+      const stripped = stripXml(raw)
       if (stripped.length > 2) return stripped.slice(0, 80)
     }
     return null
@@ -478,6 +484,138 @@ function startClawPollers(activeTools) {
   }
 }
 
+// ── PicoClaw-style session syncer ─────────────────────────────────────────────
+// PicoClaw stores sessions as {sanitized_key}.jsonl + {sanitized_key}.meta.json
+// under {dir}/workspace/sessions/. The session key encodes the channel and chat
+// ID separated by a colon, e.g. "telegram:123456789".
+
+const picoClawLastSync = new Map() // `${toolName}:${basename}` → mtime
+
+function parsePicoClawMeta(metaPath) {
+  try { return JSON.parse(fs.readFileSync(metaPath, "utf8")) } catch { return null }
+}
+
+function parsePicoClawJsonl(jsonlPath) {
+  try {
+    return fs.readFileSync(jsonlPath, "utf8")
+      .split("\n").filter(Boolean)
+      .flatMap(line => { try { return [JSON.parse(line)] } catch { return [] } })
+  } catch { return [] }
+}
+
+function picoClawChannelFromKey(key) {
+  // Key format before sanitization: "telegram:123456789", "discord:user123", etc.
+  // After sanitization colons become underscores: "telegram_123456789"
+  // Try to extract channel from the original key stored in meta, or fall back to
+  // parsing the filename prefix.
+  if (!key) return "chat"
+  const colon = key.indexOf(":")
+  if (colon > 0) return key.slice(0, colon)
+  const underscore = key.indexOf("_")
+  if (underscore > 0) {
+    const prefix = key.slice(0, underscore)
+    if (["telegram", "discord", "qq", "dingtalk", "line", "whatsapp"].includes(prefix)) return prefix
+  }
+  return "chat"
+}
+
+async function syncPicoClawSession(tool, jsonlPath) {
+  const basename = path.basename(jsonlPath, ".jsonl")
+  const metaPath = jsonlPath.replace(".jsonl", ".meta.json")
+
+  const stat = fs.statSync(jsonlPath)
+  const cacheKey = `${tool.name}:${basename}`
+  if (picoClawLastSync.get(cacheKey) === stat.mtimeMs) return
+  picoClawLastSync.set(cacheKey, stat.mtimeMs)
+
+  const meta = parsePicoClawMeta(metaPath)
+  const rawMsgs = parsePicoClawJsonl(jsonlPath)
+  if (!rawMsgs.length) return
+
+  // Original unsanitized key is stored in meta (e.g. "telegram:123456789").
+  // Fall back to basename if meta is missing.
+  const sessionKey = meta?.key ?? basename
+  const channel = picoClawChannelFromKey(sessionKey)
+  const chatId = sessionKey.includes(":") ? sessionKey.split(":").slice(1).join(":") : sessionKey
+
+  // Apply skip offset from meta (logically truncated messages)
+  const skip = meta?.skip ?? 0
+  const activeMsgs = rawMsgs.slice(skip)
+
+  // Convert picoclaw {role, content} format to session viewer format.
+  // Skip "tool" and "system" role messages — they are internal plumbing.
+  const converted = activeMsgs
+    .filter(m => m.role === "user" || m.role === "assistant")
+    .map((m, i) => ({
+      type: m.role,
+      message: { role: m.role, content: m.content ?? "" },
+      sessionId: basename,
+      timestamp: meta?.updated_at ?? stat.mtime.toISOString(),
+      uuid: `${basename}-${i}`,
+      parentUuid: null,
+      isSidechain: false,
+    }))
+
+  if (!converted.length) return
+
+  const userCount = converted.filter(m => m.type === "user").length
+  const firstUserText = converted.find(m => m.type === "user")?.message?.content?.slice(0, 80) ?? null
+  const projectPath = `${tool.name}-${channel}`
+
+  const sessionMeta = {
+    id: basename,
+    projectPath,
+    messageCount: converted.length,
+    userMessageCount: userCount,
+    lastActivity: meta?.updated_at ?? stat.mtime.toISOString(),
+    isActive: true,
+    firstName: firstUserText,
+    customName: null,
+    channel,
+    chatJid: chatId,
+  }
+
+  try {
+    const resp = await fetch(`${WORKER_URL}/api/sync`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "X-Auth-Pin": AUTH_PIN },
+      body: JSON.stringify({ meta: sessionMeta, msgs: converted }),
+    })
+    if (resp.ok) {
+      log(`✓ ${tool.name} [${channel}] ${chatId} (${converted.length} msgs)`)
+    } else {
+      log(`✗ ${tool.name} sync failed ${resp.status}`)
+    }
+  } catch (e) {
+    log(`✗ ${tool.name} fetch error: ${e.message}`)
+  }
+}
+
+async function initialSyncPicoClawTool(tool) {
+  const sessionsDir = tool.dataDir
+  if (!fs.existsSync(sessionsDir)) return
+  const files = fs.readdirSync(sessionsDir).filter(f => f.endsWith(".jsonl"))
+  for (const f of files) {
+    await syncPicoClawSession(tool, path.join(sessionsDir, f)).catch(() => {})
+  }
+  log(`${tool.name}: synced ${files.length} session(s) from ${sessionsDir}`)
+}
+
+function startPicoClawWatcher(tool) {
+  const sessionsDir = tool.dataDir
+  if (!fs.existsSync(sessionsDir)) {
+    log(`${tool.name} sessions dir not found: ${sessionsDir} — ${tool.name} sync disabled`)
+    return
+  }
+  watch(sessionsDir, { recursive: false }, (_event, filename) => {
+    if (!filename?.endsWith(".jsonl")) return
+    const full = path.join(sessionsDir, filename)
+    if (!fs.existsSync(full)) return
+    syncPicoClawSession(tool, full).catch(() => {})
+  })
+  log(`Watching ${tool.name} sessions at ${sessionsDir}`)
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 log(`Daemon starting — worker: ${WORKER_URL}`)
@@ -489,13 +627,20 @@ const toolPaths = storedSettings.toolPaths ?? {}
 // Build active tool list from detection
 const activeTools = KNOWN_CLAW_TOOLS.map(name => {
   const dir = resolveClawDir(name, toolPaths)
+  if (!dir) return null
+  const isPicoStyle = PICOCLAW_STYLE_TOOLS.has(name)
   return {
     name,
     dir,
-    dbPath: dir ? path.join(dir, "store", "messages.db") : "",
-    dataDir: dir ? path.join(dir, "data", "sessions") : "",
+    isPicoStyle,
+    // nanoclaw-style paths
+    dbPath: isPicoStyle ? "" : path.join(dir, "store", "messages.db"),
+    // nanoclaw-style: data/sessions  |  picoclaw-style: workspace/sessions
+    dataDir: isPicoStyle
+      ? path.join(dir, "workspace", "sessions")
+      : path.join(dir, "data", "sessions"),
   }
-}).filter(t => t.dir)
+}).filter(Boolean)
 
 if (activeTools.length > 0) {
   log(`Detected claw tools: ${activeTools.map(t => t.name).join(", ")}`)
@@ -505,11 +650,21 @@ if (activeTools.length > 0) {
 
 await initialSync()
 
-// Initial poll for all active tools
+// Initial poll / sync for all active tools
 for (const tool of activeTools) {
-  await pollClawTool(tool).catch(() => {})
+  if (tool.isPicoStyle) {
+    await initialSyncPicoClawTool(tool).catch(() => {})
+  } else {
+    await pollClawTool(tool).catch(() => {})
+  }
 }
 
-startWatcher(activeTools)
-startClawPollers(activeTools)
+// Start watchers and pollers, routing by tool type
+const nanocStyleTools = activeTools.filter(t => !t.isPicoStyle)
+const picoStyleTools  = activeTools.filter(t => t.isPicoStyle)
+
+startWatcher(nanocStyleTools)
+startClawPollers(nanocStyleTools)
+for (const tool of picoStyleTools) startPicoClawWatcher(tool)
+
 log("Watching for changes… (Ctrl+C to stop)")
