@@ -52,8 +52,14 @@ function useCapabilities(): Capabilities {
   const [caps, setCaps] = useState<Capabilities>({ openPath: false })
   useEffect(() => {
     fetch("/api/capabilities")
-      .then(r => r.ok ? r.json() : {})
-      .then(c => setCaps({ openPath: !!c.openPath }))
+      .then(r => (r.ok ? r.json() : {}))
+      .then((c: unknown) => {
+        const o =
+          c && typeof c === "object" && c !== null
+            ? (c as Record<string, unknown>)
+            : {}
+        setCaps({ openPath: !!o.openPath })
+      })
       .catch(() => {})
   }, [])
   return caps
