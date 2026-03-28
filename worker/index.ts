@@ -19,24 +19,37 @@ function corsHeaders(extra: Record<string, string> = {}): Headers {
   return new Headers({ "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, PUT, OPTIONS", ...extra })
 }
 
-async function getProjects(env: Env) {
+async function getProjects(env: Env): Promise<{ projects: ReturnType<typeof buildProjects>; total: number }> {
   const list = await env.SESSIONS_KV.list({ prefix: "meta/" })
-  const map: Record<string, unknown[]> = {}
+  const total = list.keys.length
 
-  for (const key of list.keys) {
-    const parts = key.name.split("/")
-    if (parts.length < 3) continue
-    const projectPath = decodeURIComponent(parts[1])
-    const data = await env.SESSIONS_KV.get(key.name, "json")
-    if (!data) continue
-    if (!map[projectPath]) map[projectPath] = []
-    map[projectPath].push(data)
+  const entries = await Promise.all(
+    list.keys.map(async key => {
+      const parts = key.name.split("/")
+      if (parts.length < 3) return null
+      const data = await env.SESSIONS_KV.get(key.name, "json")
+      if (!data) return null
+      return { projectPath: decodeURIComponent(parts[1]), data }
+    })
+  )
+
+  const map: Record<string, unknown[]> = {}
+  for (const entry of entries) {
+    if (!entry) continue
+    if (!map[entry.projectPath]) map[entry.projectPath] = []
+    map[entry.projectPath].push(entry.data)
   }
 
+  return { total, projects: buildProjects(map) }
+}
+
+function buildProjects(map: Record<string, unknown[]>) {
   return Object.entries(map).map(([path, sessions]) => ({
     path,
     displayName: path.replace(/^-Users-[^-]+-Code-/, "").replace(/-/g, "/"),
-    sessions: (sessions as Record<string, unknown>[]).sort((a, b) =>
+    sessions: (sessions as Record<string, unknown>[])
+      .filter(s => (s as Record<string,unknown>).agentType !== "prompt_suggestion")
+      .sort((a, b) =>
       String(b.lastActivity ?? "").localeCompare(String(a.lastActivity ?? ""))
     ),
   })).sort((a, b) => {
@@ -135,8 +148,29 @@ export default {
       }
     }
 
+    // Daemon ingest endpoints — authenticated via X-Auth-Pin (must be before cookie guard)
+    if (url.pathname === "/api/todos-ingest" && request.method === "POST") {
+      if (!checkSyncAuth(request, env)) return new Response("Unauthorized", { status: 401, headers: corsHeaders() })
+      const body = await request.json() as { id: string; items: unknown[]; mtime: string }
+      await env.SESSIONS_KV.put(`todo/${body.id}`, JSON.stringify({ id: body.id, items: body.items, mtime: body.mtime }))
+      return new Response("ok", { headers: corsHeaders() })
+    }
+
+    if (url.pathname === "/api/debug-ingest" && request.method === "POST") {
+      if (!checkSyncAuth(request, env)) return new Response("Unauthorized", { status: 401, headers: corsHeaders() })
+      const body = await request.json() as { lines: string[]; target?: string; reset?: boolean }
+      const existing = body.reset ? { lines: [], target: body.target } : (await env.SESSIONS_KV.get("debug/buffer", "json") as { lines: string[]; target?: string } | null) ?? { lines: [] }
+      const merged = [...(existing.lines ?? []), ...body.lines].slice(-500)
+      await env.SESSIONS_KV.put("debug/buffer", JSON.stringify({ lines: merged, target: body.target ?? existing.target }))
+      return new Response("ok", { headers: corsHeaders() })
+    }
+
     if (url.pathname.startsWith("/api/") && !checkAuth(request, env)) {
       return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: new Headers({ "Content-Type": "application/json" }) })
+    }
+
+    if (url.pathname === "/api/capabilities") {
+      return Response.json({ openPath: false, debugStream: true }, { headers: corsHeaders() })
     }
 
     if (url.pathname === "/api/debug") {
@@ -147,7 +181,8 @@ export default {
     }
 
     if (url.pathname === "/api/projects") {
-      return Response.json(await getProjects(env), { headers: corsHeaders() })
+      const { projects, total } = await getProjects(env)
+      return Response.json(projects, { headers: corsHeaders({ "X-Total-Sessions": String(total) }) })
     }
 
     if (url.pathname === "/api/stream") {
@@ -158,11 +193,11 @@ export default {
         writer.write(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
       ;(async () => {
         try {
-          await send("projects", await getProjects(env))
+          await send("projects", (await getProjects(env)).projects)
           const deadline = Date.now() + 88_000
           while (Date.now() < deadline && !request.signal.aborted) {
             await new Promise(r => setTimeout(r, 4000))
-            await send("projects", await getProjects(env))
+            await send("projects", (await getProjects(env)).projects)
           }
         } catch { /* disconnect */ }
         finally { writer.close() }
@@ -170,6 +205,71 @@ export default {
       return new Response(readable, {
         headers: corsHeaders({ "Content-Type": "text/event-stream", "Cache-Control": "no-cache" }),
       })
+    }
+
+    // Suggestions for a session: scan all metas in the project for prompt_suggestion with matching parentSessionId
+    const suggestionsMatch = url.pathname.match(/^\/api\/suggestions\/([^/]+)\/([^/]+)$/)
+    if (suggestionsMatch) {
+      const projectPath = decodeURIComponent(suggestionsMatch[1])
+      const parentSessionId = suggestionsMatch[2]
+      const list = await env.SESSIONS_KV.list({ prefix: `meta/${projectPath}/` })
+      const results = await Promise.all(
+        list.keys.map(async k => {
+          const m = await env.SESSIONS_KV.get(k.name, "json") as Record<string,unknown> | null
+          if (!m || m.agentType !== "prompt_suggestion" || m.parentSessionId !== parentSessionId) return null
+          return { parentUuid: m.suggestionParentUuid, text: m.suggestionText, id: m.id }
+        })
+      )
+      return Response.json(results.filter(Boolean), { headers: corsHeaders() })
+    }
+
+    // List all todos
+    if (url.pathname === "/api/todos") {
+      const list = await env.SESSIONS_KV.list({ prefix: "todo/" })
+      const todos = await Promise.all(list.keys.map(k => env.SESSIONS_KV.get(k.name, "json")))
+      const sorted = (todos.filter(Boolean) as { id: string; items: unknown[]; mtime: string }[])
+        .sort((a, b) => b.mtime.localeCompare(a.mtime))
+      return Response.json(sorted, { headers: corsHeaders() })
+    }
+
+    // Todos for a specific session — looks up todo/{sessionId}-agent-{sessionId}
+    const todoSessionMatch = url.pathname.match(/^\/api\/todos\/(.+)$/)
+    if (todoSessionMatch) {
+      const sessionId = todoSessionMatch[1]
+      const data = await env.SESSIONS_KV.get(`todo/${sessionId}-agent-${sessionId}`, "json")
+      if (!data) return new Response("Not Found", { status: 404, headers: corsHeaders() })
+      return Response.json(data, { headers: corsHeaders() })
+    }
+
+    // Debug log stream — SSE, polls KV every 2s
+    if (url.pathname === "/api/debug-stream") {
+      const { readable, writable } = new TransformStream()
+      const writer = writable.getWriter()
+      const enc = new TextEncoder()
+      const send = (data: unknown) => writer.write(enc.encode(`data: ${JSON.stringify(data)}\n\n`))
+      ;(async () => {
+        try {
+          const buf = await env.SESSIONS_KV.get("debug/buffer", "json") as { lines: string[]; target?: string } | null
+          await send({ type: "init", lines: buf?.lines ?? [], target: buf?.target ?? null })
+          let lastLen = buf?.lines?.length ?? 0
+          const deadline = Date.now() + 88_000
+          while (Date.now() < deadline && !request.signal.aborted) {
+            await new Promise(r => setTimeout(r, 2000))
+            const cur = await env.SESSIONS_KV.get("debug/buffer", "json") as { lines: string[]; target?: string } | null
+            const curLines = cur?.lines ?? []
+            if (curLines.length > lastLen) {
+              await send({ type: "append", lines: curLines.slice(lastLen), target: cur?.target ?? null })
+              lastLen = curLines.length
+            } else if (curLines.length < lastLen) {
+              // reset (new session)
+              await send({ type: "init", lines: curLines, target: cur?.target ?? null })
+              lastLen = curLines.length
+            }
+          }
+        } catch { /* disconnect */ }
+        finally { writer.close() }
+      })()
+      return new Response(readable, { headers: corsHeaders({ "Content-Type": "text/event-stream", "Cache-Control": "no-cache" }) })
     }
 
     const sessionMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/([^/]+)$/)
