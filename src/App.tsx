@@ -18,6 +18,8 @@ interface SessionMeta {
   agentType?: string
   firstName?: string
   customName?: string
+  parentSessionId?: string
+  hasInsights?: boolean
 }
 
 function isRecentlyActive(iso: string): boolean {
@@ -46,10 +48,11 @@ interface ProjectData {
 
 interface Capabilities {
   openPath: boolean
+  debugStream: boolean
 }
 
 function useCapabilities(): Capabilities {
-  const [caps, setCaps] = useState<Capabilities>({ openPath: false })
+  const [caps, setCaps] = useState<Capabilities>({ openPath: false, debugStream: false })
   useEffect(() => {
     fetch("/api/capabilities")
       .then(r => (r.ok ? r.json() : {}))
@@ -58,7 +61,7 @@ function useCapabilities(): Capabilities {
           c && typeof c === "object" && c !== null
             ? (c as Record<string, unknown>)
             : {}
-        setCaps({ openPath: !!o.openPath })
+        setCaps({ openPath: !!o.openPath, debugStream: !!o.debugStream })
       })
       .catch(() => {})
   }, [])
@@ -68,9 +71,15 @@ function useCapabilities(): Capabilities {
 function useProjects() {
   const [projects, setProjects] = useState<ProjectData[]>([])
   const [connected, setConnected] = useState(false)
+  const [projectsLoading, setProjectsLoading] = useState(true)
+  const [totalSessions, setTotalSessions] = useState<number | null>(null)
 
   useEffect(() => {
-    fetch("/api/projects").then(r => r.json()).then(setProjects).catch(() => {})
+    fetch("/api/projects").then(r => {
+      const total = r.headers.get("X-Total-Sessions")
+      if (total) setTotalSessions(Number(total))
+      return r.json()
+    }).then(data => { setProjects(data); setProjectsLoading(false) }).catch(() => { setProjectsLoading(false) })
 
     const es = new EventSource("/api/stream")
     es.onopen = () => setConnected(true)
@@ -81,7 +90,7 @@ function useProjects() {
     return () => es.close()
   }, [])
 
-  return { projects, connected }
+  return { projects, connected, projectsLoading, totalSessions }
 }
 
 // ── IDB-backed windowed message store ─────────────────────────────────────────
@@ -223,9 +232,38 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
 
 // ── Session pane ──────────────────────────────────────────────────────────────
 
+type Suggestion = { parentUuid: string; text: string; id: string }
+
+function wordOverlap(a: string, b: string): number {
+  const words = (s: string) => new Set(s.toLowerCase().match(/\b\w{4,}\b/g) ?? [])
+  const wa = words(a), wb = words(b)
+  let hits = 0
+  wa.forEach(w => { if (wb.has(w)) hits++ })
+  return wa.size ? hits / wa.size : 0
+}
+
 function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projectDir: string; sessionMeta: SessionMeta; onBack?: () => void; capabilities: Capabilities }) {
   const { win, loading, hasEarlier, hasLater, loadEarlier, loadLater, loadingEarlierRef, loadingLaterRef } =
     useWindowedMessages(projectDir, sessionMeta.id, isRecentlyActive(sessionMeta.lastActivity))
+
+  const [suggestions, setSuggestions] = useState<Record<string, Suggestion>>({})
+  useEffect(() => {
+    fetch(`/api/suggestions/${encodeURIComponent(projectDir)}/${sessionMeta.id}`)
+      .then(r => r.ok ? r.json() : [])
+      .then((list: Suggestion[]) => {
+        const map: Record<string, Suggestion> = {}
+        list.forEach(s => { if (s.parentUuid) map[s.parentUuid] = s })
+        setSuggestions(map)
+      }).catch(() => {})
+  }, [projectDir, sessionMeta.id])
+
+  const [todos, setTodos] = useState<TodoFile | null>(null)
+  useEffect(() => {
+    fetch(`/api/todos/${sessionMeta.id}`, { credentials: "include" })
+      .then(r => r.ok ? r.json() : null)
+      .then(setTodos)
+      .catch(() => {})
+  }, [sessionMeta.id])
   const bottomRef = useRef<HTMLDivElement>(null)
   const topSentinelRef = useRef<HTMLDivElement>(null)
   const bottomSentinelRef = useRef<HTMLDivElement>(null)
@@ -419,6 +457,16 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
           <button className={`mode-toggle-btn ${prettyMode ? "active" : ""}`} onClick={() => setPrettyMode(true)}>Pretty</button>
         </div>
       </div>
+      {todos && todos.items.length > 0 && (
+        <div className="session-todos">
+          {todos.items.map((item, i) => (
+            <div key={i} className={`session-todo-item ${item.status === "completed" ? "done" : item.status === "in_progress" ? "active" : ""}`}>
+              <span className="session-todo-check">{item.status === "completed" ? "✓" : item.status === "in_progress" ? "●" : "○"}</span>
+              <span className="session-todo-text">{item.activeForm ?? item.content}</span>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="messages-scroll" ref={scrollRef} onScroll={handleScroll}>
         {loading && <div className="loading-state">Loading messages…</div>}
         {!loading && hasEarlier && (
@@ -432,7 +480,24 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
             </div>
           </div>
         )}
-        {visible.map((msg, i) => <Block key={msg.uuid ?? i} msg={msg} index={i} nextMsg={visible[i + 1]} />)}
+        {visible.map((msg, i) => {
+          const sugg = msg.uuid ? suggestions[msg.uuid] : undefined
+          const nextUserMsg = sugg ? visible.slice(i + 1).find(m => m.type === "user") : undefined
+          const nextText = nextUserMsg ? (typeof nextUserMsg.message?.content === "string" ? nextUserMsg.message.content : (nextUserMsg.message?.content as {type:string;text?:string}[])?.filter(b => b.type === "text").map(b => b.text).join("") ?? "") : ""
+          const chosen = sugg && nextText ? wordOverlap(sugg.text, nextText) > 0.4 : false
+          return (
+            <div key={msg.uuid ?? i} className={sugg ? "msg-with-suggestion" : undefined}>
+              <Block msg={msg} index={startIdx + i} nextMsg={visible[i + 1]} />
+              {sugg && (
+                <div className="suggestion-pill" title={sugg.text}>
+                  <span className="suggestion-icon">{chosen ? "✓" : "💡"}</span>
+                  <span className="suggestion-text">{sugg.text.slice(0, 80)}{sugg.text.length > 80 ? "…" : ""}</span>
+                  {chosen && <span className="suggestion-chosen">chosen</span>}
+                </div>
+              )}
+            </div>
+          )
+        })}
         {!loading && hasLater && (
           <div>
             <div ref={bottomSentinelRef} style={{ height: 1 }} />
@@ -452,12 +517,15 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
 
 // ── Session item ──────────────────────────────────────────────────────────────
 
-function SessionItem({ s, projectPath, isSelected, onSelect, onFacets }: {
+function SessionItem({ s, projectPath, isSelected, onSelect, onFacets, subagentCount, subagentsExpanded, onToggleSubagents }: {
   s: SessionMeta
   projectPath: string
   isSelected: boolean
   onSelect: () => void
   onFacets: (sessionId: string) => void
+  subagentCount?: number
+  subagentsExpanded?: boolean
+  onToggleSubagents?: () => void
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState("")
@@ -499,7 +567,7 @@ function SessionItem({ s, projectPath, isSelected, onSelect, onFacets }: {
 
   return (
     <div
-      className={`sidebar-session ${isSelected ? "active" : ""} ${s.isSidechain ? "sidechain" : ""}`}
+      className={`sidebar-session ${isSelected ? "active" : ""} ${s.isSidechain ? "sidechain" : ""} ${s.hasInsights ? "has-insights" : ""}`}
       onClick={onSelect}
       data-tooltip={tooltip}
     >
@@ -519,6 +587,11 @@ function SessionItem({ s, projectPath, isSelected, onSelect, onFacets }: {
           {isRecentlyActive(s.lastActivity) && <span className="ss-live">●</span>}
           {s.isSidechain && <span className="ss-subagent-icon" title="Sub-agent session">⤷</span>}
           <span className="ss-name">{displayName}</span>
+          {onToggleSubagents && (
+            <button className="ss-subagents-toggle" onClick={e => { e.stopPropagation(); onToggleSubagents() }} title={`${subagentsExpanded ? "Hide" : "Show"} ${subagentCount} subagents`}>
+              {subagentsExpanded ? "▾" : "▸"}{subagentCount}
+            </button>
+          )}
           <button className="ss-rename-btn" onClick={startEdit} title="Rename">✎</button>
           <button className="ss-facets-btn" onClick={e => { e.stopPropagation(); onFacets(s.id) }} title="Session insights">✦</button>
           <div className="ss-meta">
@@ -638,53 +711,6 @@ interface TodoFile {
   mtime: string
 }
 
-function TodosTab() {
-  const [todos, setTodos] = useState<TodoFile[] | null>(null)
-
-  useEffect(() => {
-    fetch("/api/todos", { credentials: "include" })
-      .then(r => r.ok ? r.json() : [])
-      .then(setTodos)
-      .catch(() => setTodos([]))
-  }, [])
-
-  const totalPending = todos?.reduce((n, t) => n + t.items.filter(i => i.status !== "completed").length, 0) ?? 0
-  const totalCompleted = todos?.reduce((n, t) => n + t.items.filter(i => i.status === "completed").length, 0) ?? 0
-
-  return (
-    <div className="todos-tab">
-      <div className="todos-header">
-        <span className="todos-title">Task Lists</span>
-        {todos && (
-          <div className="todos-stats">
-            <span className="todos-stat todos-stat--pending">{totalPending} pending</span>
-            <span className="todos-stat todos-stat--done">{totalCompleted} completed</span>
-          </div>
-        )}
-      </div>
-      <div className="todos-scroll">
-        {todos === null && <div className="todos-loading">Loading…</div>}
-        {todos?.length === 0 && <div className="todos-empty">No task lists found</div>}
-        {todos?.map(tf => (
-          <div key={tf.id} className="todo-card">
-            <div className="todo-card-header">
-              <span className="todo-card-id">{tf.id.slice(0, 8)}</span>
-              <span className="todo-card-time">{relativeTime(tf.mtime)}</span>
-            </div>
-            <div className="todo-items">
-              {tf.items.map((item, i) => (
-                <div key={i} className={`todo-item ${item.status === "completed" ? "todo-item--done" : ""}`}>
-                  <span className="todo-check">{item.status === "completed" ? "✓" : "○"}</span>
-                  <span className="todo-content">{item.activeForm ?? item.content}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
 
 // ── Debug tab ─────────────────────────────────────────────────────────────────
 
@@ -837,8 +863,10 @@ function useIsMobile() {
   return mobile
 }
 
-function Sidebar({ projects, selected, onSelect, onFacets, width, onDragStart, mobileOpen, onMobileClose }: {
+function Sidebar({ projects, projectsLoading, totalSessions, selected, onSelect, onFacets, width, onDragStart, mobileOpen, onMobileClose }: {
   projects: ProjectData[]
+  projectsLoading: boolean
+  totalSessions: number | null
   selected: { project: string; session: string } | null
   onSelect: (p: string, s: string) => void
   onFacets: (sessionId: string) => void
@@ -850,15 +878,39 @@ function Sidebar({ projects, selected, onSelect, onFacets, width, onDragStart, m
   const isMobile = useIsMobile()
   // Default: flat (not grouped)
   const [grouped, setGrouped] = useState(() => localStorage.getItem("sidebarGrouped") === "true")
+  const [expandedParents, setExpandedParents] = useState<Set<string>>(new Set())
 
   function toggleGrouped(val: boolean) {
     setGrouped(val)
     localStorage.setItem("sidebarGrouped", String(val))
   }
 
-  const flatSessions: { s: SessionMeta; projectPath: string }[] = projects
+  function toggleParent(id: string) {
+    setExpandedParents(prev => {
+      const next = new Set(prev)
+      next.has(id) ? next.delete(id) : next.add(id)
+      return next
+    })
+  }
+
+  const allFlat: { s: SessionMeta; projectPath: string }[] = projects
     .flatMap(p => p.sessions.map(s => ({ s, projectPath: p.path })))
     .sort((a, b) => String(b.s.lastActivity ?? "").localeCompare(String(a.s.lastActivity ?? "")))
+
+  // Build flat groups: top-level sessions each with their subagents
+  const subagentsByParent = new Map<string, { s: SessionMeta; projectPath: string }[]>()
+  const topLevel: { s: SessionMeta; projectPath: string }[] = []
+  for (const item of allFlat) {
+    if (item.s.isSidechain && item.s.parentSessionId) {
+      const arr = subagentsByParent.get(item.s.parentSessionId) ?? []
+      arr.push(item)
+      subagentsByParent.set(item.s.parentSessionId, arr)
+    } else if (!item.s.isSidechain) {
+      topLevel.push(item)
+    }
+  }
+  // Orphan subagents (no known parent in list) shown after top-level
+  const orphans = allFlat.filter(({ s }) => s.isSidechain && (!s.parentSessionId || !subagentsByParent.has(s.parentSessionId) || !topLevel.find(t => t.s.id === s.parentSessionId)))
 
   function handleSelect(p: string, s: string) {
     onSelect(p, s)
@@ -893,18 +945,49 @@ function Sidebar({ projects, selected, onSelect, onFacets, width, onDragStart, m
           </div>
         ))
       ) : (
-        flatSessions.map(({ s, projectPath }) => (
-          <SessionItem
-            key={`${projectPath}/${s.id}`}
-            s={s}
-            projectPath={projectPath}
-            isSelected={selected?.session === s.id}
-            onSelect={() => handleSelect(projectPath, s.id)}
-            onFacets={onFacets}
-          />
-        ))
+        <>
+          {topLevel.map(({ s, projectPath }) => {
+            const children = subagentsByParent.get(s.id) ?? []
+            const expanded = expandedParents.has(s.id)
+            return (
+              <div key={`${projectPath}/${s.id}`}>
+                <SessionItem
+                  s={s}
+                  projectPath={projectPath}
+                  isSelected={selected?.session === s.id}
+                  onSelect={() => handleSelect(projectPath, s.id)}
+                  onFacets={onFacets}
+                  subagentCount={children.length}
+                  subagentsExpanded={expanded}
+                  onToggleSubagents={children.length > 0 ? () => toggleParent(s.id) : undefined}
+                />
+                {expanded && children.map(({ s: cs, projectPath: cp }) => (
+                  <SessionItem
+                    key={`${cp}/${cs.id}`}
+                    s={cs}
+                    projectPath={cp}
+                    isSelected={selected?.session === cs.id}
+                    onSelect={() => handleSelect(cp, cs.id)}
+                    onFacets={onFacets}
+                  />
+                ))}
+              </div>
+            )
+          })}
+          {orphans.map(({ s, projectPath }) => (
+            <SessionItem
+              key={`${projectPath}/${s.id}`}
+              s={s}
+              projectPath={projectPath}
+              isSelected={selected?.session === s.id}
+              onSelect={() => handleSelect(projectPath, s.id)}
+              onFacets={onFacets}
+            />
+          ))}
+        </>
       )}
-      {projects.length === 0 && <div className="sidebar-empty">No sessions found</div>}
+      {projectsLoading && projects.length === 0 && <div className="sidebar-empty"><span className="sidebar-spinner" />{totalSessions != null ? `Loading ${totalSessions} sessions…` : "Loading…"}</div>}
+      {!projectsLoading && projects.length === 0 && <div className="sidebar-empty">No sessions found</div>}
       <div className="sidebar-resize-handle" onPointerDown={onDragStart} />
     </nav>
     </>
@@ -918,12 +1001,12 @@ const SIDEBAR_MAX = 520
 const SIDEBAR_DEFAULT = 220
 
 export default function App() {
-  const { projects, connected } = useProjects()
+  const { projects, connected, projectsLoading, totalSessions } = useProjects()
   const capabilities = useCapabilities()
   const [selected, setSelected] = useState<{ project: string; session: string } | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
-  const [activeTab, setActiveTab] = useState<"sessions" | "todos" | "debug">("sessions")
+  const [activeTab, setActiveTab] = useState<"sessions" | "debug">("sessions")
   const [facetsSessionId, setFacetsSessionId] = useState<string | null>(null)
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = localStorage.getItem("sidebarWidth")
@@ -972,8 +1055,7 @@ export default function App() {
         <span className="topbar-title">Claude Session Viewer</span>
         <div className="topbar-tabs">
           <button className={`topbar-tab ${activeTab === "sessions" ? "active" : ""}`} onClick={() => setActiveTab("sessions")}>Sessions</button>
-          <button className={`topbar-tab ${activeTab === "todos" ? "active" : ""}`} onClick={() => setActiveTab("todos")}>Todos</button>
-          <button className={`topbar-tab ${activeTab === "debug" ? "active" : ""}`} onClick={() => setActiveTab("debug")}>Debug</button>
+          {capabilities.debugStream && <button className={`topbar-tab ${activeTab === "debug" ? "active" : ""}`} onClick={() => setActiveTab("debug")}>Debug</button>}
         </div>
         <span className={`conn-badge ${connected ? "conn-on" : "conn-off"}`}>
           {connected ? "● Live" : "○ Polling"}
@@ -987,6 +1069,8 @@ export default function App() {
           <>
             <Sidebar
               projects={projects}
+              projectsLoading={projectsLoading}
+              totalSessions={totalSessions}
               selected={selected}
               onSelect={(p, s) => setSelected({ project: p, session: s })}
               onFacets={setFacetsSessionId}
@@ -1008,7 +1092,6 @@ export default function App() {
             </div>
           </>
         )}
-        {activeTab === "todos" && <TodosTab />}
         {activeTab === "debug" && <DebugTab />}
       </div>
     </div>
