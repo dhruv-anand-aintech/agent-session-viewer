@@ -233,7 +233,7 @@ function CollapsibleMessage({ charLen, children }: { charLen: number; children: 
   if (charLen <= COLLAPSE_THRESHOLD) return <>{children}</>
   return (
     <div className={`pp-collapsible${collapsed ? " pp-collapsed" : ""}`}>
-      {children}
+      <div className="pp-collapsible-body">{children}</div>
       <button className="pp-collapse-btn" onClick={() => setCollapsed(c => !c)}>
         {collapsed ? `▼ show full message (${Math.round(charLen / 1000)}k chars)` : "▲ collapse"}
       </button>
@@ -327,20 +327,51 @@ function UserMessage({ content, timestamp }: { content: string | ContentBlock[];
   )
 }
 
+// ── System / meta message rows ────────────────────────────────────────────────
+
+function getRawText(content: string | ContentBlock[]): string {
+  if (typeof content === "string") return content
+  return content.filter(b => b.type === "text").map(b => (b as { text?: string }).text ?? "").join("")
+}
+
+function SystemRow({ label, summary, timestamp }: { label: string; summary: string; timestamp?: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="pp-system-row" onClick={() => setOpen(o => !o)}>
+      {timestamp && <span className="pp-timestamp">{timestamp}</span>}
+      <span className="pp-system-icon">⚙</span>
+      <span className="pp-system-label">{label}</span>
+      {open
+        ? <span className="pp-system-body">{summary}</span>
+        : <span className="pp-system-preview">{summary.slice(0, 80).replace(/\n/g, " ")}{summary.length > 80 ? "…" : ""}</span>}
+    </div>
+  )
+}
+
 // ── Main export ───────────────────────────────────────────────────────────────
 
-export default function PrettyMessageBlock({ msg, nextMsg }: { msg: SessionMessage; nextMsg?: SessionMessage }) {
+export default function PrettyMessageBlock({ msg, index, nextMsg }: { msg: SessionMessage; index?: number; nextMsg?: SessionMessage }) {
   if (msg.type === "file-history-snapshot") return null
   if (msg.type === "progress") return null  // hide progress events in pretty mode
   const role = msg.message?.role
   if (!role || !msg.message) return null
 
   const ts = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ""
+  const tsTitle = [ts, index != null ? `#${index + 1}` : null].filter(Boolean).join(" · ")
+
+  // Detect task-notification and system-reminder injections in user messages
+  if (role === "user") {
+    const raw = getRawText(msg.message.content)
+    const taskMatch = raw.match(/<task-notification[\s\S]*?<summary>([\s\S]*?)<\/summary>/)
+    if (taskMatch) return <SystemRow label="task notification" summary={taskMatch[1].trim()} timestamp={tsTitle} />
+    const reminderMatch = raw.match(/<system-reminder>([\s\S]*?)<\/system-reminder>/)
+    if (reminderMatch) return <SystemRow label="system reminder" summary={reminderMatch[1].trim()} timestamp={tsTitle} />
+  }
 
   if (msg.isSidechain) {
     return (
       <div className="pp-subagent-row" style={{ position: "relative" }}>
-        {ts && <span className="pp-timestamp">{ts}</span>}
+        {ts && <span className="pp-timestamp">{tsTitle}</span>}
         <div className="pp-subagent-label">⤷ sub-agent</div>
         <div className="pp-subagent-body">
           {role === "user"
@@ -351,8 +382,8 @@ export default function PrettyMessageBlock({ msg, nextMsg }: { msg: SessionMessa
     )
   }
 
-  if (role === "user") return <UserMessage content={msg.message.content} timestamp={ts} />
-  return <AssistantMessage content={msg.message.content} nextMsg={nextMsg} timestamp={ts} />
+  if (role === "user") return <UserMessage content={msg.message.content} timestamp={tsTitle} />
+  return <AssistantMessage content={msg.message.content} nextMsg={nextMsg} timestamp={tsTitle} />
 }
 
 export function charCountMsg(msg: SessionMessage): number {

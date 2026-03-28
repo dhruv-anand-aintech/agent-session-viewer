@@ -40,6 +40,21 @@
   min-width: 0;
 }
 
+/* ── System / meta rows (task-notification, system-reminder) ─────────────── */
+.pp-system-row {
+  display: flex; align-items: baseline; gap: 6px;
+  padding: 3px 16px; font-size: 11px; cursor: pointer;
+  color: var(--text-300); opacity: 0.6;
+  transition: opacity 0.1s;
+  position: relative;
+}
+.pp-system-row:hover { opacity: 1; }
+.pp-system-icon { flex-shrink: 0; font-size: 10px; }
+.pp-system-label { flex-shrink: 0; font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em; }
+.pp-system-preview { font-style: italic; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.pp-system-body { white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 10px; }
+.pp-system-row:hover .pp-timestamp { display: block; border: 0.5px solid var(--border-100); }
+
 /* ── Sub-agent (sidechain) block ─────────────────────────────────────────── */
 .pp-subagent-row {
   margin: 4px 16px;
@@ -231,8 +246,9 @@
 
 /* ── Collapsible long messages ───────────────────────────────────────────── */
 .pp-collapsible { position: relative; }
-.pp-collapsible.pp-collapsed { max-height: 200px; overflow: hidden; }
-.pp-collapsible.pp-collapsed::after {
+.pp-collapsible-body { }
+.pp-collapsible.pp-collapsed .pp-collapsible-body { max-height: 200px; overflow: hidden; }
+.pp-collapsible.pp-collapsed .pp-collapsible-body::after {
   content: "";
   position: absolute; bottom: 28px; left: 0; right: 0; height: 60px;
   background: linear-gradient(to bottom, transparent, var(--bg-100, #1a1a1a));

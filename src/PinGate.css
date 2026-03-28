@@ -1,6 +1,6 @@
 .pin-gate {
   display: flex; align-items: center; justify-content: center;
-  height: 100vh; background: #0d0d0f;
+  height: 100dvh; background: #0d0d0f;
 }
 .pin-card {
   background: #141416; border: 1px solid #2a2a2e; border-radius: 12px;
