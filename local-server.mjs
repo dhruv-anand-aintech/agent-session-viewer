@@ -6,7 +6,7 @@
  * Config persisted to: ~/.claude/session-viewer-local.json
  */
 
-import { createReadStream, existsSync, readdirSync, readFileSync, statSync, watch, writeFileSync } from "fs"
+import { createReadStream, existsSync, readdirSync, readFileSync, realpathSync, statSync, watch, writeFileSync } from "fs"
 import { homedir } from "os"
 import { dirname, extname, join } from "path"
 import http from "http"
@@ -329,6 +329,90 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/api/debug") {
     const projects = loadProjects()
     json({ sessionCount: projects.flatMap(p => p.sessions).length, projectCount: projects.length })
+    return
+  }
+
+  // GET /api/facets/:sessionId
+  const facetsMatch = url.pathname.match(/^\/api\/facets\/([^/]+)$/)
+  if (facetsMatch) {
+    const sessionId = facetsMatch[1]
+    const fp = join(homedir(), ".claude", "usage-data", "facets", `${sessionId}.json`)
+    if (!existsSync(fp)) { json(null); return }
+    try { json(JSON.parse(readFileSync(fp, "utf8"))) } catch { json(null) }
+    return
+  }
+
+  // GET /api/todos
+  if (url.pathname === "/api/todos") {
+    const todosDir = join(homedir(), ".claude", "todos")
+    const result = []
+    try {
+      const files = readdirSync(todosDir).filter(f => f.endsWith(".json"))
+      for (const f of files) {
+        const fp = join(todosDir, f)
+        try {
+          const data = JSON.parse(readFileSync(fp, "utf8"))
+          const st = statSync(fp)
+          result.push({ id: f.replace(".json", ""), items: data, mtime: st.mtime.toISOString() })
+        } catch { /* skip malformed */ }
+      }
+    } catch { /* dir not found */ }
+    result.sort((a, b) => b.mtime.localeCompare(a.mtime))
+    json(result)
+    return
+  }
+
+  // GET /api/debug-stream (SSE — tails ~/.claude/debug/latest)
+  if (url.pathname === "/api/debug-stream") {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+    })
+
+    const debugLink = join(homedir(), ".claude", "debug", "latest")
+    let lastTarget = null
+    let lastLineCount = 0
+
+    function readTarget() {
+      try { return realpathSync(debugLink) } catch { return null }
+    }
+
+    function sendInit(target) {
+      try {
+        const lines = readFileSync(target, "utf8").split("\n")
+        lastLineCount = lines.length
+        res.write(`data: ${JSON.stringify({ type: "init", target, lines })}\n\n`)
+      } catch {
+        res.write(`data: ${JSON.stringify({ type: "init", target: null, lines: ["[debug file not found]"] })}\n\n`)
+      }
+    }
+
+    const target = readTarget()
+    lastTarget = target
+    sendInit(target)
+
+    const timer = setInterval(() => {
+      try {
+        const currentTarget = readTarget()
+        if (currentTarget !== lastTarget) {
+          // Symlink changed — new session
+          lastTarget = currentTarget
+          lastLineCount = 0
+          sendInit(currentTarget)
+          return
+        }
+        if (!currentTarget) return
+        const lines = readFileSync(currentTarget, "utf8").split("\n")
+        if (lines.length > lastLineCount) {
+          const newLines = lines.slice(lastLineCount)
+          lastLineCount = lines.length
+          res.write(`data: ${JSON.stringify({ type: "append", lines: newLines })}\n\n`)
+        }
+      } catch { /* ignore read errors */ }
+    }, 500)
+
+    req.on("close", () => clearInterval(timer))
     return
   }
 
