@@ -26,6 +26,15 @@ import { stripXml } from "../shared-utils.mjs"
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
+// Load .env from project root (same dir as package.json, one level up from daemon/)
+const envPath = path.join(import.meta.dirname, "..", ".env")
+try {
+  for (const line of fs.readFileSync(envPath, "utf8").split("\n")) {
+    const m = line.match(/^(\w+)=(.*)$/)
+    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2]
+  }
+} catch {}
+
 const args = process.argv.slice(2)
 const argGet = (flag) => { const i = args.indexOf(flag); return i !== -1 ? args[i + 1] : null }
 
@@ -140,11 +149,13 @@ async function syncSession(filePath) {
   // Subagent sessions live at: {projectDir}/{parentSessionId}/subagents/agent-{id}.jsonl
   // Detect this by checking if grandparent dir basename is a session UUID and parent is "subagents"
   const isSubagent = path.basename(projectAbsDir) === "subagents"
-  let projectDir, agentDescription, agentType
+  let projectDir, agentDescription, agentType, parentSessionId
   if (isSubagent) {
     // Navigate up: subagents/ → parentSession/ → projectDir/
-    const parentProjectAbsDir = path.dirname(path.dirname(projectAbsDir))
+    const parentSessionAbsDir = path.dirname(projectAbsDir)
+    const parentProjectAbsDir = path.dirname(parentSessionAbsDir)
     projectDir = normProjectDir(parentProjectAbsDir)
+    parentSessionId = path.basename(parentSessionAbsDir)
     // Read the companion .meta.json for agent description and type
     try {
       const meta = JSON.parse(fs.readFileSync(filePath.replace(".jsonl", ".meta.json"), "utf8"))
@@ -168,30 +179,54 @@ async function syncSession(filePath) {
       const raw = typeof content === "string" ? content
         : Array.isArray(content) ? content.filter(b => b.type === "text").map(b => b.text).join(" ")
         : ""
+      // Prefer <command-name> tag content (skill invocations) over full stripped text
+      const commandName = raw.match(/<command-name>([^<]+)<\/command-name>/)?.[1]?.trim()
+      if (commandName) return commandName.slice(0, 80)
       const stripped = stripXml(raw)
       if (stripped.length > 2) return stripped.slice(0, 80)
     }
     return null
   }
 
+  // Detect prompt_suggestion agents by agentId (no .meta.json for these)
+  const firstMsg = messages[0]
+  const agentId = firstMsg?.agentId ?? ""
+  if (!agentType && agentId.includes("prompt_suggestion")) agentType = "prompt_suggestion"
+
+  // For prompt_suggestion agents, extract the suggestion text and the parentUuid it targets
+  let suggestionText, suggestionParentUuid
+  if (agentType === "prompt_suggestion") {
+    const userMsg = messages.find(m => m.type === "user")
+    suggestionParentUuid = userMsg?.parentUuid
+    const assistantMsg = messages.find(m => m.type === "assistant")
+    const content = assistantMsg?.message?.content
+    suggestionText = typeof content === "string" ? content
+      : Array.isArray(content) ? content.filter(b => b.type === "text").map(b => b.text).join("") : undefined
+    if (suggestionText) suggestionText = suggestionText.trim().slice(0, 300)
+  }
+
   // Build lightweight meta
   const conversationMsgs = messages.filter(m => m.type === "user" || m.type === "assistant")
   const userMsgs = messages.filter(isRealUserMsg)
   const sidechainMsgs = messages.filter(m => m.isSidechain)
-  const last = messages[messages.length - 1]
+  const lastWithTs = [...messages].reverse().find(m => m.timestamp)
   const meta = {
     id: sessionId,
     projectPath: projectDir,
     messageCount: conversationMsgs.length,
     userMessageCount: userMsgs.length,
-    lastActivity: last?.timestamp ?? new Date().toISOString(),
-    gitBranch: last?.gitBranch ?? messages.find(m => m.gitBranch)?.gitBranch,
-    version: last?.version,
+    lastActivity: lastWithTs?.timestamp ?? new Date().toISOString(),
+    gitBranch: lastWithTs?.gitBranch ?? messages.find(m => m.gitBranch)?.gitBranch,
+    version: lastWithTs?.version,
     isActive: true,
     // Subagents: use description from .meta.json as the display name
     firstName: agentDescription ?? firstUserText(),
     isSidechain: isSubagent || (conversationMsgs.length > 0 && sidechainMsgs.length / conversationMsgs.length > 0.5),
     agentType: agentType ?? undefined,
+    ...(parentSessionId ? { parentSessionId } : {}),
+    ...(suggestionParentUuid ? { suggestionParentUuid } : {}),
+    ...(suggestionText ? { suggestionText } : {}),
+    hasInsights: fs.existsSync(path.join(homedir(), ".claude", "usage-data", "facets", `${sessionId}.json`)),
   }
 
   const payload = { meta, msgs: messages }
@@ -416,7 +451,7 @@ async function syncClawAgentSession(tool, groupFolder, chatJid, chatName, channe
   const conversationMsgs = messages.filter(m => m.type === "user" || m.type === "assistant")
   const userMsgs = messages.filter(isRealUserMsg)
   const sidechainMsgs = messages.filter(m => m.isSidechain)
-  const last = messages[messages.length - 1]
+  const lastWithTs = [...messages].reverse().find(m => m.timestamp)
   const projectPath = `${tool.name}-agent-${channel}`
 
   const meta = {
@@ -424,8 +459,8 @@ async function syncClawAgentSession(tool, groupFolder, chatJid, chatName, channe
     projectPath,
     messageCount: conversationMsgs.length,
     userMessageCount: userMsgs.length,
-    lastActivity: last?.timestamp ?? new Date().toISOString(),
-    gitBranch: last?.gitBranch,
+    lastActivity: lastWithTs?.timestamp ?? new Date().toISOString(),
+    gitBranch: lastWithTs?.gitBranch,
     isActive: true,
     firstName: chatName && chatName !== chatJid ? chatName : firstUserText(),
     isSidechain: conversationMsgs.length > 0 && sidechainMsgs.length / conversationMsgs.length > 0.5,
@@ -667,4 +702,100 @@ startWatcher(nanocStyleTools)
 startClawPollers(nanocStyleTools)
 for (const tool of picoStyleTools) startPicoClawWatcher(tool)
 
+// Keep event loop alive regardless of which watchers are active
+setInterval(() => {}, 60_000)
+
 log("Watching for changes… (Ctrl+C to stop)")
+
+// ── Debug log tail ────────────────────────────────────────────────────────────
+
+const DEBUG_LINK = path.join(homedir(), ".claude", "debug", "latest")
+const DEBUG_MAX_LINES = 500
+
+let debugTarget = null
+let debugOffset = 0  // byte offset already sent
+
+function resolveDebugTarget() {
+  try { return fs.realpathSync(DEBUG_LINK) } catch { return null }
+}
+
+async function pushDebugLines() {
+  const target = resolveDebugTarget()
+  if (!target) return
+  // If symlink changed, reset
+  if (target !== debugTarget) {
+    debugTarget = target
+    debugOffset = 0
+  }
+  let stat
+  try { stat = fs.statSync(target) } catch { return }
+  if (stat.size <= debugOffset) return
+
+  const buf = Buffer.alloc(stat.size - debugOffset)
+  const fd = fs.openSync(target, "r")
+  fs.readSync(fd, buf, 0, buf.length, debugOffset)
+  fs.closeSync(fd)
+  debugOffset = stat.size
+
+  const newLines = buf.toString("utf8").split("\n").filter(Boolean)
+  if (newLines.length === 0) return
+
+  try {
+    await fetch(`${WORKER_URL}/api/debug-ingest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Auth-Pin": AUTH_PIN },
+      body: JSON.stringify({ lines: newLines, target }),
+    })
+  } catch { /* ignore */ }
+}
+
+// Watch for debug log changes
+const debugDir = path.join(homedir(), ".claude", "debug")
+if (fs.existsSync(debugDir)) {
+  // Initial push of last N lines
+  debugTarget = resolveDebugTarget()
+  if (debugTarget) {
+    try {
+      const all = fs.readFileSync(debugTarget, "utf8").split("\n").filter(Boolean)
+      const tail = all.slice(-DEBUG_MAX_LINES)
+      debugOffset = fs.statSync(debugTarget).size
+      await fetch(`${WORKER_URL}/api/debug-ingest`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Auth-Pin": AUTH_PIN },
+        body: JSON.stringify({ lines: tail, target: debugTarget, reset: true }),
+      }).catch(() => {})
+    } catch { /* ignore */ }
+  }
+  watch(debugDir, { recursive: false }, () => pushDebugLines().catch(() => {}))
+  log(`Watching debug log at ${DEBUG_LINK}`)
+}
+
+// ── Todos sync ────────────────────────────────────────────────────────────────
+
+const TODOS_DIR = path.join(homedir(), ".claude", "todos")
+
+async function syncTodo(filePath) {
+  const id = path.basename(filePath, ".json")
+  let items
+  try { items = JSON.parse(fs.readFileSync(filePath, "utf8")) } catch { return }
+  const mtime = fs.statSync(filePath).mtime.toISOString()
+  await fetch(`${WORKER_URL}/api/todos-ingest`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Auth-Pin": AUTH_PIN },
+    body: JSON.stringify({ id, items, mtime }),
+  }).catch(() => {})
+}
+
+if (fs.existsSync(TODOS_DIR)) {
+  // Initial sync of all todo files
+  for (const f of fs.readdirSync(TODOS_DIR).filter(f => f.endsWith(".json"))) {
+    await syncTodo(path.join(TODOS_DIR, f)).catch(() => {})
+  }
+  // Watch for changes
+  watch(TODOS_DIR, { recursive: false }, (_event, filename) => {
+    if (!filename?.endsWith(".json")) return
+    const full = path.join(TODOS_DIR, filename)
+    if (fs.existsSync(full)) syncTodo(full).catch(() => {})
+  })
+  log(`Watching todos at ${TODOS_DIR}`)
+}
