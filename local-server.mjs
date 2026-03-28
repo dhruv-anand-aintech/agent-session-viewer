@@ -321,7 +321,7 @@ const server = http.createServer(async (req, res) => {
 
   // GET /api/capabilities
   if (url.pathname === "/api/capabilities") {
-    json({ openPath: true })
+    json({ openPath: true, debugStream: true })
     return
   }
 
