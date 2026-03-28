@@ -452,11 +452,12 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
 
 // ── Session item ──────────────────────────────────────────────────────────────
 
-function SessionItem({ s, projectPath, isSelected, onSelect }: {
+function SessionItem({ s, projectPath, isSelected, onSelect, onFacets }: {
   s: SessionMeta
   projectPath: string
   isSelected: boolean
   onSelect: () => void
+  onFacets: (sessionId: string) => void
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState("")
@@ -519,6 +520,7 @@ function SessionItem({ s, projectPath, isSelected, onSelect }: {
           {s.isSidechain && <span className="ss-subagent-icon" title="Sub-agent session">⤷</span>}
           <span className="ss-name">{displayName}</span>
           <button className="ss-rename-btn" onClick={startEdit} title="Rename">✎</button>
+          <button className="ss-facets-btn" onClick={e => { e.stopPropagation(); onFacets(s.id) }} title="Session insights">✦</button>
           <div className="ss-meta">
             <span className="ss-count">
               {s.userMessageCount != null ? `${s.userMessageCount}/${s.messageCount}` : s.messageCount}
@@ -527,6 +529,227 @@ function SessionItem({ s, projectPath, isSelected, onSelect }: {
           </div>
         </>
       )}
+    </div>
+  )
+}
+
+// ── Facets modal ──────────────────────────────────────────────────────────────
+
+interface FacetData {
+  underlying_goal?: string
+  goal_categories?: Record<string, number>
+  outcome?: string
+  user_satisfaction_counts?: Record<string, number>
+  claude_helpfulness?: string
+  session_type?: string
+  friction_counts?: Record<string, number>
+  friction_detail?: string
+  primary_success?: string
+  brief_summary?: string
+  session_id?: string
+}
+
+function FacetsModal({ sessionId, onClose }: { sessionId: string; onClose: () => void }) {
+  const [data, setData] = useState<FacetData | null | "loading">("loading")
+
+  useEffect(() => {
+    fetch(`/api/facets/${sessionId}`, { credentials: "include" })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => setData(d))
+      .catch(() => setData(null))
+  }, [sessionId])
+
+  function badge(val: string | undefined) {
+    if (!val) return null
+    const colorMap: Record<string, string> = {
+      fully_achieved: "var(--success)",
+      partially_achieved: "var(--accent)",
+      not_achieved: "var(--danger)",
+      essential: "var(--success)",
+      helpful: "var(--accent)",
+      minimal: "var(--text-400)",
+    }
+    return (
+      <span className="facet-badge" style={{ color: colorMap[val] ?? "var(--text-200)" }}>
+        {val.replace(/_/g, " ")}
+      </span>
+    )
+  }
+
+  return (
+    <div className="settings-overlay" onClick={onClose}>
+      <div className="settings-modal facets-modal" onClick={e => e.stopPropagation()}>
+        <div className="settings-header">
+          <span className="settings-title">Session Insights</span>
+          <button className="settings-close" onClick={onClose}>✕</button>
+        </div>
+        <div className="settings-body">
+          {data === "loading" && <div className="facets-empty">Loading…</div>}
+          {data === null && <div className="facets-empty">No insights available yet.<br /><span style={{ color: "var(--text-400)", fontSize: 12 }}>Insights are generated after a session ends.</span></div>}
+          {data && data !== "loading" && (
+            <>
+              {data.brief_summary && (
+                <div className="facet-section">
+                  <div className="facet-label">Summary</div>
+                  <div className="facet-summary">{data.brief_summary}</div>
+                </div>
+              )}
+              <div className="facet-row-group">
+                {data.outcome && <div className="facet-row"><span className="facet-key">Outcome</span>{badge(data.outcome)}</div>}
+                {data.claude_helpfulness && <div className="facet-row"><span className="facet-key">Helpfulness</span>{badge(data.claude_helpfulness)}</div>}
+                {data.session_type && <div className="facet-row"><span className="facet-key">Session type</span><span className="facet-val">{data.session_type.replace(/_/g, " ")}</span></div>}
+                {data.primary_success && <div className="facet-row"><span className="facet-key">Primary success</span><span className="facet-val">{data.primary_success.replace(/_/g, " ")}</span></div>}
+              </div>
+              {data.underlying_goal && (
+                <div className="facet-section">
+                  <div className="facet-label">Underlying goal</div>
+                  <div className="facet-text">{data.underlying_goal}</div>
+                </div>
+              )}
+              {data.goal_categories && Object.keys(data.goal_categories).length > 0 && (
+                <div className="facet-section">
+                  <div className="facet-label">Goal categories</div>
+                  <div className="facet-tags">
+                    {Object.entries(data.goal_categories).map(([k]) => (
+                      <span key={k} className="facet-tag">{k.replace(/_/g, " ")}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {data.friction_detail && (
+                <div className="facet-section">
+                  <div className="facet-label">Friction</div>
+                  <div className="facet-text">{data.friction_detail}</div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Todos tab ─────────────────────────────────────────────────────────────────
+
+interface TodoFile {
+  id: string
+  items: { content: string; status: string; activeForm?: string }[]
+  mtime: string
+}
+
+function TodosTab() {
+  const [todos, setTodos] = useState<TodoFile[] | null>(null)
+
+  useEffect(() => {
+    fetch("/api/todos", { credentials: "include" })
+      .then(r => r.ok ? r.json() : [])
+      .then(setTodos)
+      .catch(() => setTodos([]))
+  }, [])
+
+  const totalPending = todos?.reduce((n, t) => n + t.items.filter(i => i.status !== "completed").length, 0) ?? 0
+  const totalCompleted = todos?.reduce((n, t) => n + t.items.filter(i => i.status === "completed").length, 0) ?? 0
+
+  return (
+    <div className="todos-tab">
+      <div className="todos-header">
+        <span className="todos-title">Task Lists</span>
+        {todos && (
+          <div className="todos-stats">
+            <span className="todos-stat todos-stat--pending">{totalPending} pending</span>
+            <span className="todos-stat todos-stat--done">{totalCompleted} completed</span>
+          </div>
+        )}
+      </div>
+      <div className="todos-scroll">
+        {todos === null && <div className="todos-loading">Loading…</div>}
+        {todos?.length === 0 && <div className="todos-empty">No task lists found</div>}
+        {todos?.map(tf => (
+          <div key={tf.id} className="todo-card">
+            <div className="todo-card-header">
+              <span className="todo-card-id">{tf.id.slice(0, 8)}</span>
+              <span className="todo-card-time">{relativeTime(tf.mtime)}</span>
+            </div>
+            <div className="todo-items">
+              {tf.items.map((item, i) => (
+                <div key={i} className={`todo-item ${item.status === "completed" ? "todo-item--done" : ""}`}>
+                  <span className="todo-check">{item.status === "completed" ? "✓" : "○"}</span>
+                  <span className="todo-content">{item.activeForm ?? item.content}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ── Debug tab ─────────────────────────────────────────────────────────────────
+
+function DebugTab() {
+  const [lines, setLines] = useState<string[]>([])
+  const [target, setTarget] = useState<string | null>(null)
+  const [connected, setConnected] = useState(false)
+  const [autoScroll, setAutoScroll] = useState(true)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const bottomRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const es = new EventSource("/api/debug-stream")
+    es.onopen = () => setConnected(true)
+    es.onerror = () => setConnected(false)
+    es.onmessage = (e) => {
+      try {
+        const msg = JSON.parse(e.data) as { type: string; lines: string[]; target?: string }
+        if (msg.type === "init") {
+          setTarget(msg.target ?? null)
+          setLines(msg.lines)
+        } else if (msg.type === "append") {
+          setLines(prev => [...prev, ...msg.lines])
+        }
+      } catch { /* ignore */ }
+    }
+    return () => es.close()
+  }, [])
+
+  useEffect(() => {
+    if (autoScroll) bottomRef.current?.scrollIntoView()
+  }, [lines, autoScroll])
+
+  function handleScroll(e: React.UIEvent<HTMLDivElement>) {
+    const el = e.currentTarget
+    setAutoScroll(el.scrollHeight - el.scrollTop - el.clientHeight < 40)
+  }
+
+  function levelClass(line: string) {
+    if (line.includes("[ERROR]") || line.includes("[error]")) return "dbg-error"
+    if (line.includes("[WARN]") || line.includes("[warn]")) return "dbg-warn"
+    if (line.includes("[INFO]") || line.includes("[info]")) return "dbg-info"
+    return "dbg-debug"
+  }
+
+  return (
+    <div className="debug-tab">
+      <div className="debug-header">
+        <span className="debug-title">Debug Log</span>
+        {target && <span className="debug-path">{target}</span>}
+        <span className={`conn-badge ${connected ? "conn-on" : "conn-off"}`} style={{ marginLeft: "auto" }}>
+          {connected ? "● Live" : "○ Connecting"}
+        </span>
+        {!autoScroll && (
+          <button className="debug-scroll-btn" onClick={() => { setAutoScroll(true); bottomRef.current?.scrollIntoView() }}>
+            ⤓ Follow
+          </button>
+        )}
+      </div>
+      <div className="debug-scroll" ref={scrollRef} onScroll={handleScroll}>
+        {lines.map((line, i) => line ? (
+          <div key={i} className={`dbg-line ${levelClass(line)}`}>{line}</div>
+        ) : null)}
+        <div ref={bottomRef} />
+      </div>
     </div>
   )
 }
@@ -614,10 +837,11 @@ function useIsMobile() {
   return mobile
 }
 
-function Sidebar({ projects, selected, onSelect, width, onDragStart, mobileOpen, onMobileClose }: {
+function Sidebar({ projects, selected, onSelect, onFacets, width, onDragStart, mobileOpen, onMobileClose }: {
   projects: ProjectData[]
   selected: { project: string; session: string } | null
   onSelect: (p: string, s: string) => void
+  onFacets: (sessionId: string) => void
   width: number
   onDragStart: (e: React.PointerEvent) => void
   mobileOpen: boolean
@@ -663,6 +887,7 @@ function Sidebar({ projects, selected, onSelect, width, onDragStart, mobileOpen,
                 projectPath={project.path}
                 isSelected={selected?.session === s.id}
                 onSelect={() => handleSelect(project.path, s.id)}
+                onFacets={onFacets}
               />
             ))}
           </div>
@@ -675,6 +900,7 @@ function Sidebar({ projects, selected, onSelect, width, onDragStart, mobileOpen,
             projectPath={projectPath}
             isSelected={selected?.session === s.id}
             onSelect={() => handleSelect(projectPath, s.id)}
+            onFacets={onFacets}
           />
         ))
       )}
@@ -697,6 +923,8 @@ export default function App() {
   const [selected, setSelected] = useState<{ project: string; session: string } | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+  const [activeTab, setActiveTab] = useState<"sessions" | "todos" | "debug">("sessions")
+  const [facetsSessionId, setFacetsSessionId] = useState<string | null>(null)
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = localStorage.getItem("sidebarWidth")
     return saved ? Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Number(saved))) : SIDEBAR_DEFAULT
@@ -742,33 +970,46 @@ export default function App() {
       <header className="topbar">
         <button className="topbar-menu-btn" onClick={() => setMobileSidebarOpen(o => !o)} title="Sessions">☰</button>
         <span className="topbar-title">Claude Session Viewer</span>
+        <div className="topbar-tabs">
+          <button className={`topbar-tab ${activeTab === "sessions" ? "active" : ""}`} onClick={() => setActiveTab("sessions")}>Sessions</button>
+          <button className={`topbar-tab ${activeTab === "todos" ? "active" : ""}`} onClick={() => setActiveTab("todos")}>Todos</button>
+          <button className={`topbar-tab ${activeTab === "debug" ? "active" : ""}`} onClick={() => setActiveTab("debug")}>Debug</button>
+        </div>
         <span className={`conn-badge ${connected ? "conn-on" : "conn-off"}`}>
           {connected ? "● Live" : "○ Polling"}
         </span>
         <button className="topbar-settings-btn" onClick={() => setShowSettings(true)} title="Settings">⚙</button>
       </header>
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {facetsSessionId && <FacetsModal sessionId={facetsSessionId} onClose={() => setFacetsSessionId(null)} />}
       <div className="main">
-        <Sidebar
-          projects={projects}
-          selected={selected}
-          onSelect={(p, s) => setSelected({ project: p, session: s })}
-          width={sidebarWidth}
-          onDragStart={onDragStart}
-          mobileOpen={mobileSidebarOpen}
-          onMobileClose={() => setMobileSidebarOpen(false)}
-        />
-        <div className="content">
-          {activeMeta && activeProject
-            ? <SessionPane
-                key={activeMeta.id}
-                projectDir={activeProject.path}
-                sessionMeta={activeMeta}
-                onBack={() => setMobileSidebarOpen(true)}
-                capabilities={capabilities}
-              />
-            : <div className="empty-state">Select a session from the sidebar</div>}
-        </div>
+        {activeTab === "sessions" && (
+          <>
+            <Sidebar
+              projects={projects}
+              selected={selected}
+              onSelect={(p, s) => setSelected({ project: p, session: s })}
+              onFacets={setFacetsSessionId}
+              width={sidebarWidth}
+              onDragStart={onDragStart}
+              mobileOpen={mobileSidebarOpen}
+              onMobileClose={() => setMobileSidebarOpen(false)}
+            />
+            <div className="content">
+              {activeMeta && activeProject
+                ? <SessionPane
+                    key={activeMeta.id}
+                    projectDir={activeProject.path}
+                    sessionMeta={activeMeta}
+                    onBack={() => setMobileSidebarOpen(true)}
+                    capabilities={capabilities}
+                  />
+                : <div className="empty-state">Select a session from the sidebar</div>}
+            </div>
+          </>
+        )}
+        {activeTab === "todos" && <TodosTab />}
+        {activeTab === "debug" && <DebugTab />}
       </div>
     </div>
   )
