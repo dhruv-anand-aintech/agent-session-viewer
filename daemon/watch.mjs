@@ -1024,7 +1024,7 @@ function startCursorWatcher() {
 //   or the content may be stored differently. We read what's available.
 
 const OPENCODE_STORAGE = path.join(homedir(), ".local", "share", "opencode", "storage")
-const opencodeLastSync = new Map() // sessionId → updatedAt (ms)
+const opencodeLastSync = new Map() // sessionId → updatedAt+partCount (string, for change detection)
 
 function readOpenCodeSession(sessionFile) {
   let sessionData
@@ -1034,9 +1034,20 @@ function readOpenCodeSession(sessionFile) {
   const sessionId = sessionData.id
   const updatedAt = sessionData.time?.updated ?? sessionData.time?.created ?? 0
 
-  // Skip if unchanged
-  if (opencodeLastSync.get(sessionId) === updatedAt) return null
-  opencodeLastSync.set(sessionId, updatedAt)
+  // Count total parts across all messages to detect new content even if updatedAt unchanged
+  const partBaseDir = path.join(OPENCODE_STORAGE, "part")
+  let totalParts = 0
+  const msgDir0 = path.join(OPENCODE_STORAGE, "message", sessionId)
+  if (fs.existsSync(msgDir0)) {
+    for (const mf of fs.readdirSync(msgDir0)) {
+      const msgId = mf.replace(".json", "")
+      const pd = path.join(partBaseDir, msgId)
+      if (fs.existsSync(pd)) totalParts += fs.readdirSync(pd).length
+    }
+  }
+  const cacheVal = `${updatedAt}:${totalParts}`
+  if (opencodeLastSync.get(sessionId) === cacheVal) return null
+  opencodeLastSync.set(sessionId, cacheVal)
 
   // Read all messages for this session
   const msgDir = path.join(OPENCODE_STORAGE, "message", sessionId)
@@ -1053,20 +1064,39 @@ function readOpenCodeSession(sessionFile) {
   // Sort by creation time
   messages.sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))
 
-  const converted = messages.map((m, i) => ({
-    uuid: m.id ?? `opencode-${sessionId}-${i}`,
-    parentUuid: null,
-    type: m.role === "assistant" ? "assistant" : "human",
-    sessionId,
-    timestamp: m.time?.created ? new Date(m.time.created).toISOString() : new Date().toISOString(),
-    isSidechain: false,
-    message: {
-      role: m.role,
-      // OpenCode messages may have a summary title but actual text is streamed separately
-      // Use summary title as fallback display text
-      content: m.summary?.title ?? `[${m.role} message]`,
-    },
-  }))
+  // Read parts for each message — actual text lives in storage/part/{messageId}/*.json
+  function readMessageContent(messageId) {
+    const partDir = path.join(OPENCODE_STORAGE, "part", messageId)
+    if (!fs.existsSync(partDir)) return null
+    const parts = []
+    for (const pf of fs.readdirSync(partDir).filter(f => f.endsWith(".json"))) {
+      try {
+        const p = JSON.parse(fs.readFileSync(path.join(partDir, pf), "utf8"))
+        if (p.type === "text" && p.text) parts.push({ type: "text", text: p.text, order: p.time?.start ?? 0 })
+        else if (p.type === "reasoning" && p.text) parts.push({ type: "thinking", thinking: p.text, order: p.time?.start ?? 0 })
+        else if (p.type === "tool" && p.tool) parts.push({ type: "tool_use", name: p.tool, input: p.input ?? {}, id: p.id ?? pf, order: p.time?.start ?? 0 })
+      } catch { /* skip */ }
+    }
+    parts.sort((a, b) => a.order - b.order)
+    if (!parts.length) return null
+    // If only one text part, return plain string for cleaner rendering
+    const textParts = parts.filter(p => p.type === "text")
+    if (parts.length === textParts.length && textParts.length === 1) return textParts[0].text
+    return parts.map(({ order: _o, ...rest }) => rest)
+  }
+
+  const converted = messages.map((m, i) => {
+    const content = readMessageContent(m.id) ?? m.summary?.title ?? `[${m.role} message]`
+    return {
+      uuid: m.id ?? `opencode-${sessionId}-${i}`,
+      parentUuid: null,
+      type: m.role === "assistant" ? "assistant" : "human",
+      sessionId,
+      timestamp: m.time?.created ? new Date(m.time.created).toISOString() : new Date().toISOString(),
+      isSidechain: false,
+      message: { role: m.role, content },
+    }
+  })
 
   const projectDir = sessionData.directory
     ? normProjectDir(sessionData.directory)
