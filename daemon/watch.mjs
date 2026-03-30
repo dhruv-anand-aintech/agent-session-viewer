@@ -23,6 +23,17 @@ import { watch } from "node:fs"
 import { homedir } from "node:os"
 import { execFileSync } from "node:child_process"
 import { stripXml } from "../shared-utils.mjs"
+import {
+  normProjectDir as _normProjectDir,
+  readCursorSessions,
+  readOpenCodeSession,
+  iterOpenCodeSessions,
+  OPENCODE_STORAGE,
+  ANTIGRAVITY_BRAIN_DIR,
+  parseAntigravitySessionIndex,
+  readAntigravitySession,
+  readAntigravityRpcSessions,
+} from "../platform-readers.mjs"
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -128,9 +139,7 @@ function parseJsonl(filePath) {
   } catch { return null }
 }
 
-function normProjectDir(absDir) {
-  return absDir.replace(homedir(), "").replace(/\//g, "-").replace(/^-/, "")
-}
+const normProjectDir = _normProjectDir
 
 /** Returns true only for genuine human-typed user turns (not tool-result-only messages) */
 function isRealUserMsg(m) {
@@ -652,176 +661,25 @@ function startPicoClawWatcher(tool) {
   log(`Watching ${tool.name} sessions at ${sessionsDir}`)
 }
 
-// ── Antigravity adaptor ───────────────────────────────────────────────────────
-// Antigravity ("Jetski" agent) stores data across two locations:
-//
-//  1. Session index — state.vscdb (SQLite):
-//     Key: antigravityUnifiedStateSync.trajectorySummaries
-//     Value: base64-encoded protobuf containing repeated session entries.
-//     Each entry contains an inner base64-encoded protobuf with:
-//       - session UUID
-//       - session title (human-readable)
-//       - workspace file:// URL
-//     Parsed by extracting base64 chunks and decoding them with regex.
-//
-//  2. Session artifacts — ~/.gemini/antigravity/brain/{uuid}/:
-//     task.md                  — task checklist (markdown)
-//     implementation_plan.md   — implementation plan (markdown)
-//     walkthrough.md           — summary walkthrough (markdown)
-//     *.metadata.json          — {artifactType, summary, updatedAt} per artifact
-//
-// Full conversation logs are in old_conversations_backup/{uuid}.pb (binary protobuf
-// with unknown schema — not used). The markdown artifacts are rich enough.
+// ── Antigravity adaptor (via platform-readers.mjs) ───────────────────────────
 
-const ANTIGRAVITY_BRAIN_DIR = path.join(homedir(), ".gemini", "antigravity", "brain")
-const ANTIGRAVITY_STATE_DB = path.join(
-  homedir(), "Library", "Application Support",
-  "Antigravity", "User", "globalStorage", "state.vscdb"
-)
-const antigravityLastSync = new Map() // sessionId → mtime of brain dir
-
-function parseAntigravitySessionIndex() {
-  // Returns [{id, title, workspacePath}]
-  if (!fs.existsSync(ANTIGRAVITY_STATE_DB)) return []
-  const rows = sqliteQuery(
-    ANTIGRAVITY_STATE_DB,
-    "SELECT value FROM ItemTable WHERE key='antigravityUnifiedStateSync.trajectorySummaries' LIMIT 1"
-  )
-  if (!rows.length || !rows[0].value) return []
-
-  try {
-    const outer = Buffer.from(rows[0].value, "base64")
-    // Extract inner base64 chunks (≥60 chars, valid base64)
-    const chunks = []
-    const b64Re = /[A-Za-z0-9+/]{60,}={0,2}/g
-    let m
-    while ((m = b64Re.exec(outer.toString("binary"))) !== null) {
-      chunks.push(m[0])
-    }
-
-    const sessions = []
-    for (const chunk of chunks) {
-      try {
-        const decoded = Buffer.from(chunk, "base64")
-        const text = decoded.toString("utf8")
-        // Extract UUID (first occurrence)
-        const uuidMatch = text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)
-        if (!uuidMatch) continue
-        const id = uuidMatch[0]
-        // Extract title: first readable string before the UUID
-        const beforeUuid = text.slice(0, text.indexOf(id))
-        const titleMatch = beforeUuid.match(/([A-Za-z][A-Za-z0-9 ,.'"\-:!?]{5,})/)
-        const title = titleMatch ? titleMatch[1].trim() : null
-        // Extract workspace: file:// URL
-        const wsMatch = text.match(/file:\/\/\/[^\s\x00-\x1f"']{3,}/)
-        const workspacePath = wsMatch ? wsMatch[0].replace("file://", "") : ""
-        sessions.push({ id, title, workspacePath })
-      } catch { /* skip */ }
-    }
-
-    // Deduplicate by id (first occurrence wins)
-    const seen = new Set()
-    return sessions.filter(s => { if (seen.has(s.id)) return false; seen.add(s.id); return true })
-  } catch { return [] }
-}
-
-function readAntigravitySessionArtifacts(sessionId) {
-  const brainDir = path.join(ANTIGRAVITY_BRAIN_DIR, sessionId)
-  if (!fs.existsSync(brainDir)) return null
-
-  const artifacts = ["task", "implementation_plan", "walkthrough", "architecture_rules"]
-  const parts = []
-  let latestUpdatedAt = null
-
-  for (const name of artifacts) {
-    const mdPath = path.join(brainDir, `${name}.md`)
-    const metaPath = path.join(brainDir, `${name}.md.metadata.json`)
-    if (!fs.existsSync(mdPath)) continue
-
-    let content = ""
-    try { content = fs.readFileSync(mdPath, "utf8").trim() } catch { continue }
-    if (!content) continue
-
-    let updatedAt = null
-    try {
-      const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"))
-      updatedAt = meta.updatedAt ?? null
-    } catch { /* metadata optional */ }
-
-    if (updatedAt && (!latestUpdatedAt || updatedAt > latestUpdatedAt)) {
-      latestUpdatedAt = updatedAt
-    }
-    parts.push({ name, content, updatedAt })
-  }
-
-  return { parts, latestUpdatedAt }
-}
+const antigravityLastSync = new Map() // sessionId → mtime
 
 async function syncAntigravitySession(session) {
-  const { id, title, workspacePath } = session
-  const artifacts = readAntigravitySessionArtifacts(id)
-  if (!artifacts || !artifacts.parts.length) return
-
-  const { parts, latestUpdatedAt } = artifacts
-  const lastActivity = latestUpdatedAt ?? new Date().toISOString()
-
-  // Check cache — skip if nothing changed
-  const brainDir = path.join(ANTIGRAVITY_BRAIN_DIR, id)
-  let mtime = 0
-  try { mtime = fs.statSync(brainDir).mtimeMs } catch { return }
-  if (antigravityLastSync.get(id) === mtime) return
-  antigravityLastSync.set(id, mtime)
-
-  // Convert artifacts to session messages: one "user" prompt + one "assistant" response per artifact
-  const converted = []
-  for (const part of parts) {
-    const labelMap = {
-      task: "Task",
-      implementation_plan: "Implementation Plan",
-      walkthrough: "Walkthrough",
-      architecture_rules: "Architecture Rules",
-    }
-    converted.push({
-      uuid: `antigravity-${id}-${part.name}-user`,
-      parentUuid: null,
-      type: "human",
-      sessionId: id,
-      timestamp: part.updatedAt ?? lastActivity,
-      isSidechain: false,
-      message: { role: "user", content: `[${labelMap[part.name] ?? part.name}]` },
-    })
-    converted.push({
-      uuid: `antigravity-${id}-${part.name}-assistant`,
-      parentUuid: `antigravity-${id}-${part.name}-user`,
-      type: "assistant",
-      sessionId: id,
-      timestamp: part.updatedAt ?? lastActivity,
-      isSidechain: false,
-      message: { role: "assistant", content: part.content },
-    })
-  }
-
-  const projectDir = workspacePath ? normProjectDir(workspacePath) : "antigravity-global"
-
-  const meta = {
-    id,
-    projectPath: `antigravity:${projectDir}`,
-    messageCount: converted.length,
-    userMessageCount: parts.length,
-    lastActivity,
-    isActive: false,
-    firstName: title ?? null,
-    source: "antigravity",
-  }
-
+  const result = readAntigravitySession(
+    session,
+    id => antigravityLastSync.get(id),
+    (id, v) => antigravityLastSync.set(id, v)
+  )
+  if (!result) return
   try {
     const resp = await fetch(`${WORKER_URL}/api/sync`, {
       method: "PUT",
       headers: { "Content-Type": "application/json", "X-Auth-Pin": AUTH_PIN },
-      body: JSON.stringify({ meta, msgs: converted }),
+      body: JSON.stringify({ meta: result.meta, msgs: result.msgs }),
     })
     if (resp.ok) {
-      log(`✓ antigravity ${projectDir}/${id.slice(0, 8)} "${title ?? ""}" (${parts.length} artifacts)`)
+      log(`✓ antigravity ${result.meta.projectPath}/${result.meta.id.slice(0, 8)} "${result.meta.firstName ?? ""}" (${result.meta.userMessageCount} artifacts)`)
     } else {
       log(`✗ antigravity sync failed ${resp.status}`)
     }
@@ -830,139 +688,83 @@ async function syncAntigravitySession(session) {
   }
 }
 
+async function syncAntigravityResults(results) {
+  for (const result of results) {
+    try {
+      const resp = await fetch(`${WORKER_URL}/api/sync`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", "X-Auth-Pin": AUTH_PIN },
+        body: JSON.stringify(result),
+      })
+      if (resp.ok) {
+        log(`✓ antigravity ${result.meta.projectPath}/${result.meta.id.slice(0, 8)} "${result.meta.firstName ?? ""}" (${result.msgs.length} msgs)`)
+      }
+    } catch (e) {
+      log(`✗ antigravity sync error: ${e.message}`)
+    }
+  }
+}
+
 async function initialSyncAntigravity() {
   if (!fs.existsSync(ANTIGRAVITY_BRAIN_DIR)) { log("Antigravity brain dir not found — Antigravity sync disabled"); return }
-  const sessions = parseAntigravitySessionIndex()
-  // Also pick up any brain sessions not in the index
-  const brainIds = new Set(fs.readdirSync(ANTIGRAVITY_BRAIN_DIR))
-  const indexIds = new Set(sessions.map(s => s.id))
-  for (const id of brainIds) {
-    if (!indexIds.has(id)) sessions.push({ id, title: null, workspacePath: "" })
+
+  // Try live RPC first (full chat history)
+  const indexSessions = parseAntigravitySessionIndex()
+  const indexMap = new Map(indexSessions.map(s => [s.id, s]))
+  const rpcResults = await readAntigravityRpcSessions(indexMap).catch(() => [])
+  if (rpcResults.length) {
+    log(`Antigravity: ${rpcResults.length} session(s) via live RPC`)
+    await syncAntigravityResults(rpcResults)
+    return
   }
-  for (const session of sessions) {
+
+  // Fall back to markdown artifacts
+  const brainIds = new Set(fs.readdirSync(ANTIGRAVITY_BRAIN_DIR))
+  const indexIds = new Set(indexSessions.map(s => s.id))
+  for (const id of brainIds) {
+    if (!indexIds.has(id)) indexSessions.push({ id, title: null, workspacePath: "" })
+  }
+  for (const session of indexSessions) {
     await syncAntigravitySession(session).catch(() => {})
   }
-  log(`Antigravity: synced ${sessions.length} session(s)`)
+  log(`Antigravity: synced ${indexSessions.length} session(s) from artifacts`)
 }
 
 function startAntigravityWatcher() {
   if (!fs.existsSync(ANTIGRAVITY_BRAIN_DIR)) return
   const indexSessions = parseAntigravitySessionIndex()
   const indexMap = new Map(indexSessions.map(s => [s.id, s]))
-
   watch(ANTIGRAVITY_BRAIN_DIR, { recursive: true }, (_event, filename) => {
     if (!filename) return
     const sessionId = filename.split(path.sep)[0]
     if (!sessionId) return
-    const session = indexMap.get(sessionId) ?? { id: sessionId, title: null, workspacePath: "" }
-    antigravityLastSync.delete(sessionId) // force re-sync on any change
-    syncAntigravitySession(session).catch(() => {})
+    // Try live RPC first, fall back to artifact for changed session
+    readAntigravityRpcSessions(indexMap).then(results => {
+      if (results.length) {
+        syncAntigravityResults(results).catch(() => {})
+      } else {
+        const session = indexMap.get(sessionId) ?? { id: sessionId, title: null, workspacePath: "" }
+        antigravityLastSync.delete(sessionId)
+        syncAntigravitySession(session).catch(() => {})
+      }
+    }).catch(() => {
+      const session = indexMap.get(sessionId) ?? { id: sessionId, title: null, workspacePath: "" }
+      antigravityLastSync.delete(sessionId)
+      syncAntigravitySession(session).catch(() => {})
+    })
   })
   log(`Watching Antigravity brain at ${ANTIGRAVITY_BRAIN_DIR}`)
 }
 
-// ── Cursor adaptor ────────────────────────────────────────────────────────────
-// Cursor stores chats in ~/.cursor/chats/{workspaceHash}/{sessionUUID}/store.db
-// Each store.db has:
-//   meta  (key TEXT, value TEXT)  — hex-encoded JSON with {name, createdAt, lastUsedModel}
-//   blobs (id TEXT, data BLOB)    — raw JSON message objects {role, content, id?}
-// Workspace hash → folder path via:
-//   ~/Library/Application Support/Cursor/User/workspaceStorage/{hash}/workspace.json
+// ── Cursor adaptor (via platform-readers.mjs) ────────────────────────────────
+// Reads from globalStorage/state.vscdb cursorDiskKV — all 271+ sessions.
 
-const CURSOR_CHATS_DIR = path.join(homedir(), ".cursor", "chats")
-const CURSOR_WS_DIR = path.join(
-  homedir(), "Library", "Application Support", "Cursor", "User", "workspaceStorage"
+const CURSOR_GLOBAL_DB = path.join(
+  homedir(), "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb"
 )
-const cursorLastSync = new Map() // sessionUUID → latestRootBlobId (unchanged = skip)
+const cursorLastSync = new Map() // composerId → lastUpdatedAt
 
-function buildCursorWorkspaceMap() {
-  const map = new Map() // hash → folder path
-  if (!fs.existsSync(CURSOR_WS_DIR)) return map
-  for (const hash of fs.readdirSync(CURSOR_WS_DIR)) {
-    const wjPath = path.join(CURSOR_WS_DIR, hash, "workspace.json")
-    try {
-      const wj = JSON.parse(fs.readFileSync(wjPath, "utf8"))
-      const folder = wj.folder?.replace("file://", "") ?? ""
-      if (folder) map.set(hash, folder)
-    } catch { /* skip */ }
-  }
-  return map
-}
-
-function readCursorSession(sessionDir, workspaceFolder) {
-  const dbPath = path.join(sessionDir, "store.db")
-  if (!fs.existsSync(dbPath)) return null
-
-  const metaRows = sqliteQuery(dbPath, "SELECT key, value FROM meta LIMIT 10")
-  if (!metaRows.length) return null
-
-  let sessionMeta = null
-  for (const row of metaRows) {
-    try {
-      sessionMeta = JSON.parse(Buffer.from(row.value, "hex").toString("utf8"))
-      if (sessionMeta.agentId) break
-    } catch { continue }
-  }
-  if (!sessionMeta?.agentId) return null
-
-  const latestRootBlobId = sessionMeta.latestRootBlobId
-  const sessionId = sessionMeta.agentId
-
-  // Skip if unchanged
-  if (cursorLastSync.get(sessionId) === latestRootBlobId) return null
-  cursorLastSync.set(sessionId, latestRootBlobId)
-
-  // Read all blobs — each is a JSON message {role, content, id?}
-  const blobs = sqliteQuery(dbPath, "SELECT data FROM blobs")
-  const messages = []
-  for (const b of blobs) {
-    try {
-      const msg = JSON.parse(b.data)
-      if (msg.role === "user" || msg.role === "assistant") messages.push(msg)
-    } catch { /* skip non-JSON or non-message blobs */ }
-  }
-  if (!messages.length) return null
-
-  // Convert to SessionMessage format
-  const converted = messages.map((m, i) => ({
-    uuid: m.id ?? `cursor-${sessionId}-${i}`,
-    parentUuid: null,
-    type: m.role === "assistant" ? "assistant" : "human",
-    sessionId,
-    timestamp: sessionMeta.createdAt ? new Date(sessionMeta.createdAt).toISOString() : new Date().toISOString(),
-    isSidechain: false,
-    message: { role: m.role, content: m.content ?? "" },
-  }))
-
-  const projectDir = workspaceFolder
-    ? normProjectDir(workspaceFolder)
-    : `cursor-unknown`
-
-  const firstUserText = converted.find(m => m.message.role === "user")
-    ?.message?.content
-  const firstName = typeof firstUserText === "string"
-    ? firstUserText.replace(/<[^>]+>/g, "").trim().slice(0, 80)
-    : null
-
-  return {
-    meta: {
-      id: sessionId,
-      projectPath: `cursor:${projectDir}`,
-      messageCount: converted.length,
-      userMessageCount: converted.filter(m => m.message.role === "user").length,
-      lastActivity: new Date(sessionMeta.createdAt ?? Date.now()).toISOString(),
-      isActive: false,
-      firstName,
-      source: "cursor",
-      lastUsedModel: sessionMeta.lastUsedModel,
-    },
-    msgs: converted,
-  }
-}
-
-async function syncCursorSession(sessionDir, workspaceFolder) {
-  const result = readCursorSession(sessionDir, workspaceFolder)
-  if (!result) return
+async function syncCursorResult(result) {
   try {
     const resp = await fetch(`${WORKER_URL}/api/sync`, {
       method: "PUT",
@@ -980,147 +782,46 @@ async function syncCursorSession(sessionDir, workspaceFolder) {
 }
 
 async function initialSyncCursor() {
-  if (!fs.existsSync(CURSOR_CHATS_DIR)) return
-  const wsMap = buildCursorWorkspaceMap()
-  let count = 0
-  for (const wsHash of fs.readdirSync(CURSOR_CHATS_DIR)) {
-    const wsDir = path.join(CURSOR_CHATS_DIR, wsHash)
-    if (!fs.statSync(wsDir).isDirectory()) continue
-    const wsFolder = wsMap.get(wsHash) ?? ""
-    for (const sessionUUID of fs.readdirSync(wsDir)) {
-      const sessionDir = path.join(wsDir, sessionUUID)
-      if (!fs.statSync(sessionDir).isDirectory()) continue
-      await syncCursorSession(sessionDir, wsFolder)
-      count++
-    }
+  if (!fs.existsSync(CURSOR_GLOBAL_DB)) { log("Cursor globalStorage DB not found — Cursor sync disabled"); return }
+  const results = readCursorSessions(
+    id => cursorLastSync.get(id),
+    (id, v) => cursorLastSync.set(id, v)
+  )
+  for (const result of results) {
+    await syncCursorResult(result)
   }
-  log(`Cursor: synced ${count} session(s)`)
+  log(`Cursor: synced ${results.length} session(s)`)
 }
 
 function startCursorWatcher() {
-  if (!fs.existsSync(CURSOR_CHATS_DIR)) { log("Cursor chats dir not found — Cursor sync disabled"); return }
-  const wsMap = buildCursorWorkspaceMap()
-  watch(CURSOR_CHATS_DIR, { recursive: true }, (_event, filename) => {
-    if (!filename?.endsWith("store.db")) return
-    // filename: wsHash/sessionUUID/store.db
-    const parts = filename.split(path.sep)
-    if (parts.length < 3) return
-    const wsHash = parts[0]
-    const sessionUUID = parts[1]
-    const sessionDir = path.join(CURSOR_CHATS_DIR, wsHash, sessionUUID)
-    const wsFolder = wsMap.get(wsHash) ?? ""
-    syncCursorSession(sessionDir, wsFolder).catch(() => {})
+  if (!fs.existsSync(CURSOR_GLOBAL_DB)) return
+  const globalStorageDir = path.dirname(CURSOR_GLOBAL_DB)
+  watch(globalStorageDir, { recursive: false }, (_event, filename) => {
+    if (!filename?.includes("state.vscdb")) return
+    const results = readCursorSessions(
+      id => cursorLastSync.get(id),
+      (id, v) => cursorLastSync.set(id, v)
+    )
+    results.forEach(result => syncCursorResult(result).catch(() => {}))
   })
-  log(`Watching Cursor chats at ${CURSOR_CHATS_DIR}`)
+  log(`Watching Cursor globalStorage at ${globalStorageDir}`)
 }
 
-// ── OpenCode adaptor ──────────────────────────────────────────────────────────
-// OpenCode stores sessions in ~/.local/share/opencode/storage/
-//   session/{projectHash|global}/{sessionId}.json  — session metadata
-//   message/{sessionId}/{messageId}.json           — individual messages
-// Session JSON: {id, version, projectID, directory, title, time: {created, updated}}
-// Message JSON: {id, sessionID, role, time: {created}, summary?, model?}
-//   Messages with role "user"/"assistant" may have a "parts" array with text content
-//   or the content may be stored differently. We read what's available.
+// ── OpenCode adaptor (via platform-readers.mjs) ───────────────────────────────
 
-const OPENCODE_STORAGE = path.join(homedir(), ".local", "share", "opencode", "storage")
-const opencodeLastSync = new Map() // sessionId → updatedAt+partCount (string, for change detection)
-
-function readOpenCodeSession(sessionFile) {
-  let sessionData
-  try { sessionData = JSON.parse(fs.readFileSync(sessionFile, "utf8")) } catch { return null }
-  if (!sessionData?.id) return null
-
-  const sessionId = sessionData.id
-  const updatedAt = sessionData.time?.updated ?? sessionData.time?.created ?? 0
-
-  // Count total parts across all messages to detect new content even if updatedAt unchanged
-  const partBaseDir = path.join(OPENCODE_STORAGE, "part")
-  let totalParts = 0
-  const msgDir0 = path.join(OPENCODE_STORAGE, "message", sessionId)
-  if (fs.existsSync(msgDir0)) {
-    for (const mf of fs.readdirSync(msgDir0)) {
-      const msgId = mf.replace(".json", "")
-      const pd = path.join(partBaseDir, msgId)
-      if (fs.existsSync(pd)) totalParts += fs.readdirSync(pd).length
-    }
-  }
-  const cacheVal = `${updatedAt}:${totalParts}`
-  if (opencodeLastSync.get(sessionId) === cacheVal) return null
-  opencodeLastSync.set(sessionId, cacheVal)
-
-  // Read all messages for this session
-  const msgDir = path.join(OPENCODE_STORAGE, "message", sessionId)
-  const messages = []
-  if (fs.existsSync(msgDir)) {
-    for (const mf of fs.readdirSync(msgDir).filter(f => f.endsWith(".json"))) {
-      try {
-        const m = JSON.parse(fs.readFileSync(path.join(msgDir, mf), "utf8"))
-        if (m.role === "user" || m.role === "assistant") messages.push(m)
-      } catch { /* skip */ }
-    }
-  }
-
-  // Sort by creation time
-  messages.sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))
-
-  // Read parts for each message — actual text lives in storage/part/{messageId}/*.json
-  function readMessageContent(messageId) {
-    const partDir = path.join(OPENCODE_STORAGE, "part", messageId)
-    if (!fs.existsSync(partDir)) return null
-    const parts = []
-    for (const pf of fs.readdirSync(partDir).filter(f => f.endsWith(".json"))) {
-      try {
-        const p = JSON.parse(fs.readFileSync(path.join(partDir, pf), "utf8"))
-        if (p.type === "text" && p.text) parts.push({ type: "text", text: p.text, order: p.time?.start ?? 0 })
-        else if (p.type === "reasoning" && p.text) parts.push({ type: "thinking", thinking: p.text, order: p.time?.start ?? 0 })
-        else if (p.type === "tool" && p.tool) parts.push({ type: "tool_use", name: p.tool, input: p.input ?? {}, id: p.id ?? pf, order: p.time?.start ?? 0 })
-      } catch { /* skip */ }
-    }
-    parts.sort((a, b) => a.order - b.order)
-    if (!parts.length) return null
-    // If only one text part, return plain string for cleaner rendering
-    const textParts = parts.filter(p => p.type === "text")
-    if (parts.length === textParts.length && textParts.length === 1) return textParts[0].text
-    return parts.map(({ order: _o, ...rest }) => rest)
-  }
-
-  const converted = messages.map((m, i) => {
-    const content = readMessageContent(m.id) ?? m.summary?.title ?? `[${m.role} message]`
-    return {
-      uuid: m.id ?? `opencode-${sessionId}-${i}`,
-      parentUuid: null,
-      type: m.role === "assistant" ? "assistant" : "human",
-      sessionId,
-      timestamp: m.time?.created ? new Date(m.time.created).toISOString() : new Date().toISOString(),
-      isSidechain: false,
-      message: { role: m.role, content },
-    }
-  })
-
-  const projectDir = sessionData.directory
-    ? normProjectDir(sessionData.directory)
-    : `opencode-global`
-
-  return {
-    meta: {
-      id: sessionId,
-      projectPath: `opencode:${projectDir}`,
-      messageCount: converted.length,
-      userMessageCount: converted.filter(m => m.message.role === "user").length,
-      lastActivity: new Date(updatedAt || sessionData.time?.created || Date.now()).toISOString(),
-      isActive: false,
-      firstName: sessionData.title ?? null,
-      source: "opencode",
-      lastUsedModel: messages.find(m => m.model?.modelID)?.model?.modelID,
-    },
-    msgs: converted,
-  }
-}
+const opencodeLastSync = new Map() // sessionId → cacheVal
 
 async function syncOpenCodeSession(sessionFile) {
-  const result = readOpenCodeSession(sessionFile)
+  const result = readOpenCodeSession(
+    sessionFile,
+    id => opencodeLastSync.get(id),
+    (id, v) => opencodeLastSync.set(id, v)
+  )
   if (!result) return
+  await pushOpenCodeResult(result)
+}
+
+async function pushOpenCodeResult(result) {
   try {
     const resp = await fetch(`${WORKER_URL}/api/sync`, {
       method: "PUT",
@@ -1141,13 +842,12 @@ async function initialSyncOpenCode() {
   const sessionBaseDir = path.join(OPENCODE_STORAGE, "session")
   if (!fs.existsSync(sessionBaseDir)) { log("OpenCode storage not found — OpenCode sync disabled"); return }
   let count = 0
-  for (const projectHash of fs.readdirSync(sessionBaseDir)) {
-    const projectDir = path.join(sessionBaseDir, projectHash)
-    if (!fs.statSync(projectDir).isDirectory()) continue
-    for (const sf of fs.readdirSync(projectDir).filter(f => f.endsWith(".json"))) {
-      await syncOpenCodeSession(path.join(projectDir, sf))
-      count++
-    }
+  for (const { result } of iterOpenCodeSessions(
+    id => opencodeLastSync.get(id),
+    (id, v) => opencodeLastSync.set(id, v)
+  )) {
+    await pushOpenCodeResult(result)
+    count++
   }
   log(`OpenCode: synced ${count} session(s)`)
 }
@@ -1161,20 +861,15 @@ function startOpenCodeWatcher() {
     if (!fs.existsSync(full)) return
     syncOpenCodeSession(full).catch(() => {})
   })
-  // Also watch message dir so updates to individual messages trigger re-sync
   const msgBaseDir = path.join(OPENCODE_STORAGE, "message")
   if (fs.existsSync(msgBaseDir)) {
     watch(msgBaseDir, { recursive: true }, (_event, filename) => {
       if (!filename?.endsWith(".json")) return
-      // filename: sessionId/messageId.json — find the session file
       const sessionId = filename.split(path.sep)[0]
       if (!sessionId) return
-      // Find the session file in any project dir
-      const sessionBaseDir2 = path.join(OPENCODE_STORAGE, "session")
-      for (const projectHash of fs.readdirSync(sessionBaseDir2)) {
-        const sf = path.join(sessionBaseDir2, projectHash, `${sessionId}.json`)
+      for (const projectHash of fs.readdirSync(path.join(OPENCODE_STORAGE, "session"))) {
+        const sf = path.join(OPENCODE_STORAGE, "session", projectHash, `${sessionId}.json`)
         if (fs.existsSync(sf)) {
-          // Reset cache so this session re-syncs even if timestamp unchanged
           opencodeLastSync.delete(sessionId)
           syncOpenCodeSession(sf).catch(() => {})
           break
