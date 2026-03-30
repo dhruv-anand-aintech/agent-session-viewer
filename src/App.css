@@ -186,7 +186,7 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
 .jump-bottom-btn { color: var(--accent) !important; }
 
 /* ── Scroll area ──────────────────────────────────────────────────────────── */
-.messages-scroll { flex: 1; overflow-y: auto; padding: 28px 0 calc(48px + env(safe-area-inset-bottom, 0px)); }
+.messages-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 28px 0 calc(48px + env(safe-area-inset-bottom, 0px)); }
 .messages-scroll::-webkit-scrollbar { width: 4px; }
 .messages-scroll::-webkit-scrollbar-track { background: transparent; }
 .messages-scroll::-webkit-scrollbar-thumb { background: var(--border-100); border-radius: 2px; }

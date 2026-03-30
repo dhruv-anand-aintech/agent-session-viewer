@@ -413,59 +413,94 @@ async function findWorkingAntigravityEndpoint(csrfToken, ports) {
 
 function antigravityStepsToMessages(cascadeId, steps) {
   const msgs = []
+
+  // Group consecutive assistant steps into a single message with ContentBlock[]
+  // so they render via the pretty card system (BashCard, FileReadCard, etc.)
+  let pendingAssistantBlocks = []
+  let pendingTs = null
+
+  function flushAssistant(i) {
+    if (!pendingAssistantBlocks.length) return
+    msgs.push({
+      uuid: `antigravity-${cascadeId}-step-${i}-asst`,
+      parentUuid: msgs.length > 0 ? msgs[msgs.length - 1].uuid : null,
+      type: "assistant",
+      sessionId: cascadeId,
+      timestamp: pendingTs ?? new Date().toISOString(),
+      isSidechain: false,
+      message: { role: "assistant", content: pendingAssistantBlocks },
+    })
+    pendingAssistantBlocks = []
+    pendingTs = null
+  }
+
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i]
     const type = step.type ?? ""
-    let role = null
-    let content = null
+    const ts = step.metadata?.createdAt ?? step.timestamp ?? new Date().toISOString()
 
     if (type.includes("USER_INPUT")) {
-      role = "user"
+      flushAssistant(i)
       const items = step.userInput?.items ?? []
-      content = items.map(it => it.text ?? "").filter(Boolean).join("\n") || (step.userInput?.userResponse ?? "")
+      const text = items.map(it => it.text ?? "").filter(Boolean).join("\n") || (step.userInput?.userResponse ?? "")
+      if (!text) continue
+      msgs.push({
+        uuid: `antigravity-${cascadeId}-step-${i}`,
+        parentUuid: msgs.length > 0 ? msgs[msgs.length - 1].uuid : null,
+        type: "human",
+        sessionId: cascadeId,
+        timestamp: ts,
+        isSidechain: false,
+        message: { role: "user", content: text },
+      })
     } else if (type.includes("PLANNER_RESPONSE") || type.includes("AGENT_RESPONSE")) {
-      role = "assistant"
+      if (!pendingTs) pendingTs = ts
       const pr = step.plannerResponse ?? step.agentResponse ?? {}
-      // Build content: thinking block + tool calls or fallback to response text
-      const parts = []
-      if (pr.thinking) parts.push(`*${pr.thinking.trim()}*`)
+      if (pr.thinking) pendingAssistantBlocks.push({ type: "thinking", thinking: pr.thinking })
       const toolCalls = pr.toolCalls ?? []
-      if (toolCalls.length) {
-        for (const tc of toolCalls) {
-          try { parts.push(`**${tc.name}**\n\`\`\`json\n${tc.argumentsJson ?? "{}"}\n\`\`\``) } catch { /* skip */ }
-        }
+      for (const tc of toolCalls) {
+        try {
+          pendingAssistantBlocks.push({
+            type: "tool_use",
+            id: tc.id ?? `ag-${cascadeId}-tc-${i}`,
+            name: tc.name ?? "unknown",
+            input: (() => { try { return JSON.parse(tc.argumentsJson ?? "{}") } catch { return { _raw: tc.argumentsJson } } })(),
+          })
+        } catch { /* skip malformed */ }
       }
-      if (!parts.length) parts.push(pr.response ?? "")
-      content = parts.join("\n\n")
+      if (!toolCalls.length && !pr.thinking) {
+        const text = pr.response ?? ""
+        if (text) pendingAssistantBlocks.push({ type: "text", text })
+      }
     } else if (type.includes("EPHEMERAL_MESSAGE")) {
-      role = "assistant"
-      content = step.ephemeralMessage?.text ?? step.ephemeralMessage?.message ?? ""
+      if (!pendingTs) pendingTs = ts
+      const text = step.ephemeralMessage?.text ?? step.ephemeralMessage?.message ?? ""
+      if (text) pendingAssistantBlocks.push({ type: "text", text })
     } else if (type.includes("RUN_COMMAND")) {
-      role = "assistant"
+      if (!pendingTs) pendingTs = ts
       const cmd = step.runCommand?.commandLine ?? step.runCommand?.proposedCommandLine ?? ""
       const out = step.runCommand?.combinedOutput ?? step.runCommand?.renderedOutput?.full ?? ""
-      content = `\`\`\`shell\n$ ${cmd}\n${out}\`\`\``
-    } else if (type.includes("VIEW_FILE")) {
-      role = "assistant"
-      const fp = step.viewFile?.absolutePath ?? step.viewFile?.absolutePathUri?.replace("file://", "") ?? ""
-      content = `[View file: \`${fp}\`]`
+      const id = `ag-${cascadeId}-run-${i}`
+      pendingAssistantBlocks.push({ type: "tool_use", id, name: "Bash", input: { command: cmd, description: "run command" } })
+      if (out) pendingAssistantBlocks.push({ type: "tool_result", tool_use_id: id, content: out.slice(0, 4000) })
+    } else if (type.includes("VIEW_FILE") || type.includes("LIST_DIRECTORY")) {
+      if (!pendingTs) pendingTs = ts
+      const fp = step.viewFile?.absolutePath ?? step.viewFile?.absolutePathUri?.replace("file://", "")
+        ?? step.listDirectory?.absolutePath ?? ""
+      const toolName = type.includes("LIST_DIRECTORY") ? "LS" : "Read"
+      pendingAssistantBlocks.push({ type: "tool_use", id: `ag-${cascadeId}-view-${i}`, name: toolName, input: { file_path: fp } })
+    } else if (type.includes("FIND")) {
+      if (!pendingTs) pendingTs = ts
+      const query = step.find?.query ?? step.find?.pattern ?? ""
+      pendingAssistantBlocks.push({ type: "tool_use", id: `ag-${cascadeId}-find-${i}`, name: "Glob", input: { pattern: query } })
     } else if (type.includes("ERROR")) {
-      role = "assistant"
-      content = step.errorMessage?.shortError ?? step.errorMessage?.text ?? "[error]"
+      if (!pendingTs) pendingTs = ts
+      const text = step.errorMessage?.shortError ?? step.errorMessage?.text ?? "[error]"
+      pendingAssistantBlocks.push({ type: "text", text: `⚠ ${text}` })
     }
-
-    if (!role || !content) continue
-
-    msgs.push({
-      uuid: `antigravity-${cascadeId}-step-${i}`,
-      parentUuid: msgs.length > 0 ? msgs[msgs.length - 1].uuid : null,
-      type: role === "assistant" ? "assistant" : "human",
-      sessionId: cascadeId,
-      timestamp: step.metadata?.createdAt ?? step.timestamp ?? new Date().toISOString(),
-      isSidechain: false,
-      message: { role, content },
-    })
   }
+  flushAssistant(steps.length)
+
   return msgs
 }
 
