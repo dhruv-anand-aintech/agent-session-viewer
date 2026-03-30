@@ -4,7 +4,8 @@
 .pp-user-row {
   display: flex;
   justify-content: flex-end;
-  padding: 4px 16px 4px;
+  position: relative;
+  padding: 22px 16px 4px;
   transition: background 0.1s;
 }
 .pp-user-row:hover {
@@ -27,10 +28,10 @@
 /* ── Assistant area ──────────────────────────────────────────────────────── */
 .pp-assistant-row {
   display: flex;
-  padding: 4px 16px 4px;
+  position: relative;
+  padding: 22px 16px 4px;
   transition: background 0.1s;
   min-width: 0;
-  overflow: hidden;
 }
 .pp-assistant-row:hover {
   background: hsla(255, 100%, 100%, 0.02);
@@ -42,12 +43,13 @@
   max-width: 100%;
   width: 100%;
   min-width: 0;
+  overflow-x: hidden;
 }
 
 /* ── System / meta rows (task-notification, system-reminder) ─────────────── */
 .pp-system-row {
   display: flex; align-items: baseline; gap: 6px;
-  padding: 3px 16px; font-size: 11px; cursor: pointer;
+  padding: 22px 16px 3px; font-size: 11px; cursor: pointer;
   color: var(--text-300); opacity: 0.6;
   transition: opacity 0.1s;
   position: relative;
@@ -57,13 +59,13 @@
 .pp-system-label { flex-shrink: 0; font-weight: 500; text-transform: uppercase; letter-spacing: 0.04em; }
 .pp-system-preview { font-style: italic; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .pp-system-body { white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 10px; }
-.pp-system-row:hover .pp-timestamp { display: block; border: 0.5px solid var(--border-100); }
 
 /* ── Sub-agent (sidechain) block ─────────────────────────────────────────── */
 .pp-subagent-row {
   margin: 4px 16px;
   border-left: 2px solid hsla(263, 50%, 60%, 0.35);
-  padding-left: 10px;
+  padding: 22px 0 4px 10px;
+  position: relative;
   opacity: 0.85;
   transition: background 0.1s;
 }
@@ -75,22 +77,24 @@
   color: hsl(263, 50%, 70%);
   margin-bottom: 2px;
 }
-.pp-subagent-body .pp-user-row { padding-left: 0; padding-right: 0; }
-.pp-subagent-body .pp-assistant-row { padding-left: 0; }
+.pp-subagent-body .pp-user-row { padding-left: 0; padding-right: 0; padding-top: 4px; }
+.pp-subagent-body .pp-assistant-row { padding-left: 0; padding-top: 4px; }
 
 /* ── Turn wrapper (groups user+assistant into conversation turn) ──────────── */
 .pp-turn { padding: 8px 0 8px; }
 
 /* ── Timestamp overlay ──────────────────────────────────────────────────── */
 .pp-timestamp {
-  position: absolute; top: -20px; left: 16px;
+  position: absolute; top: 4px; left: 16px;
   font-size: 10px; color: var(--text-400);
   display: none; font-family: var(--font-mono); pointer-events: none;
   background: var(--bg-100); padding: 2px 6px; border-radius: 3px;
+  z-index: 1;
 }
 .pp-user-row:hover .pp-timestamp,
 .pp-assistant-row:hover .pp-timestamp,
-.pp-subagent-row:hover .pp-timestamp {
+.pp-subagent-row:hover .pp-timestamp,
+.pp-system-row:hover .pp-timestamp {
   display: block;
   border: 0.5px solid var(--border-100);
 }
