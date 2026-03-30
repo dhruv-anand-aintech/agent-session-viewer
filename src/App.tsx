@@ -925,10 +925,18 @@ const SIDEBAR_MIN = 140
 const SIDEBAR_MAX = 520
 const SIDEBAR_DEFAULT = 220
 
+function parseUrlSession(): { project: string; session: string } | null {
+  const s = new URLSearchParams(window.location.search).get("s")
+  if (!s) return null
+  const slash = s.lastIndexOf("/")
+  if (slash < 1) return null
+  return { project: decodeURIComponent(s.slice(0, slash)), session: s.slice(slash + 1) }
+}
+
 export default function App() {
   const { projects, connected, projectsLoading, totalSessions } = useProjects()
   const capabilities = useCapabilities()
-  const [selected, setSelected] = useState<{ project: string; session: string } | null>(null)
+  const [selected, setSelected] = useState<{ project: string; session: string } | null>(parseUrlSession)
   const [showSettings, setShowSettings] = useState(false)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [activeTab, setActiveTab] = useState<"sessions" | "debug">("sessions")
@@ -962,6 +970,13 @@ export default function App() {
     window.addEventListener("pointerup", onUp)
     return () => { window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp) }
   }, [])
+
+  useEffect(() => {
+    if (selected) {
+      const s = encodeURIComponent(selected.project) + "/" + selected.session
+      history.replaceState(null, "", "?s=" + s)
+    }
+  }, [selected])
 
   useEffect(() => {
     if (!selected && projects.length > 0 && projects[0].sessions.length > 0) {
