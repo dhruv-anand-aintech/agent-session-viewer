@@ -624,21 +624,42 @@ function DebugTab() {
   const bottomRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    const es = new EventSource("/api/debug-stream")
-    es.onopen = () => setConnected(true)
-    es.onerror = () => setConnected(false)
-    es.onmessage = (e) => {
+    let es: EventSource | null = null
+    let cancelled = false
+
+    ;(async () => {
       try {
-        const msg = JSON.parse(e.data) as { type: string; lines: string[]; target?: string }
-        if (msg.type === "init") {
-          setTarget(msg.target ?? null)
-          setLines(msg.lines)
-        } else if (msg.type === "append") {
-          setLines(prev => [...prev, ...msg.lines])
+        const r = await fetch("/api/debug-tail", { credentials: "include" })
+        if (!cancelled && r.ok) {
+          const j = (await r.json()) as { lines?: string[]; target?: string | null }
+          if (j.lines && j.lines.length > 0) {
+            setLines(j.lines)
+            setTarget(j.target ?? null)
+          }
         }
-      } catch { /* ignore */ }
+      } catch { /* ignore — SSE init will populate */ }
+
+      if (cancelled) return
+      es = new EventSource("/api/debug-stream", { withCredentials: true })
+      es.onopen = () => setConnected(true)
+      es.onerror = () => setConnected(false)
+      es.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data) as { type: string; lines: string[]; target?: string }
+          if (msg.type === "init") {
+            setTarget(msg.target ?? null)
+            setLines(msg.lines)
+          } else if (msg.type === "append") {
+            setLines(prev => [...prev, ...msg.lines])
+          }
+        } catch { /* ignore */ }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      es?.close()
     }
-    return () => es.close()
   }, [])
 
   useEffect(() => {

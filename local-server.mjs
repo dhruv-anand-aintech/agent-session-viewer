@@ -36,6 +36,9 @@ const DIST_DIR = join(__dirname, "dist")
 const PORT = parseInt(process.env.PORT ?? "3001")
 const AUTH_PIN = process.env.AUTH_PIN ?? null
 
+/** Max lines sent on initial debug load / SSE init (full file still tracked for append). */
+const DEBUG_TAIL_LINES = 500
+
 const FIVE_MIN = 5 * 60 * 1000
 
 // --- Config persistence (names + settings) ---
@@ -426,6 +429,25 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  // GET /api/debug-tail — last N lines of ~/.claude/debug/latest (instant seed; same cap as SSE init)
+  if (url.pathname === "/api/debug-tail") {
+    const debugLink = join(homedir(), ".claude", "debug", "latest")
+    let target = null
+    try { target = realpathSync(debugLink) } catch { /* missing */ }
+    if (!target) {
+      json({ target: null, lines: ["[debug file not found]"] })
+      return
+    }
+    try {
+      const lines = readFileSync(target, "utf8").split("\n")
+      const tail = lines.length > DEBUG_TAIL_LINES ? lines.slice(-DEBUG_TAIL_LINES) : lines
+      json({ target, lines: tail })
+    } catch {
+      json({ target: null, lines: ["[debug file not found]"] })
+    }
+    return
+  }
+
   // GET /api/facets/:sessionId
   const facetsMatch = url.pathname.match(/^\/api\/facets\/([^/]+)$/)
   if (facetsMatch) {
@@ -473,11 +495,18 @@ const server = http.createServer(async (req, res) => {
     }
 
     function sendInit(target) {
+      if (!target) {
+        lastLineCount = 0
+        res.write(`data: ${JSON.stringify({ type: "init", target: null, lines: ["[debug file not found]"] })}\n\n`)
+        return
+      }
       try {
         const lines = readFileSync(target, "utf8").split("\n")
         lastLineCount = lines.length
-        res.write(`data: ${JSON.stringify({ type: "init", target, lines })}\n\n`)
+        const initLines = lines.length > DEBUG_TAIL_LINES ? lines.slice(-DEBUG_TAIL_LINES) : lines
+        res.write(`data: ${JSON.stringify({ type: "init", target, lines: initLines })}\n\n`)
       } catch {
+        lastLineCount = 0
         res.write(`data: ${JSON.stringify({ type: "init", target: null, lines: ["[debug file not found]"] })}\n\n`)
       }
     }
