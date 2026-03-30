@@ -52,7 +52,6 @@ function buildProjects(map: Record<string, unknown[]>) {
       .replace(/^-Users-[^-]+-Code-/, "")
       .replace(/-/g, "/"),
     sessions: (sessions as Record<string, unknown>[])
-      .filter(s => (s as Record<string,unknown>).agentType !== "prompt_suggestion")
       .sort((a, b) =>
       String(b.lastActivity ?? "").localeCompare(String(a.lastActivity ?? ""))
     ),
@@ -152,19 +151,6 @@ export default {
       }
     }
 
-    // Patch meta fields — daemon uses X-Auth-Pin to set lightweight flags like hasInsights
-    if (url.pathname === "/api/meta-patch" && request.method === "POST") {
-      if (!checkSyncAuth(request, env)) {
-        return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: corsHeaders({ "Content-Type": "application/json" }) })
-      }
-      const { projectPath, sessionId, fields } = await request.json() as { projectPath: string; sessionId: string; fields: Record<string, unknown> }
-      const metaKey = `meta/${projectPath}/${sessionId}`
-      const existing = await env.SESSIONS_KV.get(metaKey, "json") as Record<string, unknown> | null
-      if (!existing) return new Response(JSON.stringify({ error: "Not Found" }), { status: 404, headers: corsHeaders({ "Content-Type": "application/json" }) })
-      await env.SESSIONS_KV.put(metaKey, JSON.stringify({ ...existing, ...fields }))
-      return new Response(JSON.stringify({ ok: true }), { headers: corsHeaders({ "Content-Type": "application/json" }) })
-    }
-
     // Daemon ingest endpoints — authenticated via X-Auth-Pin (must be before cookie guard)
     if (url.pathname === "/api/todos-ingest" && request.method === "POST") {
       if (!checkSyncAuth(request, env)) return new Response("Unauthorized", { status: 401, headers: corsHeaders() })
@@ -222,22 +208,6 @@ export default {
       return new Response(readable, {
         headers: corsHeaders({ "Content-Type": "text/event-stream", "Cache-Control": "no-cache" }),
       })
-    }
-
-    // Suggestions for a session: scan all metas in the project for prompt_suggestion with matching parentSessionId
-    const suggestionsMatch = url.pathname.match(/^\/api\/suggestions\/([^/]+)\/([^/]+)$/)
-    if (suggestionsMatch) {
-      const projectPath = decodeURIComponent(suggestionsMatch[1])
-      const parentSessionId = suggestionsMatch[2]
-      const list = await env.SESSIONS_KV.list({ prefix: `meta/${projectPath}/` })
-      const results = await Promise.all(
-        list.keys.map(async k => {
-          const m = await env.SESSIONS_KV.get(k.name, "json") as Record<string,unknown> | null
-          if (!m || m.agentType !== "prompt_suggestion" || m.parentSessionId !== parentSessionId) return null
-          return { parentUuid: m.suggestionParentUuid, text: m.suggestionText, id: m.id }
-        })
-      )
-      return Response.json(results.filter(Boolean), { headers: corsHeaders() })
     }
 
     // List all todos

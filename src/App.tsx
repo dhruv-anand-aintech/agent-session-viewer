@@ -19,7 +19,6 @@ interface SessionMeta {
   firstName?: string
   customName?: string
   parentSessionId?: string
-  hasInsights?: boolean
   source?: "claude" | "cursor" | "opencode" | "antigravity" | "hermes" | string
 }
 
@@ -233,30 +232,9 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
 
 // ── Session pane ──────────────────────────────────────────────────────────────
 
-type Suggestion = { parentUuid: string; text: string; id: string }
-
-function wordOverlap(a: string, b: string): number {
-  const words = (s: string) => new Set(s.toLowerCase().match(/\b\w{4,}\b/g) ?? [])
-  const wa = words(a), wb = words(b)
-  let hits = 0
-  wa.forEach(w => { if (wb.has(w)) hits++ })
-  return wa.size ? hits / wa.size : 0
-}
-
 function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projectDir: string; sessionMeta: SessionMeta; onBack?: () => void; capabilities: Capabilities }) {
   const { win, loading, hasEarlier, hasLater, loadEarlier, loadLater, loadingEarlierRef, loadingLaterRef } =
     useWindowedMessages(projectDir, sessionMeta.id, isRecentlyActive(sessionMeta.lastActivity))
-
-  const [suggestions, setSuggestions] = useState<Record<string, Suggestion>>({})
-  useEffect(() => {
-    fetch(`/api/suggestions/${encodeURIComponent(projectDir)}/${sessionMeta.id}`)
-      .then(r => r.ok ? r.json() : [])
-      .then((list: Suggestion[]) => {
-        const map: Record<string, Suggestion> = {}
-        list.forEach(s => { if (s.parentUuid) map[s.parentUuid] = s })
-        setSuggestions(map)
-      }).catch(() => {})
-  }, [projectDir, sessionMeta.id])
 
   const [todos, setTodos] = useState<TodoFile | null>(null)
   useEffect(() => {
@@ -482,20 +460,9 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
           </div>
         )}
         {visible.map((msg, i) => {
-          const sugg = msg.uuid ? suggestions[msg.uuid] : undefined
-          const nextUserMsg = sugg ? visible.slice(i + 1).find(m => m.type === "user") : undefined
-          const nextText = nextUserMsg ? (typeof nextUserMsg.message?.content === "string" ? nextUserMsg.message.content : (nextUserMsg.message?.content as {type:string;text?:string}[])?.filter(b => b.type === "text").map(b => b.text).join("") ?? "") : ""
-          const chosen = sugg && nextText ? wordOverlap(sugg.text, nextText) > 0.4 : false
           return (
-            <div key={msg.uuid ?? i} className={sugg ? "msg-with-suggestion" : undefined}>
+            <div key={msg.uuid ?? i}>
               <Block msg={msg} index={startIdx + i} nextMsg={visible[i + 1]} />
-              {sugg && (
-                <div className="suggestion-pill" title={sugg.text}>
-                  <span className="suggestion-icon">{chosen ? "✓" : "💡"}</span>
-                  <span className="suggestion-text">{sugg.text.slice(0, 80)}{sugg.text.length > 80 ? "…" : ""}</span>
-                  {chosen && <span className="suggestion-chosen">chosen</span>}
-                </div>
-              )}
             </div>
           )
         })}
@@ -518,12 +485,11 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
 
 // ── Session item ──────────────────────────────────────────────────────────────
 
-function SessionItem({ s, projectPath, isSelected, onSelect, onFacets, subagentCount, subagentsExpanded, onToggleSubagents }: {
+function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, subagentsExpanded, onToggleSubagents }: {
   s: SessionMeta
   projectPath: string
   isSelected: boolean
   onSelect: () => void
-  onFacets: (sessionId: string) => void
   subagentCount?: number
   subagentsExpanded?: boolean
   onToggleSubagents?: () => void
@@ -568,7 +534,7 @@ function SessionItem({ s, projectPath, isSelected, onSelect, onFacets, subagentC
 
   return (
     <div
-      className={`sidebar-session ${isSelected ? "active" : ""} ${s.isSidechain ? "sidechain" : ""} ${s.hasInsights ? "has-insights" : ""}`}
+      className={`sidebar-session ${isSelected ? "active" : ""} ${s.isSidechain ? "sidechain" : ""}`}
       onClick={onSelect}
       data-tooltip={tooltip}
     >
@@ -594,7 +560,6 @@ function SessionItem({ s, projectPath, isSelected, onSelect, onFacets, subagentC
             </button>
           )}
           <button className="ss-rename-btn" onClick={startEdit} title="Rename">✎</button>
-          <button className="ss-facets-btn" onClick={e => { e.stopPropagation(); onFacets(s.id) }} title="Session insights">✦</button>
           <div className="ss-meta">
             <span className="ss-count">
               {s.userMessageCount != null ? `${s.userMessageCount}/${s.messageCount}` : s.messageCount}
@@ -603,103 +568,6 @@ function SessionItem({ s, projectPath, isSelected, onSelect, onFacets, subagentC
           </div>
         </>
       )}
-    </div>
-  )
-}
-
-// ── Facets modal ──────────────────────────────────────────────────────────────
-
-interface FacetData {
-  underlying_goal?: string
-  goal_categories?: Record<string, number>
-  outcome?: string
-  user_satisfaction_counts?: Record<string, number>
-  claude_helpfulness?: string
-  session_type?: string
-  friction_counts?: Record<string, number>
-  friction_detail?: string
-  primary_success?: string
-  brief_summary?: string
-  session_id?: string
-}
-
-function FacetsModal({ sessionId, onClose }: { sessionId: string; onClose: () => void }) {
-  const [data, setData] = useState<FacetData | null | "loading">("loading")
-
-  useEffect(() => {
-    fetch(`/api/facets/${sessionId}`, { credentials: "include" })
-      .then(r => r.ok ? r.json() : null)
-      .then(d => setData(d))
-      .catch(() => setData(null))
-  }, [sessionId])
-
-  function badge(val: string | undefined) {
-    if (!val) return null
-    const colorMap: Record<string, string> = {
-      fully_achieved: "var(--success)",
-      partially_achieved: "var(--accent)",
-      not_achieved: "var(--danger)",
-      essential: "var(--success)",
-      helpful: "var(--accent)",
-      minimal: "var(--text-400)",
-    }
-    return (
-      <span className="facet-badge" style={{ color: colorMap[val] ?? "var(--text-200)" }}>
-        {val.replace(/_/g, " ")}
-      </span>
-    )
-  }
-
-  return (
-    <div className="settings-overlay" onClick={onClose}>
-      <div className="settings-modal facets-modal" onClick={e => e.stopPropagation()}>
-        <div className="settings-header">
-          <span className="settings-title">Session Insights</span>
-          <button className="settings-close" onClick={onClose}>✕</button>
-        </div>
-        <div className="settings-body">
-          {data === "loading" && <div className="facets-empty">Loading…</div>}
-          {data === null && <div className="facets-empty">No insights available yet.<br /><span style={{ color: "var(--text-400)", fontSize: 12 }}>Insights are generated after a session ends.</span></div>}
-          {data && data !== "loading" && (
-            <>
-              {data.brief_summary && (
-                <div className="facet-section">
-                  <div className="facet-label">Summary</div>
-                  <div className="facet-summary">{data.brief_summary}</div>
-                </div>
-              )}
-              <div className="facet-row-group">
-                {data.outcome && <div className="facet-row"><span className="facet-key">Outcome</span>{badge(data.outcome)}</div>}
-                {data.claude_helpfulness && <div className="facet-row"><span className="facet-key">Helpfulness</span>{badge(data.claude_helpfulness)}</div>}
-                {data.session_type && <div className="facet-row"><span className="facet-key">Session type</span><span className="facet-val">{data.session_type.replace(/_/g, " ")}</span></div>}
-                {data.primary_success && <div className="facet-row"><span className="facet-key">Primary success</span><span className="facet-val">{data.primary_success.replace(/_/g, " ")}</span></div>}
-              </div>
-              {data.underlying_goal && (
-                <div className="facet-section">
-                  <div className="facet-label">Underlying goal</div>
-                  <div className="facet-text">{data.underlying_goal}</div>
-                </div>
-              )}
-              {data.goal_categories && Object.keys(data.goal_categories).length > 0 && (
-                <div className="facet-section">
-                  <div className="facet-label">Goal categories</div>
-                  <div className="facet-tags">
-                    {Object.entries(data.goal_categories).map(([k]) => (
-                      <span key={k} className="facet-tag">{k.replace(/_/g, " ")}</span>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {data.friction_detail && (
-                <div className="facet-section">
-                  <div className="facet-label">Friction</div>
-                  <div className="facet-text">{data.friction_detail}</div>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      </div>
     </div>
   )
 }
@@ -864,13 +732,12 @@ function useIsMobile() {
   return mobile
 }
 
-function Sidebar({ projects, projectsLoading, totalSessions, selected, onSelect, onFacets, width, onDragStart, mobileOpen, onMobileClose }: {
+function Sidebar({ projects, projectsLoading, totalSessions, selected, onSelect, width, onDragStart, mobileOpen, onMobileClose }: {
   projects: ProjectData[]
   projectsLoading: boolean
   totalSessions: number | null
   selected: { project: string; session: string } | null
   onSelect: (p: string, s: string) => void
-  onFacets: (sessionId: string) => void
   width: number
   onDragStart: (e: React.PointerEvent) => void
   mobileOpen: boolean
@@ -966,7 +833,7 @@ function Sidebar({ projects, projectsLoading, totalSessions, selected, onSelect,
                 projectPath={project.path}
                 isSelected={selected?.session === s.id}
                 onSelect={() => handleSelect(project.path, s.id)}
-                onFacets={onFacets}
+
               />
             ))}
           </div>
@@ -983,7 +850,7 @@ function Sidebar({ projects, projectsLoading, totalSessions, selected, onSelect,
                   projectPath={projectPath}
                   isSelected={selected?.session === s.id}
                   onSelect={() => handleSelect(projectPath, s.id)}
-                  onFacets={onFacets}
+  
                   subagentCount={children.length}
                   subagentsExpanded={expanded}
                   onToggleSubagents={children.length > 0 ? () => toggleParent(s.id) : undefined}
@@ -995,7 +862,7 @@ function Sidebar({ projects, projectsLoading, totalSessions, selected, onSelect,
                     projectPath={cp}
                     isSelected={selected?.session === cs.id}
                     onSelect={() => handleSelect(cp, cs.id)}
-                    onFacets={onFacets}
+    
                   />
                 ))}
               </div>
@@ -1008,7 +875,6 @@ function Sidebar({ projects, projectsLoading, totalSessions, selected, onSelect,
               projectPath={projectPath}
               isSelected={selected?.session === s.id}
               onSelect={() => handleSelect(projectPath, s.id)}
-              onFacets={onFacets}
             />
           ))}
         </>
@@ -1034,7 +900,6 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [activeTab, setActiveTab] = useState<"sessions" | "debug">("sessions")
-  const [facetsSessionId, setFacetsSessionId] = useState<string | null>(null)
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = localStorage.getItem("sidebarWidth")
     return saved ? Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Number(saved))) : SIDEBAR_DEFAULT
@@ -1090,8 +955,7 @@ export default function App() {
         <button className="topbar-settings-btn" onClick={() => setShowSettings(true)} title="Settings">⚙</button>
       </header>
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
-      {facetsSessionId && <FacetsModal sessionId={facetsSessionId} onClose={() => setFacetsSessionId(null)} />}
-      <div className="main">
+<div className="main">
         {activeTab === "sessions" && (
           <>
             <Sidebar
@@ -1100,7 +964,6 @@ export default function App() {
               totalSessions={totalSessions}
               selected={selected}
               onSelect={(p, s) => setSelected({ project: p, session: s })}
-              onFacets={setFacetsSessionId}
               width={sidebarWidth}
               onDragStart={onDragStart}
               mobileOpen={mobileSidebarOpen}

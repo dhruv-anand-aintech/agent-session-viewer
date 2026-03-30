@@ -217,17 +217,6 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
 .session-todo-item.active .session-todo-check { color: var(--accent); }
 .session-todo-item.active .session-todo-text { color: var(--text-100); }
 
-.msg-with-suggestion { position: relative; }
-.suggestion-pill {
-  display: flex; align-items: center; gap: 6px;
-  margin: -4px 20px 8px; padding: 5px 10px;
-  background: hsla(50, 80%, 50%, 0.07); border: 0.5px solid hsla(50, 80%, 50%, 0.2);
-  border-radius: 6px; font-size: 11px; color: var(--text-300);
-  cursor: default;
-}
-.suggestion-icon { flex-shrink: 0; font-style: normal; }
-.suggestion-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: italic; }
-.suggestion-chosen { flex-shrink: 0; font-size: 10px; padding: 1px 5px; background: hsla(120,50%,45%,0.15); color: var(--success); border-radius: 4px; font-style: normal; }
 
 /* ── Raw mode messages ────────────────────────────────────────────────────── */
 .message-row { padding: 14px 20px; border-bottom: 0.5px solid var(--border-200); }
@@ -337,31 +326,6 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
 .topbar-tab:hover { color: var(--text-200); background: hsla(255,100%,100%,0.04); }
 .topbar-tab.active { background: var(--bg-100); color: var(--text-100); }
 
-/* ── Session insights (✦) button ─────────────────────────────────────────── */
-.ss-facets-btn {
-  opacity: 0; flex-shrink: 0;
-  background: none; border: none; cursor: pointer;
-  color: var(--accent); font-size: 11px; padding: 2px 4px; border-radius: 4px;
-  transition: all 0.12s; line-height: 1;
-}
-.sidebar-session:hover .ss-facets-btn,
-.sidebar-session.has-insights .ss-facets-btn { opacity: 1; }
-.ss-facets-btn:hover { background: var(--accent-faint); }
-
-/* ── Facets modal ─────────────────────────────────────────────────────────── */
-.facets-modal { min-width: 360px; max-width: 500px; }
-.facets-empty { padding: 24px 0; text-align: center; color: var(--text-300); line-height: 1.7; }
-.facet-section { margin-bottom: 16px; }
-.facet-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-400); margin-bottom: 6px; }
-.facet-summary { font-size: 13px; color: var(--text-100); line-height: 1.6; }
-.facet-text { font-size: 12px; color: var(--text-200); line-height: 1.6; }
-.facet-row-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; padding: 10px 12px; background: var(--bg-300); border-radius: 8px; }
-.facet-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.facet-key { font-size: 12px; color: var(--text-300); }
-.facet-val { font-size: 12px; color: var(--text-200); text-transform: capitalize; }
-.facet-badge { font-size: 12px; font-weight: 500; text-transform: capitalize; }
-.facet-tags { display: flex; flex-wrap: wrap; gap: 6px; }
-.facet-tag { font-size: 11px; padding: 3px 8px; border-radius: 99px; background: var(--bg-300); color: var(--text-300); text-transform: capitalize; }
 
 /* ── Todos tab ────────────────────────────────────────────────────────────── */
 .todos-tab { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--bg-100); }
