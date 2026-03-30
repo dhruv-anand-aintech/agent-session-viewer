@@ -217,6 +217,17 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
 .session-todo-item.active .session-todo-check { color: var(--accent); }
 .session-todo-item.active .session-todo-text { color: var(--text-100); }
 
+.msg-with-suggestion { position: relative; }
+.suggestion-pill {
+  display: flex; align-items: center; gap: 6px;
+  margin: -4px 20px 8px; padding: 5px 10px;
+  background: hsla(50, 80%, 50%, 0.07); border: 0.5px solid hsla(50, 80%, 50%, 0.2);
+  border-radius: 6px; font-size: 11px; color: var(--text-300);
+  cursor: default;
+}
+.suggestion-icon { flex-shrink: 0; font-style: normal; }
+.suggestion-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: italic; }
+.suggestion-chosen { flex-shrink: 0; font-size: 10px; padding: 1px 5px; background: hsla(120,50%,45%,0.15); color: var(--success); border-radius: 4px; font-style: normal; }
 
 /* ── Raw mode messages ────────────────────────────────────────────────────── */
 .message-row { padding: 14px 20px; border-bottom: 0.5px solid var(--border-200); }

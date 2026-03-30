@@ -232,9 +232,30 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
 
 // ── Session pane ──────────────────────────────────────────────────────────────
 
+type Suggestion = { parentUuid: string; text: string; id: string }
+
+function wordOverlap(a: string, b: string): number {
+  const words = (s: string) => new Set(s.toLowerCase().match(/\b\w{4,}\b/g) ?? [])
+  const wa = words(a), wb = words(b)
+  let hits = 0
+  wa.forEach(w => { if (wb.has(w)) hits++ })
+  return wa.size ? hits / wa.size : 0
+}
+
 function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projectDir: string; sessionMeta: SessionMeta; onBack?: () => void; capabilities: Capabilities }) {
   const { win, loading, hasEarlier, hasLater, loadEarlier, loadLater, loadingEarlierRef, loadingLaterRef } =
     useWindowedMessages(projectDir, sessionMeta.id, isRecentlyActive(sessionMeta.lastActivity))
+
+  const [suggestions, setSuggestions] = useState<Record<string, Suggestion>>({})
+  useEffect(() => {
+    fetch(`/api/suggestions/${encodeURIComponent(projectDir)}/${sessionMeta.id}`)
+      .then(r => r.ok ? r.json() : [])
+      .then((list: Suggestion[]) => {
+        const map: Record<string, Suggestion> = {}
+        list.forEach(s => { if (s.parentUuid) map[s.parentUuid] = s })
+        setSuggestions(map)
+      }).catch(() => {})
+  }, [projectDir, sessionMeta.id])
 
   const [todos, setTodos] = useState<TodoFile | null>(null)
   useEffect(() => {
@@ -460,9 +481,20 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
           </div>
         )}
         {visible.map((msg, i) => {
+          const sugg = msg.uuid ? suggestions[msg.uuid] : undefined
+          const nextUserMsg = sugg ? visible.slice(i + 1).find(m => m.type === "user") : undefined
+          const nextText = nextUserMsg ? (typeof nextUserMsg.message?.content === "string" ? nextUserMsg.message.content : (nextUserMsg.message?.content as {type:string;text?:string}[])?.filter(b => b.type === "text").map(b => b.text).join("") ?? "") : ""
+          const chosen = sugg && nextText ? wordOverlap(sugg.text, nextText) > 0.4 : false
           return (
-            <div key={msg.uuid ?? i}>
+            <div key={msg.uuid ?? i} className={sugg ? "msg-with-suggestion" : undefined}>
               <Block msg={msg} index={startIdx + i} nextMsg={visible[i + 1]} />
+              {sugg && (
+                <div className="suggestion-pill" title={sugg.text}>
+                  <span className="suggestion-icon">{chosen ? "✓" : "💡"}</span>
+                  <span className="suggestion-text">{sugg.text.slice(0, 80)}{sugg.text.length > 80 ? "…" : ""}</span>
+                  {chosen && <span className="suggestion-chosen">chosen</span>}
+                </div>
+              )}
             </div>
           )
         })}
