@@ -47,7 +47,7 @@ function buildProjects(map: Record<string, unknown[]>) {
   return Object.entries(map).map(([path, sessions]) => ({
     path,
     displayName: path
-      .replace(/^(cursor|opencode|antigravity):/, "$1: ")
+      .replace(/^(cursor|opencode|antigravity|hermes):/, "$1: ")
       .replace(/^(cursor|opencode|antigravity): -Users-[^-]+-(?:Code|gemini-antigravity-brain)-/, "$1: ")
       .replace(/^-Users-[^-]+-Code-/, "")
       .replace(/-/g, "/"),

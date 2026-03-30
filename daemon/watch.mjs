@@ -33,6 +33,8 @@ import {
   parseAntigravitySessionIndex,
   readAntigravitySession,
   readAntigravityRpcSessions,
+  HERMES_DB,
+  readHermesSessions,
 } from "../platform-readers.mjs"
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -880,6 +882,51 @@ function startOpenCodeWatcher() {
   log(`Watching OpenCode storage at ${OPENCODE_STORAGE}`)
 }
 
+// ── Hermes adaptor (via platform-readers.mjs) ────────────────────────────────
+
+const hermesLastSync = new Map() // sessionId → message_count string
+
+async function syncHermesSession(result) {
+  try {
+    const resp = await fetch(`${WORKER_URL}/api/sync`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "X-Auth-Pin": AUTH_PIN },
+      body: JSON.stringify(result),
+    })
+    if (resp.ok) {
+      log(`✓ hermes ${result.meta.projectPath}/${result.meta.id.slice(0, 8)} (${result.msgs.length} msgs)`)
+    } else {
+      log(`✗ hermes sync failed ${resp.status}`)
+    }
+  } catch (e) {
+    log(`✗ hermes fetch error: ${e.message}`)
+  }
+}
+
+async function initialSyncHermes() {
+  if (!fs.existsSync(HERMES_DB)) { log("Hermes DB not found — Hermes sync disabled"); return }
+  const results = readHermesSessions(
+    id => hermesLastSync.get(id),
+    (id, v) => hermesLastSync.set(id, v)
+  )
+  for (const result of results) await syncHermesSession(result)
+  log(`Hermes: synced ${results.length} session(s)`)
+}
+
+function startHermesWatcher() {
+  if (!fs.existsSync(HERMES_DB)) return
+  const dbDir = path.dirname(HERMES_DB)
+  watch(dbDir, { recursive: false }, (_event, filename) => {
+    if (!filename?.includes("state.db")) return
+    const results = readHermesSessions(
+      id => hermesLastSync.get(id),
+      (id, v) => hermesLastSync.set(id, v)
+    )
+    results.forEach(result => syncHermesSession(result).catch(() => {}))
+  })
+  log(`Watching Hermes DB at ${HERMES_DB}`)
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 log(`Daemon starting — worker: ${WORKER_URL}`)
@@ -916,6 +963,7 @@ await initialSync()
 await initialSyncAntigravity()
 await initialSyncCursor()
 await initialSyncOpenCode()
+await initialSyncHermes()
 
 // Initial poll / sync for all active tools
 for (const tool of activeTools) {
@@ -936,6 +984,7 @@ for (const tool of picoStyleTools) startPicoClawWatcher(tool)
 startAntigravityWatcher()
 startCursorWatcher()
 startOpenCodeWatcher()
+startHermesWatcher()
 
 // Keep event loop alive regardless of which watchers are active
 setInterval(() => {}, 60_000)

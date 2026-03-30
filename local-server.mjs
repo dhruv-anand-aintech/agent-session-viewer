@@ -22,6 +22,8 @@ import {
   parseAntigravitySessionIndex,
   readAntigravitySession,
   readAntigravityRpcSessions,
+  HERMES_DB,
+  readHermesSessions,
   normProjectDir,
 } from "./platform-readers.mjs"
 
@@ -150,6 +152,7 @@ async function loadProjects() {
     ...loadCursorSessions(),
     ...loadOpenCodeSessions(),
     ...await loadAntigravitySessions(),
+    ...loadHermesSessions(),
   ]
 
   return allProjects.sort((a, b) => {
@@ -216,6 +219,13 @@ async function loadAntigravitySessions() {
     if (r) results.push(r)
   }
   return resultsToProjects(results, "antigravity")
+}
+
+// ── Hermes sessions ────────────────────────────────────────────────────────────
+
+function loadHermesSessions() {
+  if (!existsSync(HERMES_DB)) return []
+  return resultsToProjects(readHermesSessions(null, null), "hermes")
 }
 
 // --- Auth ---

@@ -1,7 +1,7 @@
 /**
  * platform-readers.mjs — shared platform session readers
  *
- * Exports pure reader functions for Cursor, OpenCode, and Antigravity.
+ * Exports pure reader functions for Cursor, OpenCode, Antigravity, and Hermes.
  * Used by both daemon/watch.mjs (streaming sync) and local-server.mjs (direct read).
  *
  * Each reader returns { meta, msgs }[] and does NOT modify shared state.
@@ -569,4 +569,113 @@ export function readAntigravitySession(session, cacheGet, cacheSet) {
     },
     msgs: converted,
   }
+}
+
+// ── Hermes ────────────────────────────────────────────────────────────────────
+//
+// Hermes Agent stores all sessions in a single SQLite database:
+//   ~/.hermes/state.db
+//   sessions (id TEXT, source TEXT, model TEXT, title TEXT, message_count INT,
+//             started_at REAL, ended_at REAL, parent_session_id TEXT, ...)
+//   messages (session_id TEXT, role TEXT, content TEXT, tool_calls TEXT,
+//             reasoning TEXT, timestamp REAL, ...)
+//
+// `source` groups sessions by channel: "cli", "whatsapp", "telegram", etc.
+// `parent_session_id` links sub-agent sessions (shown as sidechain, like Claude Code).
+
+export const HERMES_DB = path.join(homedir(), ".hermes", "state.db")
+
+/**
+ * Reads all Hermes sessions from ~/.hermes/state.db.
+ * Returns { meta, msgs }[].
+ * Pass cacheGet/cacheSet (keyed by sessionId, value = message_count) for change detection.
+ */
+export function readHermesSessions(cacheGet, cacheSet) {
+  if (!fs.existsSync(HERMES_DB)) return []
+
+  const sessions = sqliteQuery(
+    HERMES_DB,
+    "SELECT id, source, model, title, message_count, started_at, ended_at, parent_session_id FROM sessions ORDER BY started_at DESC"
+  )
+  if (!sessions.length) return []
+
+  const results = []
+
+  for (const session of sessions) {
+    const sessionId = session.id
+    if (!sessionId) continue
+
+    // Change detection: skip if message_count unchanged
+    const cacheVal = String(session.message_count ?? 0)
+    if (cacheGet && cacheGet(sessionId) === cacheVal) continue
+    if (cacheSet) cacheSet(sessionId, cacheVal)
+
+    const msgs = sqliteQuery(
+      HERMES_DB,
+      `SELECT role, content, tool_calls, reasoning, timestamp FROM messages WHERE session_id='${sessionId.replace(/'/g, "''")}' ORDER BY timestamp`
+    )
+
+    const converted = msgs.map((m, i) => {
+      let content = m.content ?? ""
+      // Include reasoning as thinking block if present
+      if (m.reasoning) {
+        content = [
+          { type: "thinking", thinking: m.reasoning },
+          ...(content ? [{ type: "text", text: content }] : []),
+        ]
+      }
+      // Include tool calls if present
+      if (m.tool_calls && !m.reasoning) {
+        try {
+          const calls = JSON.parse(m.tool_calls)
+          if (Array.isArray(calls) && calls.length) {
+            const blocks = calls.map(tc => ({
+              type: "tool_use",
+              id: tc.id ?? `hermes-${sessionId}-tool-${i}`,
+              name: tc.function?.name ?? tc.name ?? "unknown",
+              input: (() => { try { return JSON.parse(tc.function?.arguments ?? tc.arguments ?? "{}") } catch { return {} } })(),
+            }))
+            content = content ? [{ type: "text", text: content }, ...blocks] : blocks
+          }
+        } catch { /* malformed tool_calls, keep plain content */ }
+      }
+
+      return {
+        uuid: `hermes-${sessionId}-${i}`,
+        parentUuid: i > 0 ? `hermes-${sessionId}-${i - 1}` : null,
+        type: m.role === "assistant" ? "assistant" : "human",
+        sessionId,
+        timestamp: m.timestamp ? new Date(m.timestamp * 1000).toISOString() : new Date(session.started_at * 1000).toISOString(),
+        isSidechain: !!session.parent_session_id,
+        message: { role: m.role, content },
+      }
+    })
+
+    const source = session.source ?? "cli"
+    const projectPath = `hermes:${source}`
+    const firstUserMsg = converted.find(m => m.message.role === "user")
+    const firstText = typeof firstUserMsg?.message?.content === "string"
+      ? firstUserMsg.message.content.trim().slice(0, 80)
+      : null
+
+    results.push({
+      meta: {
+        id: sessionId,
+        projectPath,
+        messageCount: converted.length,
+        userMessageCount: converted.filter(m => m.message.role === "user").length,
+        lastActivity: new Date((session.ended_at ?? session.started_at ?? 0) * 1000).toISOString(),
+        isActive: !session.ended_at,
+        firstName: session.title ?? firstText,
+        source: "hermes",
+        lastUsedModel: session.model,
+        parentSessionId: session.parent_session_id ?? undefined,
+        isSidechain: !!session.parent_session_id,
+        agentType: session.parent_session_id ? "subagent" : undefined,
+      },
+      msgs: converted,
+    })
+  }
+
+  return results
 }
