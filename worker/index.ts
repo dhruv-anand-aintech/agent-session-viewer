@@ -210,6 +210,22 @@ export default {
       })
     }
 
+    // Suggestions for a session: scan all metas in the project for prompt_suggestion with matching parentSessionId
+    const suggestionsMatch = url.pathname.match(/^\/api\/suggestions\/([^/]+)\/([^/]+)$/)
+    if (suggestionsMatch) {
+      const projectPath = decodeURIComponent(suggestionsMatch[1])
+      const parentSessionId = suggestionsMatch[2]
+      const list = await env.SESSIONS_KV.list({ prefix: `meta/${projectPath}/` })
+      const results = await Promise.all(
+        list.keys.map(async k => {
+          const m = await env.SESSIONS_KV.get(k.name, "json") as Record<string,unknown> | null
+          if (!m || m.agentType !== "prompt_suggestion" || m.parentSessionId !== parentSessionId) return null
+          return { parentUuid: m.suggestionParentUuid, text: m.suggestionText, id: m.id }
+        })
+      )
+      return Response.json(results.filter(Boolean), { headers: corsHeaders() })
+    }
+
     // List all todos
     if (url.pathname === "/api/todos") {
       const list = await env.SESSIONS_KV.list({ prefix: "todo/" })

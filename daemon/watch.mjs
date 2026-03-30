@@ -245,6 +245,18 @@ async function syncSession(filePath) {
   const agentId = firstMsg?.agentId ?? ""
   if (!agentType && agentId.includes("prompt_suggestion")) agentType = "prompt_suggestion"
 
+  // For prompt_suggestion agents, extract the suggestion text and the parentUuid it targets
+  let suggestionText, suggestionParentUuid
+  if (agentType === "prompt_suggestion") {
+    const userMsg = messages.find(m => m.type === "user")
+    suggestionParentUuid = userMsg?.parentUuid
+    const assistantMsg = messages.find(m => m.type === "assistant")
+    const content = assistantMsg?.message?.content
+    suggestionText = typeof content === "string" ? content
+      : Array.isArray(content) ? content.filter(b => b.type === "text").map(b => b.text).join("") : undefined
+    if (suggestionText) suggestionText = suggestionText.trim().slice(0, 300)
+  }
+
   // Build lightweight meta
   const conversationMsgs = messages.filter(m => m.type === "user" || m.type === "assistant")
   const userMsgs = messages.filter(isRealUserMsg)
@@ -264,6 +276,8 @@ async function syncSession(filePath) {
     isSidechain: isSubagent || (conversationMsgs.length > 0 && sidechainMsgs.length / conversationMsgs.length > 0.5),
     agentType: agentType ?? undefined,
     ...(parentSessionId ? { parentSessionId } : {}),
+    ...(suggestionParentUuid ? { suggestionParentUuid } : {}),
+    ...(suggestionText ? { suggestionText } : {}),
     source: "claude",
   }
 
