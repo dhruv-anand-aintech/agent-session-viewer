@@ -11,20 +11,27 @@ import { homedir } from "os"
 import { dirname, extname, join, sep } from "path"
 import http from "http"
 import { fileURLToPath } from "url"
-import { exec, execFileSync } from "child_process"
+import { exec } from "child_process"
 import { stripXml } from "./shared-utils.mjs"
+import {
+  readCursorSessions,
+  readOpenCodeSession,
+  iterOpenCodeSessions,
+  OPENCODE_STORAGE,
+  ANTIGRAVITY_BRAIN_DIR,
+  parseAntigravitySessionIndex,
+  readAntigravitySession,
+  readAntigravityRpcSessions,
+  HERMES_DB,
+  readHermesSessions,
+  normProjectDir,
+} from "./platform-readers.mjs"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 const CLAUDE_DIR = join(homedir(), ".claude", "projects")
 const CONFIG_FILE = join(homedir(), ".claude", "session-viewer-local.json")
 
-// ── Platform paths ─────────────────────────────────────────────────────────────
-const CURSOR_CHATS_DIR = join(homedir(), ".cursor", "chats")
-const CURSOR_WS_DIR = join(homedir(), "Library", "Application Support", "Cursor", "User", "workspaceStorage")
-const OPENCODE_STORAGE = join(homedir(), ".local", "share", "opencode", "storage")
-const ANTIGRAVITY_BRAIN_DIR = join(homedir(), ".gemini", "antigravity", "brain")
-const ANTIGRAVITY_STATE_DB = join(homedir(), "Library", "Application Support", "Antigravity", "User", "globalStorage", "state.vscdb")
 const DIST_DIR = join(__dirname, "dist")
 const PORT = parseInt(process.env.PORT ?? "3001")
 const AUTH_PIN = process.env.AUTH_PIN ?? null
@@ -51,7 +58,7 @@ function parseJsonl(fp) {
   } catch { return [] }
 }
 
-function loadProjects() {
+async function loadProjects() {
   const config = loadConfig()
   const names = config.names ?? {}
   const projects = []
@@ -144,7 +151,8 @@ function loadProjects() {
     ...projects,
     ...loadCursorSessions(),
     ...loadOpenCodeSessions(),
-    ...loadAntigravitySessions(),
+    ...await loadAntigravitySessions(),
+    ...loadHermesSessions(),
   ]
 
   return allProjects.sort((a, b) => {
@@ -154,324 +162,70 @@ function loadProjects() {
   })
 }
 
-// ── Helpers shared by platform readers ────────────────────────────────────────
-
-function normProjectDir(absDir) {
-  return absDir.replace(homedir(), "").replace(/\//g, "-").replace(/^-/, "")
-}
-
-function sqliteQuery(dbPath, sql) {
-  try {
-    const out = execFileSync("sqlite3", ["-json", dbPath, sql], { encoding: "utf8" })
-    return JSON.parse(out.trim() || "[]")
-  } catch { return [] }
-}
-
 // ── In-memory message cache for non-JSONL platforms ───────────────────────────
-// local-server reads files on demand; we cache msgs by `projectPath/sessionId`
-// so /api/session/:project/:id can serve them without re-reading.
-const msgCache = new Map() // key → SessionMessage[]
+const msgCache = new Map() // `projectPath/sessionId` → SessionMessage[]
 
-// ── Cursor sessions ────────────────────────────────────────────────────────────
-
-function buildCursorWorkspaceMap() {
-  const map = new Map()
-  if (!existsSync(CURSOR_WS_DIR)) return map
-  for (const hash of readdirSync(CURSOR_WS_DIR)) {
-    const wjPath = join(CURSOR_WS_DIR, hash, "workspace.json")
-    try {
-      const wj = JSON.parse(readFileSync(wjPath, "utf8"))
-      const folder = wj.folder?.replace("file://", "") ?? ""
-      if (folder) map.set(hash, folder)
-    } catch { /* skip */ }
-  }
-  return map
-}
-
-function loadCursorSessions() {
-  if (!existsSync(CURSOR_CHATS_DIR)) return []
-  const wsMap = buildCursorWorkspaceMap()
-  const projects = new Map() // projectPath → {path, displayName, sessions[]}
-
-  for (const wsHash of readdirSync(CURSOR_CHATS_DIR)) {
-    const wsDir = join(CURSOR_CHATS_DIR, wsHash)
-    try { if (!statSync(wsDir).isDirectory()) continue } catch { continue }
-    const wsFolder = wsMap.get(wsHash) ?? ""
-    const projectDir = wsFolder ? normProjectDir(wsFolder) : "cursor-unknown"
-    const projectPath = `cursor:${projectDir}`
-
-    for (const sessionUUID of readdirSync(wsDir)) {
-      const sessionDir = join(wsDir, sessionUUID)
-      try { if (!statSync(sessionDir).isDirectory()) continue } catch { continue }
-      const dbPath = join(sessionDir, "store.db")
-      if (!existsSync(dbPath)) continue
-
-      const metaRows = sqliteQuery(dbPath, "SELECT key, value FROM meta LIMIT 10")
-      if (!metaRows.length) continue
-
-      let sessionMeta = null
-      for (const row of metaRows) {
-        try {
-          sessionMeta = JSON.parse(Buffer.from(row.value, "hex").toString("utf8"))
-          if (sessionMeta.agentId) break
-        } catch { continue }
-      }
-      if (!sessionMeta?.agentId) continue
-
-      const blobs = sqliteQuery(dbPath, "SELECT data FROM blobs")
-      const messages = []
-      for (const b of blobs) {
-        try {
-          const msg = JSON.parse(b.data)
-          if (msg.role === "user" || msg.role === "assistant") messages.push(msg)
-        } catch { /* skip */ }
-      }
-      if (!messages.length) continue
-
-      const converted = messages.map((m, i) => ({
-        uuid: m.id ?? `cursor-${sessionMeta.agentId}-${i}`,
-        parentUuid: null,
-        type: m.role === "assistant" ? "assistant" : "human",
-        sessionId: sessionMeta.agentId,
-        timestamp: sessionMeta.createdAt ? new Date(sessionMeta.createdAt).toISOString() : new Date().toISOString(),
-        isSidechain: false,
-        message: { role: m.role, content: m.content ?? "" },
-      }))
-
-      const firstUserText = converted.find(m => m.message.role === "user")?.message?.content
-      const firstName = typeof firstUserText === "string"
-        ? firstUserText.replace(/<[^>]+>/g, "").trim().slice(0, 80) : null
-
-      const sessionId = sessionMeta.agentId
-      const cacheKey = `${projectPath}/${sessionId}`
-      msgCache.set(cacheKey, converted)
-
-      if (!projects.has(projectPath)) {
-        projects.set(projectPath, {
-          path: projectPath,
-          displayName: `cursor: ${projectDir.replace(/^-Users-[^-]+-Code-/, "").replace(/-/g, "/")}`,
-          sessions: [],
-        })
-      }
-      projects.get(projectPath).sessions.push({
-        id: sessionId,
-        projectPath,
-        messageCount: converted.length,
-        userMessageCount: converted.filter(m => m.message.role === "user").length,
-        lastActivity: new Date(sessionMeta.createdAt ?? Date.now()).toISOString(),
-        isActive: false,
-        firstName,
-        source: "cursor",
-        lastUsedModel: sessionMeta.lastUsedModel,
+function resultsToProjects(results, platformPrefix) {
+  const projects = new Map()
+  for (const { meta, msgs } of results) {
+    const { id, projectPath, lastActivity } = meta
+    msgCache.set(`${projectPath}/${id}`, msgs)
+    if (!projects.has(projectPath)) {
+      const dirPart = projectPath.replace(`${platformPrefix}:`, "")
+      projects.set(projectPath, {
+        path: projectPath,
+        displayName: `${platformPrefix}: ${dirPart.replace(/^-Users-[^-]+-Code-/, "").replace(/-/g, "/")}`,
+        sessions: [],
       })
     }
+    projects.get(projectPath).sessions.push({ ...meta })
   }
-
   for (const proj of projects.values()) {
     proj.sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity))
   }
   return Array.from(projects.values())
+}
+
+// ── Cursor sessions ────────────────────────────────────────────────────────────
+
+function loadCursorSessions() {
+  return resultsToProjects(readCursorSessions(), "cursor")
 }
 
 // ── OpenCode sessions ──────────────────────────────────────────────────────────
 
 function loadOpenCodeSessions() {
-  const sessionBaseDir = join(OPENCODE_STORAGE, "session")
-  if (!existsSync(sessionBaseDir)) return []
-  const projects = new Map()
-
-  for (const projectHash of readdirSync(sessionBaseDir)) {
-    const projectDir = join(sessionBaseDir, projectHash)
-    try { if (!statSync(projectDir).isDirectory()) continue } catch { continue }
-
-    for (const sf of readdirSync(projectDir).filter(f => f.endsWith(".json"))) {
-      let sessionData
-      try { sessionData = JSON.parse(readFileSync(join(projectDir, sf), "utf8")) } catch { continue }
-      if (!sessionData?.id) continue
-
-      const sessionId = sessionData.id
-      const msgDir = join(OPENCODE_STORAGE, "message", sessionId)
-      const messages = []
-      if (existsSync(msgDir)) {
-        for (const mf of readdirSync(msgDir).filter(f => f.endsWith(".json"))) {
-          try {
-            const m = JSON.parse(readFileSync(join(msgDir, mf), "utf8"))
-            if (m.role === "user" || m.role === "assistant") messages.push(m)
-          } catch { /* skip */ }
-        }
-      }
-      messages.sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))
-
-      function readOCMessageContent(messageId) {
-        const partDir = join(OPENCODE_STORAGE, "part", messageId)
-        if (!existsSync(partDir)) return null
-        const parts = []
-        for (const pf of readdirSync(partDir).filter(f => f.endsWith(".json"))) {
-          try {
-            const p = JSON.parse(readFileSync(join(partDir, pf), "utf8"))
-            if (p.type === "text" && p.text) parts.push({ type: "text", text: p.text, order: p.time?.start ?? 0 })
-            else if (p.type === "reasoning" && p.text) parts.push({ type: "thinking", thinking: p.text, order: p.time?.start ?? 0 })
-            else if (p.type === "tool" && p.tool) parts.push({ type: "tool_use", name: p.tool, input: p.input ?? {}, id: p.id ?? pf, order: p.time?.start ?? 0 })
-          } catch { /* skip */ }
-        }
-        parts.sort((a, b) => a.order - b.order)
-        if (!parts.length) return null
-        const textParts = parts.filter(p => p.type === "text")
-        if (parts.length === textParts.length && textParts.length === 1) return textParts[0].text
-        return parts.map(({ order: _o, ...rest }) => rest)
-      }
-
-      const converted = messages.map((m, i) => {
-        const content = readOCMessageContent(m.id) ?? m.summary?.title ?? `[${m.role} message]`
-        return {
-          uuid: m.id ?? `opencode-${sessionId}-${i}`,
-          parentUuid: null,
-          type: m.role === "assistant" ? "assistant" : "human",
-          sessionId,
-          timestamp: m.time?.created ? new Date(m.time.created).toISOString() : new Date().toISOString(),
-          isSidechain: false,
-          message: { role: m.role, content },
-        }
-      })
-
-      const pDir = sessionData.directory ? normProjectDir(sessionData.directory) : "opencode-global"
-      const projectPath = `opencode:${pDir}`
-      const updatedAt = sessionData.time?.updated ?? sessionData.time?.created ?? 0
-
-      const cacheKey = `${projectPath}/${sessionId}`
-      msgCache.set(cacheKey, converted)
-
-      if (!projects.has(projectPath)) {
-        projects.set(projectPath, {
-          path: projectPath,
-          displayName: `opencode: ${pDir.replace(/^-Users-[^-]+-Code-/, "").replace(/-/g, "/")}`,
-          sessions: [],
-        })
-      }
-      projects.get(projectPath).sessions.push({
-        id: sessionId,
-        projectPath,
-        messageCount: converted.length,
-        userMessageCount: converted.filter(m => m.message.role === "user").length,
-        lastActivity: new Date(updatedAt || Date.now()).toISOString(),
-        isActive: false,
-        firstName: sessionData.title ?? null,
-        source: "opencode",
-        lastUsedModel: messages.find(m => m.model?.modelID)?.model?.modelID,
-      })
-    }
-  }
-
-  for (const proj of projects.values()) {
-    proj.sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity))
-  }
-  return Array.from(projects.values())
+  return resultsToProjects([...iterOpenCodeSessions(null, null)].map(x => x.result), "opencode")
 }
 
 // ── Antigravity sessions ───────────────────────────────────────────────────────
 
-function parseAntigravitySessionIndexLocal() {
-  if (!existsSync(ANTIGRAVITY_STATE_DB)) return []
-  const rows = sqliteQuery(
-    ANTIGRAVITY_STATE_DB,
-    "SELECT value FROM ItemTable WHERE key='antigravityUnifiedStateSync.trajectorySummaries' LIMIT 1"
-  )
-  if (!rows.length || !rows[0].value) return []
-  try {
-    const outer = Buffer.from(rows[0].value, "base64")
-    const chunks = []
-    const b64Re = /[A-Za-z0-9+/]{60,}={0,2}/g
-    let m
-    while ((m = b64Re.exec(outer.toString("binary"))) !== null) chunks.push(m[0])
-
-    const sessions = []
-    for (const chunk of chunks) {
-      try {
-        const decoded = Buffer.from(chunk, "base64")
-        const text = decoded.toString("utf8")
-        const uuidMatch = text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)
-        if (!uuidMatch) continue
-        const id = uuidMatch[0]
-        const beforeUuid = text.slice(0, text.indexOf(id))
-        const titleMatch = beforeUuid.match(/([A-Za-z][A-Za-z0-9 ,.'"\-:!?]{5,})/)
-        const title = titleMatch ? titleMatch[1].trim() : null
-        const wsMatch = text.match(/file:\/\/\/[^\s\x00-\x1f"']{3,}/)
-        const workspacePath = wsMatch ? wsMatch[0].replace("file://", "") : ""
-        sessions.push({ id, title, workspacePath })
-      } catch { /* skip */ }
-    }
-    const seen = new Set()
-    return sessions.filter(s => { if (seen.has(s.id)) return false; seen.add(s.id); return true })
-  } catch { return [] }
-}
-
-function loadAntigravitySessions() {
+async function loadAntigravitySessions() {
   if (!existsSync(ANTIGRAVITY_BRAIN_DIR)) return []
-  const indexSessions = parseAntigravitySessionIndexLocal()
+
+  // Try live RPC first for full chat history
+  const indexSessions = parseAntigravitySessionIndex()
   const indexMap = new Map(indexSessions.map(s => [s.id, s]))
-  const brainIds = readdirSync(ANTIGRAVITY_BRAIN_DIR)
-  for (const id of brainIds) {
+  const rpcResults = await readAntigravityRpcSessions(indexMap).catch(() => [])
+  if (rpcResults.length) return resultsToProjects(rpcResults, "antigravity")
+
+  // Fall back to markdown artifacts
+  for (const id of readdirSync(ANTIGRAVITY_BRAIN_DIR)) {
     if (!indexMap.has(id)) indexMap.set(id, { id, title: null, workspacePath: "" })
   }
-
-  const projects = new Map()
-  const artifacts = ["task", "implementation_plan", "walkthrough", "architecture_rules"]
-  const labelMap = { task: "Task", implementation_plan: "Implementation Plan", walkthrough: "Walkthrough", architecture_rules: "Architecture Rules" }
-
-  for (const [id, session] of indexMap) {
-    const brainDir = join(ANTIGRAVITY_BRAIN_DIR, id)
-    if (!existsSync(brainDir)) continue
-
-    const parts = []
-    let latestUpdatedAt = null
-    for (const name of artifacts) {
-      const mdPath = join(brainDir, `${name}.md`)
-      const metaPath = join(brainDir, `${name}.md.metadata.json`)
-      if (!existsSync(mdPath)) continue
-      let content = ""
-      try { content = readFileSync(mdPath, "utf8").trim() } catch { continue }
-      if (!content) continue
-      let updatedAt = null
-      try { updatedAt = JSON.parse(readFileSync(metaPath, "utf8")).updatedAt ?? null } catch { /* optional */ }
-      if (updatedAt && (!latestUpdatedAt || updatedAt > latestUpdatedAt)) latestUpdatedAt = updatedAt
-      parts.push({ name, content, updatedAt })
-    }
-    if (!parts.length) continue
-
-    const converted = []
-    for (const part of parts) {
-      converted.push({ uuid: `antigravity-${id}-${part.name}-user`, parentUuid: null, type: "human", sessionId: id, timestamp: part.updatedAt ?? latestUpdatedAt ?? new Date().toISOString(), isSidechain: false, message: { role: "user", content: `[${labelMap[part.name] ?? part.name}]` } })
-      converted.push({ uuid: `antigravity-${id}-${part.name}-assistant`, parentUuid: `antigravity-${id}-${part.name}-user`, type: "assistant", sessionId: id, timestamp: part.updatedAt ?? latestUpdatedAt ?? new Date().toISOString(), isSidechain: false, message: { role: "assistant", content: part.content } })
-    }
-
-    const pDir = session.workspacePath ? normProjectDir(session.workspacePath) : "antigravity-global"
-    const projectPath = `antigravity:${pDir}`
-    const cacheKey = `${projectPath}/${id}`
-    msgCache.set(cacheKey, converted)
-
-    if (!projects.has(projectPath)) {
-      projects.set(projectPath, {
-        path: projectPath,
-        displayName: `antigravity: ${pDir.replace(/^-Users-[^-]+-Code-/, "").replace(/-/g, "/")}`,
-        sessions: [],
-      })
-    }
-    projects.get(projectPath).sessions.push({
-      id,
-      projectPath,
-      messageCount: converted.length,
-      userMessageCount: parts.length,
-      lastActivity: latestUpdatedAt ?? new Date().toISOString(),
-      isActive: false,
-      firstName: session.title ?? null,
-      source: "antigravity",
-    })
+  const results = []
+  for (const session of indexMap.values()) {
+    const r = readAntigravitySession(session, null, null)
+    if (r) results.push(r)
   }
+  return resultsToProjects(results, "antigravity")
+}
 
-  for (const proj of projects.values()) {
-    proj.sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity))
-  }
-  return Array.from(projects.values())
+// ── Hermes sessions ────────────────────────────────────────────────────────────
+
+function loadHermesSessions() {
+  if (!existsSync(HERMES_DB)) return []
+  return resultsToProjects(readHermesSessions(null, null), "hermes")
 }
 
 // --- Auth ---
@@ -492,9 +246,9 @@ function checkHeaderAuth(req) {
 
 const sseClients = new Set()
 
-function broadcastProjects() {
+async function broadcastProjects() {
   if (sseClients.size === 0) return
-  const data = JSON.stringify(loadProjects())
+  const data = JSON.stringify(await loadProjects())
   for (const res of sseClients) {
     try { res.write(`event: projects\ndata: ${data}\n\n`) }
     catch { sseClients.delete(res) }
@@ -610,7 +364,7 @@ const server = http.createServer(async (req, res) => {
 
   // GET /api/projects
   if (url.pathname === "/api/projects") {
-    json(loadProjects())
+    json(await loadProjects())
     return
   }
 
@@ -621,7 +375,7 @@ const server = http.createServer(async (req, res) => {
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
     })
-    res.write(`event: projects\ndata: ${JSON.stringify(loadProjects())}\n\n`)
+    res.write(`event: projects\ndata: ${JSON.stringify(await loadProjects())}\n\n`)
     sseClients.add(res)
     req.on("close", () => sseClients.delete(res))
     return
