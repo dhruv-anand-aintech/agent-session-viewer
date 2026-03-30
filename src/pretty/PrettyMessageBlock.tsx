@@ -261,7 +261,7 @@ function AssistantMessage({ content, nextMsg, timestamp }: { content: string | C
   if (typeof content === "string") {
     const len = charCount(content)
     return (
-      <div className="pp-assistant-row" style={{ position: "relative" }}>
+      <div className="pp-assistant-row" title={timestamp || undefined}>
         {timestamp && <span className="pp-timestamp">{timestamp}</span>}
         <CollapsibleMessage charLen={len}>
           <div className="pp-assistant-text"><MarkdownContent text={content} /></div>
@@ -276,7 +276,7 @@ function AssistantMessage({ content, nextMsg, timestamp }: { content: string | C
   const totalLen = blocks.reduce((s, b) => s + (b.type === "text" ? (b.text?.length ?? 0) : 0), 0)
 
   return (
-    <div className="pp-assistant-row" style={{ position: "relative" }}>
+    <div className="pp-assistant-row" title={timestamp || undefined}>
       {timestamp && <span className="pp-timestamp">{timestamp}</span>}
       <CollapsibleMessage charLen={totalLen}>
         <div className="pp-assistant-bubble">
@@ -315,7 +315,7 @@ function UserMessage({ content, timestamp }: { content: string | ContentBlock[];
   const { sender, body } = parseSender(combined)
 
   return (
-    <div className="pp-user-row" data-user-turn="true" style={{ position: "relative" }}>
+    <div className="pp-user-row" data-user-turn="true" title={timestamp || undefined}>
       {timestamp && <span className="pp-timestamp">{timestamp}</span>}
       <CollapsibleMessage charLen={combined.length}>
         <div className="pp-user-bubble">
@@ -337,7 +337,7 @@ function getRawText(content: string | ContentBlock[]): string {
 function SystemRow({ label, summary, timestamp }: { label: string; summary: string; timestamp?: string }) {
   const [open, setOpen] = useState(false)
   return (
-    <div className="pp-system-row" onClick={() => setOpen(o => !o)}>
+    <div className="pp-system-row" title={timestamp || undefined} onClick={() => setOpen(o => !o)}>
       {timestamp && <span className="pp-timestamp">{timestamp}</span>}
       <span className="pp-system-icon">⚙</span>
       <span className="pp-system-label">{label}</span>
@@ -370,7 +370,7 @@ export default function PrettyMessageBlock({ msg, index, nextMsg }: { msg: Sessi
 
   if (msg.isSidechain) {
     return (
-      <div className="pp-subagent-row" style={{ position: "relative" }}>
+      <div className="pp-subagent-row" title={tsTitle || undefined}>
         {ts && <span className="pp-timestamp">{tsTitle}</span>}
         <div className="pp-subagent-label">⤷ sub-agent</div>
         <div className="pp-subagent-body">
