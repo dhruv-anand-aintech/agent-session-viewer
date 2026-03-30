@@ -183,6 +183,15 @@ export default {
       return Response.json({ keyCount: list.keys.length, selfTest }, { headers: corsHeaders() })
     }
 
+    // Same payload as first SSE "init" — lets the UI paint before EventSource connects
+    if (url.pathname === "/api/debug-tail" && request.method === "GET") {
+      const buf = await env.SESSIONS_KV.get("debug/buffer", "json") as { lines: string[]; target?: string } | null
+      return Response.json(
+        { lines: buf?.lines ?? [], target: buf?.target ?? null },
+        { headers: corsHeaders() }
+      )
+    }
+
     if (url.pathname === "/api/projects") {
       const { projects, total } = await getProjects(env)
       return Response.json(projects, { headers: corsHeaders({ "X-Total-Sessions": String(total) }) })
@@ -255,8 +264,7 @@ export default {
           const buf = await env.SESSIONS_KV.get("debug/buffer", "json") as { lines: string[]; target?: string } | null
           await send({ type: "init", lines: buf?.lines ?? [], target: buf?.target ?? null })
           let lastLen = buf?.lines?.length ?? 0
-          const deadline = Date.now() + 88_000
-          while (Date.now() < deadline && !request.signal.aborted) {
+          while (!request.signal.aborted) {
             await new Promise(r => setTimeout(r, 2000))
             const cur = await env.SESSIONS_KV.get("debug/buffer", "json") as { lines: string[]; target?: string } | null
             const curLines = cur?.lines ?? []
