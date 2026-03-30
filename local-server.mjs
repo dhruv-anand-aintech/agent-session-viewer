@@ -302,15 +302,37 @@ function loadOpenCodeSessions() {
       }
       messages.sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))
 
-      const converted = messages.map((m, i) => ({
-        uuid: m.id ?? `opencode-${sessionId}-${i}`,
-        parentUuid: null,
-        type: m.role === "assistant" ? "assistant" : "human",
-        sessionId,
-        timestamp: m.time?.created ? new Date(m.time.created).toISOString() : new Date().toISOString(),
-        isSidechain: false,
-        message: { role: m.role, content: m.summary?.title ?? `[${m.role} message]` },
-      }))
+      function readOCMessageContent(messageId) {
+        const partDir = join(OPENCODE_STORAGE, "part", messageId)
+        if (!existsSync(partDir)) return null
+        const parts = []
+        for (const pf of readdirSync(partDir).filter(f => f.endsWith(".json"))) {
+          try {
+            const p = JSON.parse(readFileSync(join(partDir, pf), "utf8"))
+            if (p.type === "text" && p.text) parts.push({ type: "text", text: p.text, order: p.time?.start ?? 0 })
+            else if (p.type === "reasoning" && p.text) parts.push({ type: "thinking", thinking: p.text, order: p.time?.start ?? 0 })
+            else if (p.type === "tool" && p.tool) parts.push({ type: "tool_use", name: p.tool, input: p.input ?? {}, id: p.id ?? pf, order: p.time?.start ?? 0 })
+          } catch { /* skip */ }
+        }
+        parts.sort((a, b) => a.order - b.order)
+        if (!parts.length) return null
+        const textParts = parts.filter(p => p.type === "text")
+        if (parts.length === textParts.length && textParts.length === 1) return textParts[0].text
+        return parts.map(({ order: _o, ...rest }) => rest)
+      }
+
+      const converted = messages.map((m, i) => {
+        const content = readOCMessageContent(m.id) ?? m.summary?.title ?? `[${m.role} message]`
+        return {
+          uuid: m.id ?? `opencode-${sessionId}-${i}`,
+          parentUuid: null,
+          type: m.role === "assistant" ? "assistant" : "human",
+          sessionId,
+          timestamp: m.time?.created ? new Date(m.time.created).toISOString() : new Date().toISOString(),
+          isSidechain: false,
+          message: { role: m.role, content },
+        }
+      })
 
       const pDir = sessionData.directory ? normProjectDir(sessionData.directory) : "opencode-global"
       const projectPath = `opencode:${pDir}`
