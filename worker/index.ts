@@ -46,7 +46,11 @@ async function getProjects(env: Env): Promise<{ projects: ReturnType<typeof buil
 function buildProjects(map: Record<string, unknown[]>) {
   return Object.entries(map).map(([path, sessions]) => ({
     path,
-    displayName: path.replace(/^-Users-[^-]+-Code-/, "").replace(/-/g, "/"),
+    displayName: path
+      .replace(/^(cursor|opencode|antigravity):/, "$1: ")
+      .replace(/^(cursor|opencode|antigravity): -Users-[^-]+-(?:Code|gemini-antigravity-brain)-/, "$1: ")
+      .replace(/^-Users-[^-]+-Code-/, "")
+      .replace(/-/g, "/"),
     sessions: (sessions as Record<string, unknown>[])
       .filter(s => (s as Record<string,unknown>).agentType !== "prompt_suggestion")
       .sort((a, b) =>
@@ -146,6 +150,19 @@ export default {
         await env.SESSIONS_KV.put("settings", JSON.stringify(body))
         return Response.json({ ok: true }, { headers: corsHeaders() })
       }
+    }
+
+    // Patch meta fields — daemon uses X-Auth-Pin to set lightweight flags like hasInsights
+    if (url.pathname === "/api/meta-patch" && request.method === "POST") {
+      if (!checkSyncAuth(request, env)) {
+        return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: corsHeaders({ "Content-Type": "application/json" }) })
+      }
+      const { projectPath, sessionId, fields } = await request.json() as { projectPath: string; sessionId: string; fields: Record<string, unknown> }
+      const metaKey = `meta/${projectPath}/${sessionId}`
+      const existing = await env.SESSIONS_KV.get(metaKey, "json") as Record<string, unknown> | null
+      if (!existing) return new Response(JSON.stringify({ error: "Not Found" }), { status: 404, headers: corsHeaders({ "Content-Type": "application/json" }) })
+      await env.SESSIONS_KV.put(metaKey, JSON.stringify({ ...existing, ...fields }))
+      return new Response(JSON.stringify({ ok: true }), { headers: corsHeaders({ "Content-Type": "application/json" }) })
     }
 
     // Daemon ingest endpoints — authenticated via X-Auth-Pin (must be before cookie guard)

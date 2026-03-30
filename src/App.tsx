@@ -20,6 +20,7 @@ interface SessionMeta {
   customName?: string
   parentSessionId?: string
   hasInsights?: boolean
+  source?: "claude" | "cursor" | "opencode" | string
 }
 
 function isRecentlyActive(iso: string): boolean {
@@ -879,6 +880,7 @@ function Sidebar({ projects, projectsLoading, totalSessions, selected, onSelect,
   // Default: flat (not grouped)
   const [grouped, setGrouped] = useState(() => localStorage.getItem("sidebarGrouped") === "true")
   const [expandedParents, setExpandedParents] = useState<Set<string>>(new Set())
+  const [platformFilter, setPlatformFilter] = useState<string>("all")
 
   function toggleGrouped(val: boolean) {
     setGrouped(val)
@@ -893,8 +895,14 @@ function Sidebar({ projects, projectsLoading, totalSessions, selected, onSelect,
     })
   }
 
+  // Detect which platforms have sessions
+  const allSessions = projects.flatMap(p => p.sessions)
+  const presentPlatforms = Array.from(new Set(allSessions.map(s => s.source ?? "claude")))
+  const showPlatformFilter = presentPlatforms.length > 1
+
   const allFlat: { s: SessionMeta; projectPath: string }[] = projects
     .flatMap(p => p.sessions.map(s => ({ s, projectPath: p.path })))
+    .filter(({ s }) => platformFilter === "all" || (s.source ?? "claude") === platformFilter)
     .sort((a, b) => String(b.s.lastActivity ?? "").localeCompare(String(a.s.lastActivity ?? "")))
 
   // Build flat groups: top-level sessions each with their subagents
@@ -928,8 +936,27 @@ function Sidebar({ projects, projectsLoading, totalSessions, selected, onSelect,
           <button className={`sidebar-view-btn ${grouped ? "active" : ""}`} onClick={() => toggleGrouped(true)}>Groups</button>
         </div>
       </div>
+      {showPlatformFilter && (
+        <div className="sidebar-platform-filter">
+          {["all", ...presentPlatforms].map(p => (
+            <button
+              key={p}
+              className={`sidebar-platform-btn ${platformFilter === p ? "active" : ""}`}
+              onClick={() => setPlatformFilter(p)}
+            >
+              {p === "all" ? "All" : p === "claude" ? "Claude" : p === "cursor" ? "Cursor" : p === "opencode" ? "OpenCode" : p === "antigravity" ? "Antigravity" : p}
+            </button>
+          ))}
+        </div>
+      )}
       {grouped ? (
-        projects.map(project => (
+        projects
+          .map(project => ({
+            ...project,
+            sessions: project.sessions.filter(s => platformFilter === "all" || (s.source ?? "claude") === platformFilter),
+          }))
+          .filter(p => p.sessions.length > 0)
+          .map(project => (
           <div key={project.path} className="sidebar-project">
             <div className="sidebar-project-name" title={project.path}>{project.displayName}</div>
             {project.sessions.map(s => (
