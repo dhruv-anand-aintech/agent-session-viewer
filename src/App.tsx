@@ -20,7 +20,7 @@ interface SessionMeta {
   customName?: string
   parentSessionId?: string
   hasInsights?: boolean
-  source?: "claude" | "cursor" | "opencode" | string
+  source?: "claude" | "cursor" | "opencode" | "antigravity" | "hermes" | string
 }
 
 function isRecentlyActive(iso: string): boolean {
@@ -944,7 +944,7 @@ function Sidebar({ projects, projectsLoading, totalSessions, selected, onSelect,
               className={`sidebar-platform-btn ${platformFilter === p ? "active" : ""}`}
               onClick={() => setPlatformFilter(p)}
             >
-              {p === "all" ? "All" : p === "claude" ? "Claude" : p === "cursor" ? "Cursor" : p === "opencode" ? "OpenCode" : p === "antigravity" ? "Antigravity" : p}
+              {p === "all" ? "All" : p === "claude" ? "Claude" : p === "cursor" ? "Cursor" : p === "opencode" ? "OpenCode" : p === "antigravity" ? "Antigravity" : p === "hermes" ? "Hermes" : p}
             </button>
           ))}
         </div>
