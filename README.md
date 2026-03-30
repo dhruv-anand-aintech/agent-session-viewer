@@ -1,19 +1,42 @@
 # Claude Session Viewer
 
-A live viewer for your local Claude Code sessions — browse conversations, see tool calls, thinking blocks, and markdown-rendered assistant responses in a faithful dark-mode UI.
+A live multi-platform session viewer — browse AI coding assistant conversations across Claude Code, Cursor, OpenCode, and Antigravity in a unified dark-mode UI with markdown rendering, tool call cards, and thinking blocks.
 
-Sessions are streamed to a Cloudflare Worker (KV storage) by a local daemon that watches your `~/.claude/projects/` directory. Works on desktop and mobile.
+Sessions are streamed to a Cloudflare Worker (KV storage) by a local daemon that watches your session directories. Works on desktop and mobile.
 
 ## Features
 
 - **Live updates** — sessions appear as you work; SSE streaming keeps the UI current
 - **Pretty mode** — markdown rendering, thinking pills, tool call cards (Bash, Read, Edit, Write, Search…)
+- **Multi-platform** — Claude Code, Cursor, OpenCode, and Antigravity sessions in one place
+- **Platform filter** — filter the sidebar by platform (All / Claude / Cursor / OpenCode / Antigravity)
 - **Sub-agent runs marked** — messages from Claude Code sub-agents (sidechain sessions) are visually distinguished with a `⤷ sub-agent` indicator and indented left border
 - **Flat or grouped sidebar** — all sessions sorted by last activity, or grouped by project
 - **Session renaming** — give sessions memorable names via the pencil icon
 - **Mobile-friendly** — slide-in sidebar drawer, back button, responsive layout
 - **PIN-protected** — simple cookie auth so you can expose the viewer remotely
 - **Claw bot support** *(optional)* — syncs WhatsApp/Telegram Claude agent sessions from any supported claw tool installation
+
+## Platform support
+
+The daemon auto-detects and syncs sessions from:
+
+| Platform | Storage location | Format |
+|---|---|---|
+| **Claude Code** | `~/.claude/projects/**/*.jsonl` | JSONL (native) |
+| **Cursor** | `~/.cursor/chats/{hash}/{uuid}/store.db` | SQLite blob store |
+| **OpenCode** | `~/.local/share/opencode/storage/` | Flat JSON files |
+| **Antigravity** | `~/.gemini/antigravity/brain/{uuid}/*.md` | Markdown artifacts |
+
+All platforms are detected automatically — no configuration needed if the directories exist.
+
+### Platform notes
+
+**Cursor** — sessions are read from the content-addressed SQLite blob store. Workspace → folder mapping is resolved via `~/Library/Application Support/Cursor/User/workspaceStorage/`. Sessions are tagged `source: "cursor"`.
+
+**OpenCode** — sessions and per-message JSON files are read from `~/.local/share/opencode/storage/`. Message content uses the summary title (full streamed text is not persisted locally by OpenCode).
+
+**Antigravity (Jetski agent)** — Google's IDE stores structured artifacts per session: `task.md`, `implementation_plan.md`, `walkthrough.md`. Each artifact is shown as an assistant message. Full conversation logs (`.pb` protobuf files) use an undisclosed schema and are not read. Session titles and workspace paths come from `state.vscdb`.
 
 ## Claw bot integration
 
@@ -79,7 +102,7 @@ Or pass flags directly:
 node daemon/watch.mjs --worker <url> --pin <pin>
 ```
 
-The daemon does an initial sync of all existing sessions, then watches `~/.claude/projects/**/*.jsonl` for live changes.
+The daemon does an initial sync of all existing sessions, then watches all supported platform directories for live changes.
 
 ### With claw tool support
 
@@ -101,7 +124,10 @@ The daemon polls each tool's SQLite DB every 5 seconds and file-watches the agen
 ```bash
 npm run dev        # Vite dev server (frontend only)
 npm run dev:api    # Local API proxy (optional)
+npm run local      # Fully local mode — no Cloudflare needed
 ```
+
+`npm run local` starts a standalone server that reads all platform session directories directly — no daemon, no Cloudflare account, no KV. All platform sources (Claude, Cursor, OpenCode, Antigravity) are supported identically to the daemon+worker stack.
 
 ## Deploying changes
 
@@ -123,9 +149,12 @@ Then just run `npm run deploy`.
 ## Architecture
 
 ```
-~/.claude/projects/**/*.jsonl       (Claude Code sessions + sub-agent sidechains)
-~/nanoclaw/store/messages.db        (claw bot chat history)
-~/nanoclaw/data/sessions/**/*.jsonl (claw bot agent sessions)
+~/.claude/projects/**/*.jsonl           (Claude Code sessions + sub-agent sidechains)
+~/.cursor/chats/{hash}/{uuid}/store.db  (Cursor agent sessions — SQLite blobs)
+~/.local/share/opencode/storage/        (OpenCode sessions — flat JSON)
+~/.gemini/antigravity/brain/{uuid}/     (Antigravity artifacts — Markdown)
+~/nanoclaw/store/messages.db            (claw bot chat history — optional)
+~/nanoclaw/data/sessions/**/*.jsonl     (claw bot agent sessions — optional)
          │
          ▼
   daemon/watch.mjs          (local file watcher + SQLite poller)
@@ -133,6 +162,13 @@ Then just run `npm run deploy`.
          ▼
   Cloudflare Worker          (worker/index.ts)
      KV: meta/* + msgs/*
+         │
+         ▼  SSE /api/stream
+  Browser (React + Vite)     (src/)
+
+  ── or (local mode) ──
+
+  local-server.mjs           (reads all platform dirs directly — no Cloudflare)
          │
          ▼  SSE /api/stream
   Browser (React + Vite)     (src/)
@@ -148,3 +184,5 @@ Then just run `npm run deploy`.
 | `OPENCLAW_DIR` | `--openclaw` | Path to openclaw repo |
 | `PICOCLAW_DIR` | `--picoclaw` | Path to picoclaw repo |
 | *(any `{NAME}_DIR`)* | `--{name}` | Any other supported claw tool |
+
+Platform directories (Cursor, OpenCode, Antigravity) are auto-detected from their standard locations and require no configuration.
