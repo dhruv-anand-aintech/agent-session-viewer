@@ -421,14 +421,29 @@ function antigravityStepsToMessages(cascadeId, steps) {
 
     if (type.includes("USER_INPUT")) {
       role = "user"
-      content = step.userInput?.userResponse ?? step.userInput?.message ?? ""
+      const items = step.userInput?.items ?? []
+      content = items.map(it => it.text ?? "").filter(Boolean).join("\n") || (step.userInput?.userResponse ?? "")
     } else if (type.includes("PLANNER_RESPONSE") || type.includes("AGENT_RESPONSE")) {
       role = "assistant"
-      content = step.plannerResponse?.response ?? step.agentResponse?.response ?? ""
+      const pr = step.plannerResponse ?? step.agentResponse ?? {}
+      // Build content: thinking block + tool calls or fallback to response text
+      const parts = []
+      if (pr.thinking) parts.push(`*${pr.thinking.trim()}*`)
+      const toolCalls = pr.toolCalls ?? []
+      if (toolCalls.length) {
+        for (const tc of toolCalls) {
+          try { parts.push(`**${tc.name}**\n\`\`\`json\n${tc.argumentsJson ?? "{}"}\n\`\`\``) } catch { /* skip */ }
+        }
+      }
+      if (!parts.length) parts.push(pr.response ?? "")
+      content = parts.join("\n\n")
+    } else if (type.includes("EPHEMERAL_MESSAGE")) {
+      role = "assistant"
+      content = step.ephemeralMessage?.text ?? step.ephemeralMessage?.message ?? ""
     } else if (type.includes("RUN_COMMAND")) {
       role = "assistant"
-      const cmd = step.runCommand?.command ?? step.runCommand?.commandLine ?? ""
-      const out = step.runCommand?.renderedOutput?.full ?? ""
+      const cmd = step.runCommand?.commandLine ?? step.runCommand?.proposedCommandLine ?? ""
+      const out = step.runCommand?.combinedOutput ?? step.runCommand?.renderedOutput?.full ?? ""
       content = `\`\`\`shell\n$ ${cmd}\n${out}\`\`\``
     } else if (type.includes("VIEW_FILE")) {
       role = "assistant"
@@ -446,7 +461,7 @@ function antigravityStepsToMessages(cascadeId, steps) {
       parentUuid: msgs.length > 0 ? msgs[msgs.length - 1].uuid : null,
       type: role === "assistant" ? "assistant" : "human",
       sessionId: cascadeId,
-      timestamp: step.timestamp ?? new Date().toISOString(),
+      timestamp: step.metadata?.createdAt ?? step.timestamp ?? new Date().toISOString(),
       isSidechain: false,
       message: { role, content },
     })
@@ -478,7 +493,7 @@ export async function readAntigravityRpcSessions(indexMap) {
 
         const ws = (summary.workspaces ?? [])[0]?.absolutePath ?? ""
         const projectDir = ws ? normProjectDir(ws) : "antigravity-global"
-        const indexEntry = indexMap?.get(cascadeId)
+        const indexEntry = indexMap instanceof Map ? indexMap.get(cascadeId) : null
         const lastModified = summary.lastModifiedTime ?? new Date().toISOString()
 
         results.push({
