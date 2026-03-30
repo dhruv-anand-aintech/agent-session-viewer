@@ -8,16 +8,23 @@
 
 import { createReadStream, existsSync, readdirSync, readFileSync, realpathSync, statSync, watch, writeFileSync } from "fs"
 import { homedir } from "os"
-import { dirname, extname, join } from "path"
+import { dirname, extname, join, sep } from "path"
 import http from "http"
 import { fileURLToPath } from "url"
-import { exec } from "child_process"
+import { exec, execFileSync } from "child_process"
 import { stripXml } from "./shared-utils.mjs"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 const CLAUDE_DIR = join(homedir(), ".claude", "projects")
 const CONFIG_FILE = join(homedir(), ".claude", "session-viewer-local.json")
+
+// ── Platform paths ─────────────────────────────────────────────────────────────
+const CURSOR_CHATS_DIR = join(homedir(), ".cursor", "chats")
+const CURSOR_WS_DIR = join(homedir(), "Library", "Application Support", "Cursor", "User", "workspaceStorage")
+const OPENCODE_STORAGE = join(homedir(), ".local", "share", "opencode", "storage")
+const ANTIGRAVITY_BRAIN_DIR = join(homedir(), ".gemini", "antigravity", "brain")
+const ANTIGRAVITY_STATE_DB = join(homedir(), "Library", "Application Support", "Antigravity", "User", "globalStorage", "state.vscdb")
 const DIST_DIR = join(__dirname, "dist")
 const PORT = parseInt(process.env.PORT ?? "3001")
 const AUTH_PIN = process.env.AUTH_PIN ?? null
@@ -119,6 +126,7 @@ function loadProjects() {
         messageCount,
         firstName,
         customName: names[`${dir}/${sessionId}`] ?? null,
+        source: "claude",
       })
     }
 
@@ -131,11 +139,317 @@ function loadProjects() {
     }
   }
 
-  return projects.sort((a, b) => {
+  // Merge in external platform sessions
+  const allProjects = [
+    ...projects,
+    ...loadCursorSessions(),
+    ...loadOpenCodeSessions(),
+    ...loadAntigravitySessions(),
+  ]
+
+  return allProjects.sort((a, b) => {
     const aLast = a.sessions[0]?.lastActivity ?? ""
     const bLast = b.sessions[0]?.lastActivity ?? ""
     return bLast.localeCompare(aLast)
   })
+}
+
+// ── Helpers shared by platform readers ────────────────────────────────────────
+
+function normProjectDir(absDir) {
+  return absDir.replace(homedir(), "").replace(/\//g, "-").replace(/^-/, "")
+}
+
+function sqliteQuery(dbPath, sql) {
+  try {
+    const out = execFileSync("sqlite3", ["-json", dbPath, sql], { encoding: "utf8" })
+    return JSON.parse(out.trim() || "[]")
+  } catch { return [] }
+}
+
+// ── In-memory message cache for non-JSONL platforms ───────────────────────────
+// local-server reads files on demand; we cache msgs by `projectPath/sessionId`
+// so /api/session/:project/:id can serve them without re-reading.
+const msgCache = new Map() // key → SessionMessage[]
+
+// ── Cursor sessions ────────────────────────────────────────────────────────────
+
+function buildCursorWorkspaceMap() {
+  const map = new Map()
+  if (!existsSync(CURSOR_WS_DIR)) return map
+  for (const hash of readdirSync(CURSOR_WS_DIR)) {
+    const wjPath = join(CURSOR_WS_DIR, hash, "workspace.json")
+    try {
+      const wj = JSON.parse(readFileSync(wjPath, "utf8"))
+      const folder = wj.folder?.replace("file://", "") ?? ""
+      if (folder) map.set(hash, folder)
+    } catch { /* skip */ }
+  }
+  return map
+}
+
+function loadCursorSessions() {
+  if (!existsSync(CURSOR_CHATS_DIR)) return []
+  const wsMap = buildCursorWorkspaceMap()
+  const projects = new Map() // projectPath → {path, displayName, sessions[]}
+
+  for (const wsHash of readdirSync(CURSOR_CHATS_DIR)) {
+    const wsDir = join(CURSOR_CHATS_DIR, wsHash)
+    try { if (!statSync(wsDir).isDirectory()) continue } catch { continue }
+    const wsFolder = wsMap.get(wsHash) ?? ""
+    const projectDir = wsFolder ? normProjectDir(wsFolder) : "cursor-unknown"
+    const projectPath = `cursor:${projectDir}`
+
+    for (const sessionUUID of readdirSync(wsDir)) {
+      const sessionDir = join(wsDir, sessionUUID)
+      try { if (!statSync(sessionDir).isDirectory()) continue } catch { continue }
+      const dbPath = join(sessionDir, "store.db")
+      if (!existsSync(dbPath)) continue
+
+      const metaRows = sqliteQuery(dbPath, "SELECT key, value FROM meta LIMIT 10")
+      if (!metaRows.length) continue
+
+      let sessionMeta = null
+      for (const row of metaRows) {
+        try {
+          sessionMeta = JSON.parse(Buffer.from(row.value, "hex").toString("utf8"))
+          if (sessionMeta.agentId) break
+        } catch { continue }
+      }
+      if (!sessionMeta?.agentId) continue
+
+      const blobs = sqliteQuery(dbPath, "SELECT data FROM blobs")
+      const messages = []
+      for (const b of blobs) {
+        try {
+          const msg = JSON.parse(b.data)
+          if (msg.role === "user" || msg.role === "assistant") messages.push(msg)
+        } catch { /* skip */ }
+      }
+      if (!messages.length) continue
+
+      const converted = messages.map((m, i) => ({
+        uuid: m.id ?? `cursor-${sessionMeta.agentId}-${i}`,
+        parentUuid: null,
+        type: m.role === "assistant" ? "assistant" : "human",
+        sessionId: sessionMeta.agentId,
+        timestamp: sessionMeta.createdAt ? new Date(sessionMeta.createdAt).toISOString() : new Date().toISOString(),
+        isSidechain: false,
+        message: { role: m.role, content: m.content ?? "" },
+      }))
+
+      const firstUserText = converted.find(m => m.message.role === "user")?.message?.content
+      const firstName = typeof firstUserText === "string"
+        ? firstUserText.replace(/<[^>]+>/g, "").trim().slice(0, 80) : null
+
+      const sessionId = sessionMeta.agentId
+      const cacheKey = `${projectPath}/${sessionId}`
+      msgCache.set(cacheKey, converted)
+
+      if (!projects.has(projectPath)) {
+        projects.set(projectPath, {
+          path: projectPath,
+          displayName: `cursor: ${projectDir.replace(/^-Users-[^-]+-Code-/, "").replace(/-/g, "/")}`,
+          sessions: [],
+        })
+      }
+      projects.get(projectPath).sessions.push({
+        id: sessionId,
+        projectPath,
+        messageCount: converted.length,
+        userMessageCount: converted.filter(m => m.message.role === "user").length,
+        lastActivity: new Date(sessionMeta.createdAt ?? Date.now()).toISOString(),
+        isActive: false,
+        firstName,
+        source: "cursor",
+        lastUsedModel: sessionMeta.lastUsedModel,
+      })
+    }
+  }
+
+  for (const proj of projects.values()) {
+    proj.sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity))
+  }
+  return Array.from(projects.values())
+}
+
+// ── OpenCode sessions ──────────────────────────────────────────────────────────
+
+function loadOpenCodeSessions() {
+  const sessionBaseDir = join(OPENCODE_STORAGE, "session")
+  if (!existsSync(sessionBaseDir)) return []
+  const projects = new Map()
+
+  for (const projectHash of readdirSync(sessionBaseDir)) {
+    const projectDir = join(sessionBaseDir, projectHash)
+    try { if (!statSync(projectDir).isDirectory()) continue } catch { continue }
+
+    for (const sf of readdirSync(projectDir).filter(f => f.endsWith(".json"))) {
+      let sessionData
+      try { sessionData = JSON.parse(readFileSync(join(projectDir, sf), "utf8")) } catch { continue }
+      if (!sessionData?.id) continue
+
+      const sessionId = sessionData.id
+      const msgDir = join(OPENCODE_STORAGE, "message", sessionId)
+      const messages = []
+      if (existsSync(msgDir)) {
+        for (const mf of readdirSync(msgDir).filter(f => f.endsWith(".json"))) {
+          try {
+            const m = JSON.parse(readFileSync(join(msgDir, mf), "utf8"))
+            if (m.role === "user" || m.role === "assistant") messages.push(m)
+          } catch { /* skip */ }
+        }
+      }
+      messages.sort((a, b) => (a.time?.created ?? 0) - (b.time?.created ?? 0))
+
+      const converted = messages.map((m, i) => ({
+        uuid: m.id ?? `opencode-${sessionId}-${i}`,
+        parentUuid: null,
+        type: m.role === "assistant" ? "assistant" : "human",
+        sessionId,
+        timestamp: m.time?.created ? new Date(m.time.created).toISOString() : new Date().toISOString(),
+        isSidechain: false,
+        message: { role: m.role, content: m.summary?.title ?? `[${m.role} message]` },
+      }))
+
+      const pDir = sessionData.directory ? normProjectDir(sessionData.directory) : "opencode-global"
+      const projectPath = `opencode:${pDir}`
+      const updatedAt = sessionData.time?.updated ?? sessionData.time?.created ?? 0
+
+      const cacheKey = `${projectPath}/${sessionId}`
+      msgCache.set(cacheKey, converted)
+
+      if (!projects.has(projectPath)) {
+        projects.set(projectPath, {
+          path: projectPath,
+          displayName: `opencode: ${pDir.replace(/^-Users-[^-]+-Code-/, "").replace(/-/g, "/")}`,
+          sessions: [],
+        })
+      }
+      projects.get(projectPath).sessions.push({
+        id: sessionId,
+        projectPath,
+        messageCount: converted.length,
+        userMessageCount: converted.filter(m => m.message.role === "user").length,
+        lastActivity: new Date(updatedAt || Date.now()).toISOString(),
+        isActive: false,
+        firstName: sessionData.title ?? null,
+        source: "opencode",
+        lastUsedModel: messages.find(m => m.model?.modelID)?.model?.modelID,
+      })
+    }
+  }
+
+  for (const proj of projects.values()) {
+    proj.sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity))
+  }
+  return Array.from(projects.values())
+}
+
+// ── Antigravity sessions ───────────────────────────────────────────────────────
+
+function parseAntigravitySessionIndexLocal() {
+  if (!existsSync(ANTIGRAVITY_STATE_DB)) return []
+  const rows = sqliteQuery(
+    ANTIGRAVITY_STATE_DB,
+    "SELECT value FROM ItemTable WHERE key='antigravityUnifiedStateSync.trajectorySummaries' LIMIT 1"
+  )
+  if (!rows.length || !rows[0].value) return []
+  try {
+    const outer = Buffer.from(rows[0].value, "base64")
+    const chunks = []
+    const b64Re = /[A-Za-z0-9+/]{60,}={0,2}/g
+    let m
+    while ((m = b64Re.exec(outer.toString("binary"))) !== null) chunks.push(m[0])
+
+    const sessions = []
+    for (const chunk of chunks) {
+      try {
+        const decoded = Buffer.from(chunk, "base64")
+        const text = decoded.toString("utf8")
+        const uuidMatch = text.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/)
+        if (!uuidMatch) continue
+        const id = uuidMatch[0]
+        const beforeUuid = text.slice(0, text.indexOf(id))
+        const titleMatch = beforeUuid.match(/([A-Za-z][A-Za-z0-9 ,.'"\-:!?]{5,})/)
+        const title = titleMatch ? titleMatch[1].trim() : null
+        const wsMatch = text.match(/file:\/\/\/[^\s\x00-\x1f"']{3,}/)
+        const workspacePath = wsMatch ? wsMatch[0].replace("file://", "") : ""
+        sessions.push({ id, title, workspacePath })
+      } catch { /* skip */ }
+    }
+    const seen = new Set()
+    return sessions.filter(s => { if (seen.has(s.id)) return false; seen.add(s.id); return true })
+  } catch { return [] }
+}
+
+function loadAntigravitySessions() {
+  if (!existsSync(ANTIGRAVITY_BRAIN_DIR)) return []
+  const indexSessions = parseAntigravitySessionIndexLocal()
+  const indexMap = new Map(indexSessions.map(s => [s.id, s]))
+  const brainIds = readdirSync(ANTIGRAVITY_BRAIN_DIR)
+  for (const id of brainIds) {
+    if (!indexMap.has(id)) indexMap.set(id, { id, title: null, workspacePath: "" })
+  }
+
+  const projects = new Map()
+  const artifacts = ["task", "implementation_plan", "walkthrough", "architecture_rules"]
+  const labelMap = { task: "Task", implementation_plan: "Implementation Plan", walkthrough: "Walkthrough", architecture_rules: "Architecture Rules" }
+
+  for (const [id, session] of indexMap) {
+    const brainDir = join(ANTIGRAVITY_BRAIN_DIR, id)
+    if (!existsSync(brainDir)) continue
+
+    const parts = []
+    let latestUpdatedAt = null
+    for (const name of artifacts) {
+      const mdPath = join(brainDir, `${name}.md`)
+      const metaPath = join(brainDir, `${name}.md.metadata.json`)
+      if (!existsSync(mdPath)) continue
+      let content = ""
+      try { content = readFileSync(mdPath, "utf8").trim() } catch { continue }
+      if (!content) continue
+      let updatedAt = null
+      try { updatedAt = JSON.parse(readFileSync(metaPath, "utf8")).updatedAt ?? null } catch { /* optional */ }
+      if (updatedAt && (!latestUpdatedAt || updatedAt > latestUpdatedAt)) latestUpdatedAt = updatedAt
+      parts.push({ name, content, updatedAt })
+    }
+    if (!parts.length) continue
+
+    const converted = []
+    for (const part of parts) {
+      converted.push({ uuid: `antigravity-${id}-${part.name}-user`, parentUuid: null, type: "human", sessionId: id, timestamp: part.updatedAt ?? latestUpdatedAt ?? new Date().toISOString(), isSidechain: false, message: { role: "user", content: `[${labelMap[part.name] ?? part.name}]` } })
+      converted.push({ uuid: `antigravity-${id}-${part.name}-assistant`, parentUuid: `antigravity-${id}-${part.name}-user`, type: "assistant", sessionId: id, timestamp: part.updatedAt ?? latestUpdatedAt ?? new Date().toISOString(), isSidechain: false, message: { role: "assistant", content: part.content } })
+    }
+
+    const pDir = session.workspacePath ? normProjectDir(session.workspacePath) : "antigravity-global"
+    const projectPath = `antigravity:${pDir}`
+    const cacheKey = `${projectPath}/${id}`
+    msgCache.set(cacheKey, converted)
+
+    if (!projects.has(projectPath)) {
+      projects.set(projectPath, {
+        path: projectPath,
+        displayName: `antigravity: ${pDir.replace(/^-Users-[^-]+-Code-/, "").replace(/-/g, "/")}`,
+        sessions: [],
+      })
+    }
+    projects.get(projectPath).sessions.push({
+      id,
+      projectPath,
+      messageCount: converted.length,
+      userMessageCount: parts.length,
+      lastActivity: latestUpdatedAt ?? new Date().toISOString(),
+      isActive: false,
+      firstName: session.title ?? null,
+      source: "antigravity",
+    })
+  }
+
+  for (const proj of projects.values()) {
+    proj.sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity))
+  }
+  return Array.from(projects.values())
 }
 
 // --- Auth ---
@@ -296,6 +610,10 @@ const server = http.createServer(async (req, res) => {
   if (sessionMatch) {
     const projectPath = decodeURIComponent(sessionMatch[1])
     const sessionId = sessionMatch[2]
+    // Non-Claude platforms store messages in the msgCache (populated by loadProjects)
+    const cacheKey = `${projectPath}/${sessionId}`
+    if (msgCache.has(cacheKey)) { json(msgCache.get(cacheKey)); return }
+    // Claude: read JSONL file directly
     const fp = join(CLAUDE_DIR, projectPath, `${sessionId}.jsonl`)
     if (!existsSync(fp)) { res.writeHead(404); res.end("Not Found"); return }
     json(parseJsonl(fp))
