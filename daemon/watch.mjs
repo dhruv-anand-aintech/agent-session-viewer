@@ -37,6 +37,43 @@ import {
   readHermesSessions,
 } from "../platform-readers.mjs"
 
+// ── Persistent sync cache ─────────────────────────────────────────────────────
+// Survives daemon restarts so already-uploaded sessions are not re-sent.
+// Stored at ~/.claude/session-viewer-sync-cache.json
+// Keys: `platform:sessionIdOrFilePath` → cacheVal string
+
+const SYNC_CACHE_FILE = path.join(homedir(), ".claude", "session-viewer-sync-cache.json")
+let _syncCache = null
+let _syncCacheTimer = null
+
+function loadSyncCache() {
+  try { _syncCache = JSON.parse(fs.readFileSync(SYNC_CACHE_FILE, "utf8")) }
+  catch { _syncCache = {} }
+}
+
+function flushSyncCache() {
+  if (_syncCacheTimer) clearTimeout(_syncCacheTimer)
+  _syncCacheTimer = setTimeout(() => {
+    try { fs.writeFileSync(SYNC_CACHE_FILE, JSON.stringify(_syncCache)) }
+    catch { /* ignore write errors */ }
+  }, 1500)
+}
+
+function scGet(key) { return _syncCache[key] }
+function scSet(key, val) { _syncCache[key] = val; flushSyncCache() }
+function scDel(key) { delete _syncCache[key]; flushSyncCache() }
+
+// Namespace helpers for each platform
+const sc = {
+  claude: { get: k => scGet(`c:${k}`), set: (k, v) => scSet(`c:${k}`, v) },
+  cursor: { get: k => scGet(`cu:${k}`), set: (k, v) => scSet(`cu:${k}`, v) },
+  opencode: { get: k => scGet(`oc:${k}`), set: (k, v) => scSet(`oc:${k}`, v), del: k => scDel(`oc:${k}`) },
+  antigravity: { get: k => scGet(`ag:${k}`), set: (k, v) => scSet(`ag:${k}`, v), del: k => scDel(`ag:${k}`) },
+  hermes: { get: k => scGet(`h:${k}`), set: (k, v) => scSet(`h:${k}`, v) },
+}
+
+loadSyncCache()
+
 // ── Config ────────────────────────────────────────────────────────────────────
 
 // Load .env from project root (same dir as package.json, one level up from daemon/)
@@ -177,6 +214,10 @@ async function syncSession(filePath) {
     projectDir = normProjectDir(projectAbsDir)
   }
 
+  // Skip if file unchanged since last successful upload
+  const fileMtime = String(fs.statSync(filePath).mtimeMs)
+  if (sc.claude.get(filePath) === fileMtime) return
+
   const messages = parseJsonl(filePath)
   if (!messages) { log(`⚠  Failed to parse ${filePath}`); return }
 
@@ -253,6 +294,7 @@ async function syncSession(filePath) {
       body: JSON.stringify(payload),
     })
     if (resp.ok) {
+      sc.claude.set(filePath, fileMtime)
       log(`✓ synced ${isSubagent ? "⤷ " : ""}${projectDir}/${sessionId.slice(0, 8)} (${messages.length} msgs)`)
     } else {
       log(`✗ sync failed ${resp.status}: ${await resp.text()}`)
@@ -665,13 +707,11 @@ function startPicoClawWatcher(tool) {
 
 // ── Antigravity adaptor (via platform-readers.mjs) ───────────────────────────
 
-const antigravityLastSync = new Map() // sessionId → mtime
-
 async function syncAntigravitySession(session) {
   const result = readAntigravitySession(
     session,
-    id => antigravityLastSync.get(id),
-    (id, v) => antigravityLastSync.set(id, v)
+    id => sc.antigravity.get(id),
+    (id, v) => sc.antigravity.set(id, v)
   )
   if (!result) return
   try {
@@ -746,12 +786,12 @@ function startAntigravityWatcher() {
         syncAntigravityResults(results).catch(() => {})
       } else {
         const session = indexMap.get(sessionId) ?? { id: sessionId, title: null, workspacePath: "" }
-        antigravityLastSync.delete(sessionId)
+        sc.antigravity.del(sessionId)
         syncAntigravitySession(session).catch(() => {})
       }
     }).catch(() => {
       const session = indexMap.get(sessionId) ?? { id: sessionId, title: null, workspacePath: "" }
-      antigravityLastSync.delete(sessionId)
+      sc.antigravity.del(sessionId)
       syncAntigravitySession(session).catch(() => {})
     })
   })
@@ -764,7 +804,6 @@ function startAntigravityWatcher() {
 const CURSOR_GLOBAL_DB = path.join(
   homedir(), "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb"
 )
-const cursorLastSync = new Map() // composerId → lastUpdatedAt
 
 async function syncCursorResult(result) {
   try {
@@ -786,8 +825,8 @@ async function syncCursorResult(result) {
 async function initialSyncCursor() {
   if (!fs.existsSync(CURSOR_GLOBAL_DB)) { log("Cursor globalStorage DB not found — Cursor sync disabled"); return }
   const results = readCursorSessions(
-    id => cursorLastSync.get(id),
-    (id, v) => cursorLastSync.set(id, v)
+    id => sc.cursor.get(id),
+    (id, v) => sc.cursor.set(id, v)
   )
   for (const result of results) {
     await syncCursorResult(result)
@@ -811,13 +850,12 @@ function startCursorWatcher() {
 
 // ── OpenCode adaptor (via platform-readers.mjs) ───────────────────────────────
 
-const opencodeLastSync = new Map() // sessionId → cacheVal
 
 async function syncOpenCodeSession(sessionFile) {
   const result = readOpenCodeSession(
     sessionFile,
-    id => opencodeLastSync.get(id),
-    (id, v) => opencodeLastSync.set(id, v)
+    id => sc.opencode.get(id),
+    (id, v) => sc.opencode.set(id, v)
   )
   if (!result) return
   await pushOpenCodeResult(result)
@@ -845,8 +883,8 @@ async function initialSyncOpenCode() {
   if (!fs.existsSync(sessionBaseDir)) { log("OpenCode storage not found — OpenCode sync disabled"); return }
   let count = 0
   for (const { result } of iterOpenCodeSessions(
-    id => opencodeLastSync.get(id),
-    (id, v) => opencodeLastSync.set(id, v)
+    id => sc.opencode.get(id),
+    (id, v) => sc.opencode.set(id, v)
   )) {
     await pushOpenCodeResult(result)
     count++
@@ -872,7 +910,7 @@ function startOpenCodeWatcher() {
       for (const projectHash of fs.readdirSync(path.join(OPENCODE_STORAGE, "session"))) {
         const sf = path.join(OPENCODE_STORAGE, "session", projectHash, `${sessionId}.json`)
         if (fs.existsSync(sf)) {
-          opencodeLastSync.delete(sessionId)
+          sc.opencode.del(sessionId)
           syncOpenCodeSession(sf).catch(() => {})
           break
         }
@@ -884,7 +922,6 @@ function startOpenCodeWatcher() {
 
 // ── Hermes adaptor (via platform-readers.mjs) ────────────────────────────────
 
-const hermesLastSync = new Map() // sessionId → message_count string
 
 async function syncHermesSession(result) {
   try {
@@ -906,8 +943,8 @@ async function syncHermesSession(result) {
 async function initialSyncHermes() {
   if (!fs.existsSync(HERMES_DB)) { log("Hermes DB not found — Hermes sync disabled"); return }
   const results = readHermesSessions(
-    id => hermesLastSync.get(id),
-    (id, v) => hermesLastSync.set(id, v)
+    id => sc.hermes.get(id),
+    (id, v) => sc.hermes.set(id, v)
   )
   for (const result of results) await syncHermesSession(result)
   log(`Hermes: synced ${results.length} session(s)`)
