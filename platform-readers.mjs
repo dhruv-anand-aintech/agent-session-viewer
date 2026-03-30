@@ -37,7 +37,8 @@ export function sqliteQuery(dbPath, sql, opts = {}) {
 //     { name, createdAt, lastUpdatedAt, subtitle,
 //       fullConversationHeadersOnly: [{bubbleId, type}], isArchived, isDraft }
 //   bubbleId:{composerId}:{bubbleId}  — message JSON:
-//     { type: 1 (user) | 2 (assistant), text, codeBlocks, thinking, createdAt }
+//     { type: 1 (user) | 2 (assistant), text, ... }
+//     Older bubbles: top-level createdAt. Newer (_v>=3) often omit it — use composerData times.
 //
 // Workspace mapping:
 //   workspaceStorage/{hash}/state.vscdb  (ItemTable)
@@ -79,6 +80,23 @@ function buildCursorComposerWorkspaceMap() {
   return map
 }
 
+/** Parse Cursor JSON timestamp: ms since epoch, ISO string, or Unix seconds (heuristic). */
+function parseCursorMs(v) {
+  if (v == null || v === "") return null
+  const n = Number(v)
+  if (Number.isFinite(n)) {
+    const ms = n < 1e12 ? n * 1000 : n
+    return ms
+  }
+  const t = Date.parse(String(v))
+  return Number.isFinite(t) ? t : null
+}
+
+function msToIso(ms) {
+  if (ms == null || !Number.isFinite(ms)) return new Date(0).toISOString()
+  return new Date(ms).toISOString()
+}
+
 /**
  * Reads all Cursor sessions from globalStorage/state.vscdb.
  * Returns { meta, msgs }[] — one entry per composer session.
@@ -93,14 +111,15 @@ export function readCursorSessions(cacheGet, cacheSet, changedSet) {
   const results = []
 
   // Pre-fetch only needed fields from composerData (full values avg 50KB — use json_extract)
+  // Keys are "composerData:<composerId>"; SQLite substr is 1-based — start at 14 (first char after "composerData:").
   const composerMetaRows = sqliteQuery(CURSOR_GLOBAL_DB,
-    "SELECT substr(key,13) as cid, json_extract(value,'$.name') as name, json_extract(value,'$.lastUpdatedAt') as lastUpdatedAt, json_extract(value,'$.createdAt') as createdAt FROM cursorDiskKV WHERE key LIKE 'composerData:%'")
+    "SELECT substr(key,14) as cid, json_extract(value,'$.name') as name, json_extract(value,'$.lastUpdatedAt') as lastUpdatedAt, json_extract(value,'$.createdAt') as createdAt FROM cursorDiskKV WHERE key LIKE 'composerData:%'")
   const composerMeta = new Map()
   for (const row of composerMetaRows) composerMeta.set(row.cid, row)
 
   // Single range scan with json_extract — all fields in one pass (~5s, ~9MB regardless of total size)
   const allRows = sqliteQuery(CURSOR_GLOBAL_DB,
-    "SELECT substr(key,10,36) as cid, json_extract(value,'$.type') as type, json_extract(value,'$.text') as text, json_extract(value,'$.createdAt') as ts, json_extract(value,'$.bubbleId') as bid FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'",
+    "SELECT substr(key,10,36) as cid, json_extract(value,'$.type') as type, json_extract(value,'$.text') as text, COALESCE(json_extract(value,'$.createdAt'), json_extract(value,'$.timestamp')) as ts, json_extract(value,'$.bubbleId') as bid FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'",
     { maxBuffer: 32 * 1024 * 1024 })
 
   // Group by cid
@@ -117,21 +136,51 @@ export function readCursorSessions(cacheGet, cacheSet, changedSet) {
     if (cacheGet && cacheGet(composerId) === bubbleCount) continue
     if (cacheSet) cacheSet(composerId, bubbleCount)
 
-    const bubbles = rows.sort((a, b) => String(a.ts ?? "").localeCompare(String(b.ts ?? "")))
+    const composer = composerMeta.get(composerId) ?? null
+    const composerCreatedMs = parseCursorMs(composer?.createdAt)
+    const composerUpdatedMs = parseCursorMs(composer?.lastUpdatedAt) ?? composerCreatedMs
+
+    const sorted = [...rows].sort((a, b) => {
+      const ta = parseCursorMs(a.ts)
+      const tb = parseCursorMs(b.ts)
+      if (ta != null && tb != null) return ta - tb
+      if (ta != null) return -1
+      if (tb != null) return 1
+      return 0
+    })
+
+    const n = sorted.length
+    const perBubbleMs = sorted.map((row, idx) => {
+      const direct = parseCursorMs(row.ts)
+      if (direct != null) return direct
+      if (n <= 1) return composerUpdatedMs ?? composerCreatedMs ?? 0
+      const c = composerCreatedMs ?? 0
+      const u = composerUpdatedMs ?? c
+      return c + ((u - c) * idx) / (n - 1)
+    })
+
+    let lastActivityMs = 0
+    for (const t of perBubbleMs) {
+      if (t > lastActivityMs) lastActivityMs = t
+    }
+    if (composerUpdatedMs != null) lastActivityMs = Math.max(lastActivityMs, composerUpdatedMs)
+    if (composerCreatedMs != null) lastActivityMs = Math.max(lastActivityMs, composerCreatedMs)
 
     // Convert to SessionMessage format
     const converted = []
-    for (const msg of bubbles) {
+    for (let si = 0; si < sorted.length; si++) {
+      const msg = sorted[si]
       const role = msg.type === 2 ? "assistant" : "user"
       const content = msg.text ?? ""
       if (!content && role === "user") continue  // skip empty user turns
       const bubbleId = msg.bid ?? `${composerId}-${converted.length}`
+      const tsMs = perBubbleMs[si]
       converted.push({
         uuid: `cursor-${composerId}-${bubbleId}`,
         parentUuid: null,
         type: role === "assistant" ? "assistant" : "human",
         sessionId: composerId,
-        timestamp: msg.ts ? new Date(msg.ts).toISOString() : new Date(Date.now()).toISOString(),
+        timestamp: msToIso(tsMs),
         isSidechain: false,
         message: { role, content },
       })
@@ -139,12 +188,8 @@ export function readCursorSessions(cacheGet, cacheSet, changedSet) {
 
     if (!converted.length) continue
 
-    // Try to get session name from pre-fetched composerData (may not exist in v3)
-    const composer = composerMeta.get(composerId) ?? null
-
     const workspaceFolder = wsMap.get(composerId) ?? ""
     const projectDir = workspaceFolder ? normProjectDir(workspaceFolder) : "cursor-unknown"
-    const lastTs = bubbles[bubbles.length - 1]?.ts
     const firstUserText = converted.find(m => m.message.role === "user")?.message?.content
     const firstName = typeof firstUserText === "string"
       ? firstUserText.replace(/<[^>]+>/g, "").trim().slice(0, 80) : null
@@ -155,7 +200,7 @@ export function readCursorSessions(cacheGet, cacheSet, changedSet) {
         projectPath: `cursor:${projectDir}`,
         messageCount: converted.length,
         userMessageCount: converted.filter(m => m.message.role === "user").length,
-        lastActivity: new Date(lastTs ?? composer?.lastUpdatedAt ?? composer?.createdAt ?? Date.now()).toISOString(),
+        lastActivity: msToIso(lastActivityMs > 0 ? lastActivityMs : 0),
         isActive: false,
         firstName: (composer?.name || null) ?? firstName,
         source: "cursor",
