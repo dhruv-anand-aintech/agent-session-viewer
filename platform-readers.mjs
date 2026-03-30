@@ -19,9 +19,9 @@ export function normProjectDir(absDir) {
   return absDir.replace(homedir(), "").replace(/\//g, "-").replace(/^-/, "")
 }
 
-export function sqliteQuery(dbPath, sql) {
+export function sqliteQuery(dbPath, sql, opts = {}) {
   try {
-    const out = execFileSync("sqlite3", ["-json", dbPath, sql], { encoding: "utf8" })
+    const out = execFileSync("sqlite3", ["-json", dbPath, sql], { encoding: "utf8", maxBuffer: opts.maxBuffer ?? 64 * 1024 * 1024 })
     return JSON.parse(out.trim() || "[]")
   } catch { return [] }
 }
@@ -89,65 +89,49 @@ function buildCursorComposerWorkspaceMap() {
 export function readCursorSessions(cacheGet, cacheSet, changedSet) {
   if (!fs.existsSync(CURSOR_GLOBAL_DB)) return []
 
-  // Fetch all (or specific) composerData entries
-  const composerRows = changedSet
-    ? [...changedSet].flatMap(id => sqliteQuery(CURSOR_GLOBAL_DB, `SELECT key, value FROM cursorDiskKV WHERE key='composerData:${id}' LIMIT 1`))
-    : sqliteQuery(CURSOR_GLOBAL_DB, "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%'")
-
-  if (!composerRows.length) return []
-
   const wsMap = buildCursorComposerWorkspaceMap()
   const results = []
 
-  for (const row of composerRows) {
-    let composer
-    try { composer = JSON.parse(row.value) } catch { continue }
+  // Pre-fetch only needed fields from composerData (full values avg 50KB — use json_extract)
+  const composerMetaRows = sqliteQuery(CURSOR_GLOBAL_DB,
+    "SELECT substr(key,13) as cid, json_extract(value,'$.name') as name, json_extract(value,'$.lastUpdatedAt') as lastUpdatedAt, json_extract(value,'$.createdAt') as createdAt FROM cursorDiskKV WHERE key LIKE 'composerData:%'")
+  const composerMeta = new Map()
+  for (const row of composerMetaRows) composerMeta.set(row.cid, row)
 
-    const composerId = row.key.replace("composerData:", "")
-    if (!composerId || composer.isDraft) continue
+  // Single range scan with json_extract — all fields in one pass (~5s, ~9MB regardless of total size)
+  const allRows = sqliteQuery(CURSOR_GLOBAL_DB,
+    "SELECT substr(key,10,36) as cid, json_extract(value,'$.type') as type, json_extract(value,'$.text') as text, json_extract(value,'$.createdAt') as ts, json_extract(value,'$.bubbleId') as bid FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'",
+    { maxBuffer: 32 * 1024 * 1024 })
 
-    // Change detection: skip if lastUpdatedAt matches cache
-    const cacheVal = composer.lastUpdatedAt ?? composer.createdAt ?? ""
-    if (cacheGet && cacheGet(composerId) === cacheVal) continue
-    if (cacheSet) cacheSet(composerId, cacheVal)
+  // Group by cid
+  const byCid = new Map()
+  for (const row of allRows) {
+    if (!row.cid) continue
+    if (!byCid.has(row.cid)) byCid.set(row.cid, [])
+    byCid.get(row.cid).push(row)
+  }
 
-    const headers = composer.fullConversationHeadersOnly ?? []
-    if (!headers.length) continue
+  for (const [composerId, rows] of byCid) {
+    // Change detection via bubble count
+    const bubbleCount = String(rows.length)
+    if (cacheGet && cacheGet(composerId) === bubbleCount) continue
+    if (cacheSet) cacheSet(composerId, bubbleCount)
 
-    // Fetch bubble messages in one query using IN clause
-    const bubbleIds = headers.map(h => h.bubbleId).filter(Boolean)
-    if (!bubbleIds.length) continue
+    const bubbles = rows.sort((a, b) => String(a.ts ?? "").localeCompare(String(b.ts ?? "")))
 
-    const inClause = bubbleIds.map(id => `'bubbleId:${composerId}:${id}'`).join(",")
-    const bubbleRows = sqliteQuery(
-      CURSOR_GLOBAL_DB,
-      `SELECT key, value FROM cursorDiskKV WHERE key IN (${inClause})`
-    )
-
-    // Build a map for ordered lookup
-    const bubbleMap = new Map()
-    for (const br of bubbleRows) {
-      try {
-        const msg = JSON.parse(br.value)
-        const bid = br.key.split(":").slice(2).join(":")
-        bubbleMap.set(bid, msg)
-      } catch { /* skip */ }
-    }
-
-    // Convert to SessionMessage format, preserving header order
+    // Convert to SessionMessage format
     const converted = []
-    for (const h of headers) {
-      const msg = bubbleMap.get(h.bubbleId)
-      if (!msg) continue
+    for (const msg of bubbles) {
       const role = msg.type === 2 ? "assistant" : "user"
       const content = msg.text ?? ""
       if (!content && role === "user") continue  // skip empty user turns
+      const bubbleId = msg.bid ?? `${composerId}-${converted.length}`
       converted.push({
-        uuid: `cursor-${composerId}-${h.bubbleId}`,
+        uuid: `cursor-${composerId}-${bubbleId}`,
         parentUuid: null,
         type: role === "assistant" ? "assistant" : "human",
         sessionId: composerId,
-        timestamp: msg.createdAt ? new Date(msg.createdAt).toISOString() : new Date(composer.createdAt ?? Date.now()).toISOString(),
+        timestamp: msg.ts ? new Date(msg.ts).toISOString() : new Date(Date.now()).toISOString(),
         isSidechain: false,
         message: { role, content },
       })
@@ -155,8 +139,12 @@ export function readCursorSessions(cacheGet, cacheSet, changedSet) {
 
     if (!converted.length) continue
 
+    // Try to get session name from pre-fetched composerData (may not exist in v3)
+    const composer = composerMeta.get(composerId) ?? null
+
     const workspaceFolder = wsMap.get(composerId) ?? ""
     const projectDir = workspaceFolder ? normProjectDir(workspaceFolder) : "cursor-unknown"
+    const lastTs = bubbles[bubbles.length - 1]?.ts
     const firstUserText = converted.find(m => m.message.role === "user")?.message?.content
     const firstName = typeof firstUserText === "string"
       ? firstUserText.replace(/<[^>]+>/g, "").trim().slice(0, 80) : null
@@ -167,9 +155,9 @@ export function readCursorSessions(cacheGet, cacheSet, changedSet) {
         projectPath: `cursor:${projectDir}`,
         messageCount: converted.length,
         userMessageCount: converted.filter(m => m.message.role === "user").length,
-        lastActivity: new Date(composer.lastUpdatedAt ?? composer.createdAt ?? Date.now()).toISOString(),
+        lastActivity: new Date(lastTs ?? composer?.lastUpdatedAt ?? composer?.createdAt ?? Date.now()).toISOString(),
         isActive: false,
-        firstName: composer.name ?? firstName,
+        firstName: (composer?.name || null) ?? firstName,
         source: "cursor",
       },
       msgs: converted,
