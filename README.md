@@ -1,5 +1,7 @@
 # Claude Session Viewer
 
+![Claude Session Viewer UI](public/screenshot.png)
+
 A live multi-platform session viewer — browse AI coding assistant conversations across Claude Code, Cursor, OpenCode, and Antigravity in a unified dark-mode UI with markdown rendering, tool call cards, and thinking blocks.
 
 Sessions are streamed to a Cloudflare Worker (KV storage) by a local daemon that watches your session directories. Works on desktop and mobile.
