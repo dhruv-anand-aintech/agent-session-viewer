@@ -66,7 +66,8 @@ function scDel(key) { delete _syncCache[key]; flushSyncCache() }
 // Namespace helpers for each platform
 const sc = {
   claude: { get: k => scGet(`c:${k}`), set: (k, v) => scSet(`c:${k}`, v) },
-  cursor: { get: k => scGet(`cu:${k}`), set: (k, v) => scSet(`cu:${k}`, v) },
+  // Bump prefix when Cursor reader output shape changes (forces re-sync; was bubble-count-only cache).
+  cursor: { get: k => scGet(`cuv2:${k}`), set: (k, v) => scSet(`cuv2:${k}`, v) },
   opencode: { get: k => scGet(`oc:${k}`), set: (k, v) => scSet(`oc:${k}`, v), del: k => scDel(`oc:${k}`) },
   antigravity: { get: k => scGet(`ag:${k}`), set: (k, v) => scSet(`ag:${k}`, v), del: k => scDel(`ag:${k}`) },
   hermes: { get: k => scGet(`h:${k}`), set: (k, v) => scSet(`h:${k}`, v) },

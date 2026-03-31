@@ -97,6 +97,65 @@ function msToIso(ms) {
   return new Date(ms).toISOString()
 }
 
+/** Lexical editor JSON (richText) → plain text when $.text is empty (_v>=3). DFS handles paragraphs, lists, headings. */
+function extractLexicalPlainText(richTextJsonStr) {
+  if (!richTextJsonStr || typeof richTextJsonStr !== "string") return ""
+  try {
+    const obj = JSON.parse(richTextJsonStr)
+    const parts = []
+    function walk(node) {
+      if (node == null) return
+      if (Array.isArray(node)) {
+        for (const x of node) walk(x)
+        return
+      }
+      if (typeof node !== "object") return
+      if (node.type === "text" && typeof node.text === "string") parts.push(node.text)
+      if (node.type === "linebreak") parts.push("\n")
+      if (node.children) walk(node.children)
+    }
+    walk(obj.root ?? obj)
+    return parts.join("").replace(/\n{3,}/g, "\n\n").trim()
+  } catch {
+    return ""
+  }
+}
+
+/** Assistant bubbles with empty $.text are often tool calls — surface tool + args + result preview. */
+function formatCursorToolBubble(row) {
+  const name = row.toolName
+  const hasTool = name || row.toolRawArgs || row.toolResultPreview
+  if (!hasTool) return ""
+  const head = name ? `**${name}**` : "**tool**"
+  const st = row.toolStatus ? ` (${row.toolStatus})` : ""
+  let body = ""
+  if (row.toolRawArgs) {
+    try {
+      const o = JSON.parse(row.toolRawArgs)
+      body = "\n\n```json\n" + JSON.stringify(o, null, 2).slice(0, 3500) + "\n```"
+    } catch {
+      body = "\n\n```\n" + String(row.toolRawArgs).slice(0, 3500) + "\n```"
+    }
+  }
+  if (row.toolResultPreview) {
+    const tr = String(row.toolResultPreview)
+    body += "\n\n**Result:**\n```\n" + tr.slice(0, 5000) + (tr.length > 5000 ? "\n…" : "") + "\n```"
+  }
+  return head + st + body
+}
+
+function cursorBubbleText(row) {
+  const raw = (row.text ?? "").trim()
+  if (raw) return raw
+  const fromLex = extractLexicalPlainText(row.richText)
+  if (fromLex) return fromLex
+  const tool = formatCursorToolBubble(row)
+  if (tool) return tool
+  const cb = (row.codeBlock0 ?? "").trim()
+  if (cb) return "```\n" + cb + "\n```"
+  return ""
+}
+
 /**
  * Reads all Cursor sessions from globalStorage/state.vscdb.
  * Returns { meta, msgs }[] — one entry per composer session.
@@ -117,10 +176,11 @@ export function readCursorSessions(cacheGet, cacheSet, changedSet) {
   const composerMeta = new Map()
   for (const row of composerMetaRows) composerMeta.set(row.cid, row)
 
-  // Single range scan with json_extract — all fields in one pass (~5s, ~9MB regardless of total size)
+  // Single range scan — include richText + tool fields; many v3 user bubbles store text only in Lexical richText,
+  // and assistant bubbles may be tool-only (empty $.text) with toolFormerData.
   const allRows = sqliteQuery(CURSOR_GLOBAL_DB,
-    "SELECT substr(key,10,36) as cid, json_extract(value,'$.type') as type, json_extract(value,'$.text') as text, COALESCE(json_extract(value,'$.createdAt'), json_extract(value,'$.timestamp')) as ts, json_extract(value,'$.bubbleId') as bid FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'",
-    { maxBuffer: 32 * 1024 * 1024 })
+    "SELECT substr(key,10,36) as cid, json_extract(value,'$.type') as type, json_extract(value,'$.text') as text, json_extract(value,'$.richText') as richText, json_extract(value,'$.toolFormerData.name') as toolName, json_extract(value,'$.toolFormerData.status') as toolStatus, json_extract(value,'$.toolFormerData.rawArgs') as toolRawArgs, substr(json_extract(value,'$.toolFormerData.result'),1,8000) as toolResultPreview, json_extract(value,'$.codeBlocks[0].content') as codeBlock0, COALESCE(json_extract(value,'$.createdAt'), json_extract(value,'$.timestamp')) as ts, json_extract(value,'$.bubbleId') as bid FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'",
+    { maxBuffer: 48 * 1024 * 1024 })
 
   // Group by cid
   const byCid = new Map()
@@ -171,8 +231,9 @@ export function readCursorSessions(cacheGet, cacheSet, changedSet) {
     for (let si = 0; si < sorted.length; si++) {
       const msg = sorted[si]
       const role = msg.type === 2 ? "assistant" : "user"
-      const content = msg.text ?? ""
-      if (!content && role === "user") continue  // skip empty user turns
+      let content = cursorBubbleText(msg)
+      if (!content.trim() && role === "user") continue  // skip empty user turns (after richText / fallbacks)
+      if (!content.trim() && role === "assistant") content = "_(empty Cursor bubble)_"
       const bubbleId = msg.bid ?? `${composerId}-${converted.length}`
       const tsMs = perBubbleMs[si]
       converted.push({
