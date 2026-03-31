@@ -350,7 +350,7 @@ function SystemRow({ label, summary, timestamp }: { label: string; summary: stri
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-export default function PrettyMessageBlock({ msg, index, nextMsg }: { msg: SessionMessage; index?: number; nextMsg?: SessionMessage }) {
+export default function PrettyMessageBlock({ msg, index, nextMsg }: { msg: SessionMessage; index?: number; nextMsg?: SessionMessage; source?: string }) {
   if (msg.type === "file-history-snapshot") return null
   if (msg.type === "progress") return null  // hide progress events in pretty mode
   const role = msg.message?.role

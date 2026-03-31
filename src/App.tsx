@@ -487,7 +487,7 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
           const chosen = sugg && nextText ? wordOverlap(sugg.text, nextText) > 0.4 : false
           return (
             <div key={msg.uuid ?? i} className={sugg ? "msg-with-suggestion" : undefined}>
-              <Block msg={msg} index={startIdx + i} nextMsg={visible[i + 1]} />
+              <Block msg={msg} index={startIdx + i} nextMsg={visible[i + 1]} source={sessionMeta.source} />
               {sugg && (
                 <div className="suggestion-pill" title={sugg.text}>
                   <span className="suggestion-icon">{chosen ? "✓" : "💡"}</span>
@@ -513,6 +513,51 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
       </div>
     </div>
   )
+}
+
+// ── Platform chrome (sidebar dots + filter pills share hue tokens in App.css) ─
+
+function platformDotClass(source?: string): string {
+  switch (source ?? "claude") {
+    case "cursor":
+      return "dot-cursor"
+    case "opencode":
+      return "dot-opencode"
+    case "antigravity":
+      return "dot-antigravity"
+    case "hermes":
+      return "dot-hermes"
+    default:
+      return "dot-claude"
+  }
+}
+
+function platformTitle(source?: string): string {
+  switch (source ?? "claude") {
+    case "cursor":
+      return "Cursor"
+    case "opencode":
+      return "OpenCode"
+    case "antigravity":
+      return "Antigravity"
+    case "hermes":
+      return "Hermes"
+    default:
+      return "Claude"
+  }
+}
+
+const PLATFORM_FILTER_ACTIVE: Record<string, string> = {
+  all: "active-all",
+  claude: "active-claude",
+  cursor: "active-cursor",
+  opencode: "active-opencode",
+  antigravity: "active-antigravity",
+  hermes: "active-hermes",
+}
+
+function platformFilterActiveClass(p: string): string {
+  return PLATFORM_FILTER_ACTIVE[p] ?? "active-claude"
 }
 
 // ── Session item ──────────────────────────────────────────────────────────────
@@ -583,6 +628,12 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
         />
       ) : (
         <>
+          <span
+            className={`platform-dot ${platformDotClass(s.source)}`}
+            title={platformTitle(s.source)}
+            role="img"
+            aria-label={platformTitle(s.source)}
+          />
           {isRecentlyActive(s.lastActivity) && <span className="ss-live">●</span>}
           {s.isSidechain && <span className="ss-subagent-icon" title="Sub-agent session">⤷</span>}
           <span className="ss-name">{displayName}</span>
@@ -861,7 +912,8 @@ function Sidebar({ projects, projectsLoading, totalSessions, selected, onSelect,
           {["all", ...presentPlatforms].map(p => (
             <button
               key={p}
-              className={`sidebar-platform-btn ${platformFilter === p ? "active" : ""}`}
+              type="button"
+              className={`sidebar-platform-btn ${platformFilter === p ? platformFilterActiveClass(p) : ""}`}
               onClick={() => setPlatformFilter(p)}
             >
               {p === "all" ? "All" : p === "claude" ? "Claude" : p === "cursor" ? "Cursor" : p === "opencode" ? "OpenCode" : p === "antigravity" ? "Antigravity" : p === "hermes" ? "Hermes" : p}

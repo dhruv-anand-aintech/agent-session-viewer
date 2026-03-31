@@ -1,10 +1,32 @@
 import { useState } from "react"
 import type { SessionMessage, ContentBlock } from "./types"
 
+/** Session platform (e.g. from SessionMeta.source) — drives assistant label in raw mode. */
+function assistantLabelForSource(source?: string): string {
+  switch (source ?? "claude") {
+    case "cursor":
+      return "Cursor"
+    case "opencode":
+      return "OpenCode"
+    case "antigravity":
+      return "Antigravity"
+    case "hermes":
+      return "Hermes"
+    case "claude":
+      return "Claude"
+    default:
+      return source && source.length > 0
+        ? source.charAt(0).toUpperCase() + source.slice(1)
+        : "Claude"
+  }
+}
+
 interface Props {
   msg: SessionMessage
   index: number
   nextMsg?: SessionMessage
+  /** Session platform from sidebar; defaults to Claude Code. */
+  source?: string
 }
 
 function ThinkingBlock({ text }: { text: string }) {
@@ -100,7 +122,7 @@ function ProgressBlock({ msg }: { msg: SessionMessage }) {
   )
 }
 
-export default function MessageBlock({ msg }: Props) {
+export default function MessageBlock({ msg, source }: Props) {
   if (msg.type === "file-history-snapshot") return null
   if (msg.type === "progress") return <ProgressBlock msg={msg} />
 
@@ -110,9 +132,13 @@ export default function MessageBlock({ msg }: Props) {
   const ts = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ""
 
   return (
-    <div className={`message-row ${role}`} {...(role === "user" ? { "data-user-turn": "true" } : {})}>
+    <div
+      className={`message-row ${role}`}
+      {...(role === "user" ? { "data-user-turn": "true" } : {})}
+      {...(role === "assistant" ? { "data-platform": (source ?? "claude").toLowerCase() } : {})}
+    >
       <div className="message-header">
-        <span className="role-badge">{role === "user" ? "User" : "Claude"}</span>
+        <span className="role-badge">{role === "user" ? "User" : assistantLabelForSource(source)}</span>
         {ts && <span className="timestamp">{ts}</span>}
       </div>
       <div className="message-content">

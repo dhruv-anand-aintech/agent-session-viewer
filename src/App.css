@@ -16,6 +16,12 @@
   --border-200: hsla(48, 10%, 70%, 0.06);
   --accent: hsl(15, 63.1%, 59.6%);
   --accent-faint: hsla(15, 63.1%, 59.6%, 0.1);
+  /* Platform hues — match sidebar dots + filter pills (mockup / README) */
+  --color-claude: hsl(15, 63%, 60%);
+  --color-cursor: hsl(210, 70%, 62%);
+  --color-opencode: hsl(140, 55%, 52%);
+  --color-antigravity: hsl(263, 55%, 65%);
+  --color-hermes: hsl(40, 58%, 54%);
   --success: hsl(97, 59.1%, 46.1%);
   --danger: hsl(0, 80%, 65%);
   --font-ui: "Anthropic Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -92,11 +98,49 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   cursor: pointer; transition: all 0.12s; font-family: var(--font-ui);
 }
 .sidebar-platform-btn:hover { border-color: var(--text-400); color: var(--text-300); }
-.sidebar-platform-btn.active {
-  background: var(--accent-dim, hsla(255,70%,65%,0.15));
-  border-color: var(--accent, hsl(255,70%,65%));
-  color: var(--accent, hsl(255,70%,65%));
+.sidebar-platform-btn.active-all {
+  background: hsla(48, 10%, 70%, 0.08);
+  border-color: var(--text-400);
+  color: var(--text-200);
 }
+.sidebar-platform-btn.active-claude {
+  background: hsla(15, 63%, 60%, 0.12);
+  border-color: var(--color-claude);
+  color: hsl(15, 63%, 70%);
+}
+.sidebar-platform-btn.active-cursor {
+  background: hsla(210, 70%, 62%, 0.12);
+  border-color: var(--color-cursor);
+  color: hsl(210, 70%, 72%);
+}
+.sidebar-platform-btn.active-opencode {
+  background: hsla(140, 55%, 52%, 0.12);
+  border-color: var(--color-opencode);
+  color: hsl(140, 55%, 62%);
+}
+.sidebar-platform-btn.active-antigravity {
+  background: hsla(263, 55%, 65%, 0.12);
+  border-color: var(--color-antigravity);
+  color: hsl(263, 55%, 75%);
+}
+.sidebar-platform-btn.active-hermes {
+  background: hsla(40, 58%, 54%, 0.12);
+  border-color: var(--color-hermes);
+  color: hsl(40, 58%, 68%);
+}
+
+/* Platform dot — start of each session row (matches filter pill hue) */
+.platform-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dot-claude { background: var(--color-claude); }
+.dot-cursor { background: var(--color-cursor); }
+.dot-opencode { background: var(--color-opencode); }
+.dot-antigravity { background: var(--color-antigravity); }
+.dot-hermes { background: var(--color-hermes); }
 
 .ss-subagents-toggle {
   flex-shrink: 0; padding: 1px 5px; border-radius: 4px; border: none;
@@ -236,7 +280,27 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
 .message-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .role-badge { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; padding: 2px 7px; border-radius: 4px; }
 .user .role-badge { background: var(--accent-faint); color: var(--accent); }
-.assistant .role-badge { background: hsla(210, 70%, 52%, 0.12); color: hsl(210, 70%, 70%); }
+/* Raw mode assistant pill — label from MessageBlock; colors match sidebar platform dots */
+.message-row.assistant .role-badge {
+  background: hsla(15, 63%, 60%, 0.12);
+  color: hsl(15, 63%, 70%);
+}
+.message-row.assistant[data-platform="cursor"] .role-badge {
+  background: hsla(210, 70%, 62%, 0.12);
+  color: hsl(210, 70%, 72%);
+}
+.message-row.assistant[data-platform="opencode"] .role-badge {
+  background: hsla(140, 55%, 52%, 0.12);
+  color: hsl(140, 55%, 62%);
+}
+.message-row.assistant[data-platform="antigravity"] .role-badge {
+  background: hsla(263, 55%, 65%, 0.12);
+  color: hsl(263, 55%, 75%);
+}
+.message-row.assistant[data-platform="hermes"] .role-badge {
+  background: hsla(40, 58%, 54%, 0.12);
+  color: hsl(40, 58%, 68%);
+}
 .timestamp { font-size: 10px; color: var(--text-400); }
 .text-body { line-height: 1.65; white-space: pre-wrap; word-break: break-word; font-size: 14px; color: var(--text-100); }
 .user-text { color: var(--text-000); }
