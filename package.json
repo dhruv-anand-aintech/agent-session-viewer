@@ -11,7 +11,10 @@
     "preview": "vite preview",
     "local": "concurrently -n api,ui --kill-others \"node --watch local-server.mjs\" \"vite\"",
     "deploy": "node deploy.mjs",
-    "daemon": "node daemon/watch.mjs"
+    "daemon": "node daemon/watch.mjs",
+    "daemon:launchd-install": "bash scripts/install-launchd-daemon.sh",
+    "daemon:launchd-uninstall": "bash scripts/uninstall-launchd-daemon.sh",
+    "daemon:launchd-restart": "bash -c 'launchctl kickstart -k gui/$(id -u)/com.dhruvanand.claude-session-viewer.daemon'"
   },
   "dependencies": {
     "marked": "^17.0.5",

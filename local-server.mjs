@@ -15,6 +15,8 @@ import { exec } from "child_process"
 import { stripXml } from "./shared-utils.mjs"
 import {
   readCursorSessions,
+  readCursorAgentSessions,
+  CURSOR_PROJECTS_ROOT,
   readOpenCodeSession,
   iterOpenCodeSessions,
   OPENCODE_STORAGE,
@@ -153,6 +155,7 @@ async function loadProjects() {
   const allProjects = [
     ...projects,
     ...loadCursorSessions(),
+    ...loadCursorAgentSessions(),
     ...loadOpenCodeSessions(),
     ...await loadAntigravitySessions(),
     ...loadHermesSessions(),
@@ -193,6 +196,11 @@ function resultsToProjects(results, platformPrefix) {
 
 function loadCursorSessions() {
   return resultsToProjects(readCursorSessions(), "cursor")
+}
+
+function loadCursorAgentSessions() {
+  if (!existsSync(CURSOR_PROJECTS_ROOT)) return []
+  return resultsToProjects(readCursorAgentSessions(null, null), "cursor-agent")
 }
 
 // ── OpenCode sessions ──────────────────────────────────────────────────────────
@@ -266,6 +274,12 @@ try {
   setInterval(broadcastProjects, 3000)
 }
 
+if (existsSync(CURSOR_PROJECTS_ROOT)) {
+  try {
+    watch(CURSOR_PROJECTS_ROOT, { recursive: true }, () => broadcastProjects())
+  } catch { /* ignore */ }
+}
+
 // --- Static file serving ---
 
 const MIME = {
@@ -330,6 +344,16 @@ const server = http.createServer(async (req, res) => {
     } else {
       json({ ok: false }, 401)
     }
+    return
+  }
+
+  // GET /api/capabilities — public bootstrap for SPA (must stay before cookie gate)
+  if (url.pathname === "/api/capabilities") {
+    json({
+      openPath: true,
+      debugStream: true,
+      pinRequired: Boolean(AUTH_PIN),
+    })
     return
   }
 
@@ -413,12 +437,6 @@ const server = http.createServer(async (req, res) => {
     else delete config.names[key]
     saveConfig(config)
     json({ ok: true })
-    return
-  }
-
-  // GET /api/capabilities
-  if (url.pathname === "/api/capabilities") {
-    json({ openPath: true, debugStream: true })
     return
   }
 

@@ -47,8 +47,8 @@ function buildProjects(map: Record<string, unknown[]>) {
   return Object.entries(map).map(([path, sessions]) => ({
     path,
     displayName: path
-      .replace(/^(cursor|opencode|antigravity|hermes):/, "$1: ")
-      .replace(/^(cursor|opencode|antigravity): -Users-[^-]+-(?:Code|gemini-antigravity-brain)-/, "$1: ")
+      .replace(/^(cursor-agent|cursor|opencode|antigravity|hermes):/, "$1: ")
+      .replace(/^(cursor-agent|cursor|opencode|antigravity): -Users-[^-]+-(?:Code|gemini-antigravity-brain)-/, "$1: ")
       .replace(/^-Users-[^-]+-Code-/, "")
       .replace(/-/g, "/"),
     sessions: (sessions as Record<string, unknown>[])
@@ -168,12 +168,19 @@ export default {
       return new Response("ok", { headers: corsHeaders() })
     }
 
-    if (url.pathname.startsWith("/api/") && !checkAuth(request, env)) {
-      return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: new Headers({ "Content-Type": "application/json" }) })
+    if (url.pathname === "/api/capabilities") {
+      return Response.json(
+        {
+          openPath: false,
+          debugStream: true,
+          pinRequired: Boolean(env.AUTH_PIN),
+        },
+        { headers: corsHeaders() },
+      )
     }
 
-    if (url.pathname === "/api/capabilities") {
-      return Response.json({ openPath: false, debugStream: true }, { headers: corsHeaders() })
+    if (url.pathname.startsWith("/api/") && !checkAuth(request, env)) {
+      return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: new Headers({ "Content-Type": "application/json" }) })
     }
 
     if (url.pathname === "/api/debug") {

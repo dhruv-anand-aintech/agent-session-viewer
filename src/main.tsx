@@ -8,7 +8,25 @@ function Root() {
 
   useEffect(() => {
     fetch("/api/capabilities", { credentials: "include" })
-      .then(r => setAuthed(r.ok))
+      .then(async r => {
+        if (!r.ok) {
+          setAuthed(false)
+          return
+        }
+        let pinRequired = true
+        try {
+          const caps = (await r.json()) as { pinRequired?: boolean }
+          if (caps.pinRequired === false) pinRequired = false
+        } catch {
+          /* older servers omit pinRequired — assume PIN may be required */
+        }
+        if (!pinRequired) {
+          setAuthed(true)
+          return
+        }
+        const pr = await fetch("/api/projects", { credentials: "include" })
+        setAuthed(pr.ok)
+      })
       .catch(() => setAuthed(false))
   }, [])
 
