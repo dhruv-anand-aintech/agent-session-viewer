@@ -26,6 +26,10 @@ import { stripXml } from "../shared-utils.mjs"
 import {
   normProjectDir as _normProjectDir,
   readCursorSessions,
+  readCursorAgentSessions,
+  readCursorAgentSessionFile,
+  parseCursorAgentTranscriptFilePath,
+  CURSOR_PROJECTS_ROOT,
   readOpenCodeSession,
   iterOpenCodeSessions,
   OPENCODE_STORAGE,
@@ -67,7 +71,8 @@ function scDel(key) { delete _syncCache[key]; flushSyncCache() }
 const sc = {
   claude: { get: k => scGet(`c:${k}`), set: (k, v) => scSet(`c:${k}`, v) },
   // Bump prefix when Cursor reader output shape changes (forces re-sync; was bubble-count-only cache).
-  cursor: { get: k => scGet(`cuv2:${k}`), set: (k, v) => scSet(`cuv2:${k}`, v) },
+  cursor: { get: k => scGet(`cuv3:${k}`), set: (k, v) => scSet(`cuv3:${k}`, v) },
+  cursorAgent: { get: k => scGet(`ca-v1:${k}`), set: (k, v) => scSet(`ca-v1:${k}`, v) },
   opencode: { get: k => scGet(`oc:${k}`), set: (k, v) => scSet(`oc:${k}`, v), del: k => scDel(`oc:${k}`) },
   antigravity: { get: k => scGet(`ag:${k}`), set: (k, v) => scSet(`ag:${k}`, v), del: k => scDel(`ag:${k}`) },
   hermes: { get: k => scGet(`h:${k}`), set: (k, v) => scSet(`h:${k}`, v) },
@@ -378,6 +383,10 @@ function startWatcher(activeTools) {
 const CLAW_POLL_MS = 5000
 const clawLastSync = new Map()    // `${toolName}:${chatJid}` → last message id
 const clawAgentLastSync = new Map() // `${toolName}:${groupFolder}/${file}` → mtime
+/** In-memory Cursor IDE composer bubble counts between state.vscdb watch events */
+const cursorComposerLastSync = new Map()
+/** In-memory Hermes message_count between state.db watch events */
+const hermesLastSync = new Map()
 
 function sqliteQuery(dbPath, sql) {
   try {
@@ -840,12 +849,64 @@ function startCursorWatcher() {
   watch(globalStorageDir, { recursive: false }, (_event, filename) => {
     if (!filename?.includes("state.vscdb")) return
     const results = readCursorSessions(
-      id => cursorLastSync.get(id),
-      (id, v) => cursorLastSync.set(id, v)
+      id => cursorComposerLastSync.get(id),
+      (id, v) => cursorComposerLastSync.set(id, v)
     )
     results.forEach(result => syncCursorResult(result).catch(() => {}))
   })
   log(`Watching Cursor globalStorage at ${globalStorageDir}`)
+}
+
+async function syncCursorAgentResult(result) {
+  try {
+    const resp = await fetch(`${WORKER_URL}/api/sync`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "X-Auth-Pin": AUTH_PIN },
+      body: JSON.stringify(result),
+    })
+    if (resp.ok) {
+      log(`✓ cursor-agent ${result.meta.projectPath}/${String(result.meta.id).slice(0, 8)} (${result.msgs.length} msgs)`)
+    } else {
+      log(`✗ cursor-agent sync failed ${resp.status}`)
+    }
+  } catch (e) {
+    log(`✗ cursor-agent fetch error: ${e.message}`)
+  }
+}
+
+async function initialSyncCursorAgent() {
+  if (!fs.existsSync(CURSOR_PROJECTS_ROOT)) {
+    log("Cursor CLI agent-transcripts not found — Cursor agent sync disabled")
+    return
+  }
+  const results = readCursorAgentSessions(
+    id => sc.cursorAgent.get(id),
+    (id, v) => sc.cursorAgent.set(id, v)
+  )
+  for (const result of results) {
+    await syncCursorAgentResult(result)
+  }
+  log(`Cursor agent: synced ${results.length} CLI session(s)`)
+}
+
+function startCursorAgentWatcher() {
+  if (!fs.existsSync(CURSOR_PROJECTS_ROOT)) return
+  watch(CURSOR_PROJECTS_ROOT, { recursive: true }, (_event, filename) => {
+    if (!filename?.endsWith(".jsonl")) return
+    const full = path.join(CURSOR_PROJECTS_ROOT, filename)
+    if (!fs.existsSync(full)) return
+    const info = parseCursorAgentTranscriptFilePath(full)
+    if (!info) return
+    const result = readCursorAgentSessionFile(
+      info.filePath,
+      info.slug,
+      info.sessionId,
+      id => sc.cursorAgent.get(id),
+      (id, v) => sc.cursorAgent.set(id, v)
+    )
+    if (result) syncCursorAgentResult(result).catch(() => {})
+  })
+  log(`Watching Cursor CLI transcripts at ${CURSOR_PROJECTS_ROOT}`)
 }
 
 // ── OpenCode adaptor (via platform-readers.mjs) ───────────────────────────────
@@ -999,6 +1060,7 @@ if (activeTools.length > 0) {
 await initialSync()
 await initialSyncAntigravity()
 await initialSyncCursor()
+await initialSyncCursorAgent()
 await initialSyncOpenCode()
 await initialSyncHermes()
 
@@ -1020,6 +1082,7 @@ startClawPollers(nanocStyleTools)
 for (const tool of picoStyleTools) startPicoClawWatcher(tool)
 startAntigravityWatcher()
 startCursorWatcher()
+startCursorAgentWatcher()
 startOpenCodeWatcher()
 startHermesWatcher()
 

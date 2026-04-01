@@ -1,7 +1,7 @@
 /**
  * platform-readers.mjs — shared platform session readers
  *
- * Exports pure reader functions for Cursor, OpenCode, Antigravity, and Hermes.
+ * Exports pure reader functions for Cursor (IDE + CLI agent), OpenCode, Antigravity, and Hermes.
  * Used by both daemon/watch.mjs (streaming sync) and local-server.mjs (direct read).
  *
  * Each reader returns { meta, msgs }[] and does NOT modify shared state.
@@ -176,11 +176,23 @@ export function readCursorSessions(cacheGet, cacheSet, changedSet) {
   const composerMeta = new Map()
   for (const row of composerMetaRows) composerMeta.set(row.cid, row)
 
-  // Single range scan — include richText + tool fields; many v3 user bubbles store text only in Lexical richText,
-  // and assistant bubbles may be tool-only (empty $.text) with toolFormerData.
-  const allRows = sqliteQuery(CURSOR_GLOBAL_DB,
-    "SELECT substr(key,10,36) as cid, json_extract(value,'$.type') as type, json_extract(value,'$.text') as text, json_extract(value,'$.richText') as richText, json_extract(value,'$.toolFormerData.name') as toolName, json_extract(value,'$.toolFormerData.status') as toolStatus, json_extract(value,'$.toolFormerData.rawArgs') as toolRawArgs, substr(json_extract(value,'$.toolFormerData.result'),1,8000) as toolResultPreview, json_extract(value,'$.codeBlocks[0].content') as codeBlock0, COALESCE(json_extract(value,'$.createdAt'), json_extract(value,'$.timestamp')) as ts, json_extract(value,'$.bubbleId') as bid FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'",
-    { maxBuffer: 48 * 1024 * 1024 })
+  // Bubble rows can be 40k+; one sqlite3 -json blob can exceed 150MB and blow execFileSync maxBuffer.
+  // Paginate so each chunk stays well under the buffer cap (see sqliteQuery default).
+  const BUBBLE_CHUNK = 2500
+  const chunkBuf = 64 * 1024 * 1024
+  const bubbleSelect =
+    "SELECT substr(key,10,36) as cid, json_extract(value,'$.type') as type, json_extract(value,'$.text') as text, json_extract(value,'$.richText') as richText, json_extract(value,'$.toolFormerData.name') as toolName, json_extract(value,'$.toolFormerData.status') as toolStatus, json_extract(value,'$.toolFormerData.rawArgs') as toolRawArgs, substr(json_extract(value,'$.toolFormerData.result'),1,8000) as toolResultPreview, json_extract(value,'$.codeBlocks[0].content') as codeBlock0, COALESCE(json_extract(value,'$.createdAt'), json_extract(value,'$.timestamp')) as ts, json_extract(value,'$.bubbleId') as bid FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'"
+  const allRows = []
+  for (let offset = 0; ; offset += BUBBLE_CHUNK) {
+    const chunk = sqliteQuery(
+      CURSOR_GLOBAL_DB,
+      `${bubbleSelect} ORDER BY key LIMIT ${BUBBLE_CHUNK} OFFSET ${offset}`,
+      { maxBuffer: chunkBuf }
+    )
+    if (!chunk.length) break
+    allRows.push(...chunk)
+    if (chunk.length < BUBBLE_CHUNK) break
+  }
 
   // Group by cid
   const byCid = new Map()
@@ -270,6 +282,245 @@ export function readCursorSessions(cacheGet, cacheSet, changedSet) {
     })
   }
 
+  return results
+}
+
+// ── Cursor CLI (cursor agent) ─────────────────────────────────────────────────
+//
+// Agent transcripts (JSONL), separate from IDE composer (state.vscdb):
+//   ~/.cursor/projects/{workspace-slug}/agent-transcripts/{agentId}/{agentId}.jsonl
+//   Subagents: .../{parentId}/subagents/{childId}.jsonl
+// Slug = absolute workspace path with leading / dropped and / → - (same idea as normProjectDir).
+
+export const CURSOR_PROJECTS_ROOT = path.join(homedir(), ".cursor", "projects")
+
+/** Slug dir name under ~/.cursor/projects → absolute workspace path (best-effort). */
+export function cursorAgentSlugToWorkspacePath(slug) {
+  if (!slug) return ""
+  return `/${slug.replace(/-/g, "/")}`
+}
+
+function extractCursorAgentMessageText(content) {
+  if (content == null) return ""
+  if (typeof content === "string") return content.trim()
+  if (!Array.isArray(content)) return ""
+  const parts = []
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue
+    if (block.type === "text" && typeof block.text === "string") parts.push(block.text)
+    else if (block.type === "tool_use") {
+      const name = block.name ?? "tool"
+      let body = ""
+      if (block.input != null) {
+        try {
+          body = "\n\n```json\n" + JSON.stringify(block.input, null, 2).slice(0, 8000) + "\n```"
+        } catch {
+          body = "\n\n```\n" + String(block.input).slice(0, 8000) + "\n```"
+        }
+      }
+      parts.push(`**${name}**` + body)
+    } else if (block.type === "tool_result") {
+      const t = block.content
+      const s = typeof t === "string" ? t : t != null ? JSON.stringify(t) : ""
+      parts.push("**tool_result**\n\n```\n" + s.slice(0, 6000) + (s.length > 6000 ? "\n…" : "") + "\n```")
+    }
+  }
+  return parts.join("\n\n").trim()
+}
+
+function parseCursorAgentJsonlLines(filePath) {
+  let raw
+  try {
+    raw = fs.readFileSync(filePath, "utf8")
+  } catch {
+    return null
+  }
+  const lines = raw.split("\n").filter(Boolean)
+  const converted = []
+  for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+    let row
+    try {
+      row = JSON.parse(lines[lineIdx])
+    } catch {
+      continue
+    }
+    const role = row.role === "assistant" ? "assistant" : "user"
+    let text = extractCursorAgentMessageText(row.message?.content)
+    if (!text && role === "user") continue
+    if (!text && role === "assistant") text = "_(empty agent message)_"
+    const tsMs = Date.parse(row.timestamp) || null
+    converted.push({
+      lineIdx,
+      role,
+      text,
+      tsMs,
+    })
+  }
+  return { converted, lineCount: lines.length }
+}
+
+/**
+ * If `absPath` is a Cursor CLI agent transcript .jsonl, returns { filePath, slug, sessionId }.
+ */
+export function parseCursorAgentTranscriptFilePath(absPath) {
+  const norm = path.normalize(absPath)
+  if (!norm.endsWith(".jsonl")) return null
+  const parts = norm.split(path.sep)
+  const at = parts.lastIndexOf("agent-transcripts")
+  if (at < 1 || at + 2 >= parts.length) return null
+  const slug = parts[at - 1]
+  const agentId = parts[at + 1]
+  if (parts[at + 2] === "subagents" && parts[at + 3]) {
+    const leaf = parts[at + 3]
+    if (!leaf.endsWith(".jsonl")) return null
+    return { slug, sessionId: path.basename(leaf, ".jsonl"), filePath: norm }
+  }
+  const leaf = parts[at + 2]
+  if (!leaf?.endsWith(".jsonl")) return null
+  if (path.basename(leaf, ".jsonl") !== agentId) return null
+  return { slug, sessionId: agentId, filePath: norm }
+}
+
+/** Lists Cursor agent transcript JSONL files; returns array of { filePath, slug, sessionId } */
+export function listCursorAgentTranscriptFiles() {
+  const root = CURSOR_PROJECTS_ROOT
+  const out = []
+  if (!fs.existsSync(root)) return out
+  let slugs
+  try {
+    slugs = fs.readdirSync(root)
+  } catch {
+    return out
+  }
+  for (const slug of slugs) {
+    const atDir = path.join(root, slug, "agent-transcripts")
+    if (!fs.existsSync(atDir)) continue
+    let agentIds
+    try {
+      agentIds = fs.readdirSync(atDir)
+    } catch {
+      continue
+    }
+    for (const agentId of agentIds) {
+      const agentDir = path.join(atDir, agentId)
+      let st
+      try {
+        st = fs.statSync(agentDir)
+      } catch {
+        continue
+      }
+      if (!st.isDirectory()) continue
+      const mainFile = path.join(agentDir, `${agentId}.jsonl`)
+      if (fs.existsSync(mainFile)) {
+        out.push({ filePath: mainFile, slug, sessionId: agentId })
+      }
+      const subDir = path.join(agentDir, "subagents")
+      if (!fs.existsSync(subDir)) continue
+      let subs
+      try {
+        subs = fs.readdirSync(subDir)
+      } catch {
+        continue
+      }
+      for (const f of subs) {
+        if (!f.endsWith(".jsonl")) continue
+        const childId = f.slice(0, -".jsonl".length)
+        // Flat id (UUID) keeps /api/session/:project/:id URLs valid; projectPath already scopes by workspace slug.
+        out.push({
+          filePath: path.join(subDir, f),
+          slug,
+          sessionId: childId,
+        })
+      }
+    }
+  }
+  return out
+}
+
+function buildCursorAgentSessionMetaAndMsgs(filePath, slug, sessionId, parsed, fileMtimeMs) {
+  const { converted } = parsed
+  if (!converted.length) return null
+
+  const baseMs = Number.isFinite(fileMtimeMs) ? fileMtimeMs : Date.now()
+  const n = converted.length
+  const perLineMs = converted.map((row, idx) => {
+    if (row.tsMs != null && Number.isFinite(row.tsMs)) return row.tsMs
+    if (n <= 1) return baseMs
+    return baseMs - (n - 1 - idx)
+  })
+  let lastActivityMs = 0
+  for (const t of perLineMs) {
+    if (t > lastActivityMs) lastActivityMs = t
+  }
+
+  const msgs = []
+  for (let i = 0; i < converted.length; i++) {
+    const row = converted[i]
+    const role = row.role
+    const type = role === "assistant" ? "assistant" : "human"
+    msgs.push({
+      uuid: `cursor-agent-${sessionId}-${row.lineIdx}`,
+      parentUuid: null,
+      type,
+      sessionId,
+      timestamp: msToIso(perLineMs[i]),
+      isSidechain: false,
+      message: { role, content: row.text },
+    })
+  }
+
+  const firstUserText = converted.find(r => r.role === "user")?.text
+  const firstName = firstUserText
+    ? firstUserText.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, 80)
+    : null
+
+  return {
+    meta: {
+      id: sessionId,
+      projectPath: `cursor-agent:${slug}`,
+      messageCount: msgs.length,
+      userMessageCount: converted.filter(r => r.role === "user").length,
+      lastActivity: msToIso(lastActivityMs),
+      isActive: false,
+      firstName,
+      source: "cursor",
+    },
+    msgs,
+  }
+}
+
+/**
+ * Read one Cursor CLI agent transcript file.
+ * cacheGet/cacheSet keyed by absolute file path; value `${mtimeMs}:${size}`.
+ */
+export function readCursorAgentSessionFile(filePath, slug, sessionId, cacheGet, cacheSet) {
+  let st
+  try {
+    st = fs.statSync(filePath)
+  } catch {
+    return null
+  }
+  const cacheVal = `${st.mtimeMs}:${st.size}`
+  if (cacheGet && cacheGet(filePath) === cacheVal) return null
+
+  const parsed = parseCursorAgentJsonlLines(filePath)
+  if (!parsed?.converted.length) return null
+  const result = buildCursorAgentSessionMetaAndMsgs(filePath, slug, sessionId, parsed, st.mtimeMs)
+  if (!result) return null
+  if (cacheSet) cacheSet(filePath, cacheVal)
+  return result
+}
+
+/**
+ * All Cursor CLI agent sessions under ~/.cursor/projects.
+ * Pass cacheGet(filePath) / cacheSet(filePath, mtimeSizeStr) for change detection.
+ */
+export function readCursorAgentSessions(cacheGet, cacheSet) {
+  const results = []
+  for (const { filePath, slug, sessionId } of listCursorAgentTranscriptFiles()) {
+    const r = readCursorAgentSessionFile(filePath, slug, sessionId, cacheGet, cacheSet)
+    if (r) results.push(r)
+  }
   return results
 }
 
