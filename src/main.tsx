@@ -24,7 +24,7 @@ function Root() {
           setAuthed(true)
           return
         }
-        const pr = await fetch("/api/projects", { credentials: "include" })
+        const pr = await fetch("/api/projects?maxSessions=1", { credentials: "include" })
         setAuthed(pr.ok)
       })
       .catch(() => setAuthed(false))

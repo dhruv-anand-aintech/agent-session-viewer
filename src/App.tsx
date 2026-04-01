@@ -68,29 +68,56 @@ function useCapabilities(): Capabilities {
   return caps
 }
 
+const RECENT_SIDEBAR_SESSIONS = 30
+
 function useProjects() {
   const [projects, setProjects] = useState<ProjectData[]>([])
   const [connected, setConnected] = useState(false)
   const [projectsLoading, setProjectsLoading] = useState(true)
   const [totalSessions, setTotalSessions] = useState<number | null>(null)
+  const [listMode, setListMode] = useState<"recent" | "full">("recent")
 
   useEffect(() => {
-    fetch("/api/projects").then(r => {
-      const total = r.headers.get("X-Total-Sessions")
-      if (total) setTotalSessions(Number(total))
-      return r.json()
-    }).then(data => { setProjects(data); setProjectsLoading(false) }).catch(() => { setProjectsLoading(false) })
+    setProjectsLoading(true)
+    const qs = listMode === "recent" ? `?maxSessions=${RECENT_SIDEBAR_SESSIONS}` : ""
+    fetch(`/api/projects${qs}`, { credentials: "include" })
+      .then(r => {
+        const total = r.headers.get("X-Total-Sessions")
+        if (total) setTotalSessions(Number(total))
+        return r.json()
+      })
+      .then(data => {
+        setProjects(data as ProjectData[])
+        setProjectsLoading(false)
+      })
+      .catch(() => setProjectsLoading(false))
 
-    const es = new EventSource("/api/stream")
+    const es = new EventSource(`/api/stream${qs}`)
     es.onopen = () => setConnected(true)
     es.onerror = () => setConnected(false)
     es.addEventListener("projects", (e) => {
-      try { setProjects(JSON.parse((e as MessageEvent).data)) } catch { /* ignore */ }
+      try {
+        setProjects(JSON.parse((e as MessageEvent).data) as ProjectData[])
+      } catch { /* ignore */ }
     })
     return () => es.close()
-  }, [])
+  }, [listMode])
 
-  return { projects, connected, projectsLoading, totalSessions }
+  const visibleCount = projects.reduce((n, p) => n + p.sessions.length, 0)
+  const sessionsTruncated =
+    listMode === "recent" && totalSessions != null && totalSessions > visibleCount
+
+  const loadAllSessions = useCallback(() => setListMode("full"), [])
+
+  return {
+    projects,
+    connected,
+    projectsLoading,
+    totalSessions,
+    listMode,
+    sessionsTruncated,
+    loadAllSessions,
+  }
 }
 
 // ── IDB-backed windowed message store ─────────────────────────────────────────
@@ -836,10 +863,13 @@ function useIsMobile() {
   return mobile
 }
 
-function Sidebar({ projects, projectsLoading, totalSessions, selected, onSelect, width, onDragStart, mobileOpen, onMobileClose }: {
+function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsTruncated, onLoadAllSessions, selected, onSelect, width, onDragStart, mobileOpen, onMobileClose }: {
   projects: ProjectData[]
   projectsLoading: boolean
   totalSessions: number | null
+  listMode: "recent" | "full"
+  sessionsTruncated: boolean
+  onLoadAllSessions: () => void
   selected: { project: string; session: string } | null
   onSelect: (p: string, s: string) => void
   width: number
@@ -907,18 +937,29 @@ function Sidebar({ projects, projectsLoading, totalSessions, selected, onSelect,
           <button className={`sidebar-view-btn ${grouped ? "active" : ""}`} onClick={() => toggleGrouped(true)}>Groups</button>
         </div>
       </div>
-      {showPlatformFilter && (
+      {(showPlatformFilter || sessionsTruncated) && (
         <div className="sidebar-platform-filter">
-          {["all", ...presentPlatforms].map(p => (
+          {showPlatformFilter &&
+            ["all", ...presentPlatforms].map(p => (
+              <button
+                key={p}
+                type="button"
+                className={`sidebar-platform-btn ${platformFilter === p ? platformFilterActiveClass(p) : ""}`}
+                onClick={() => setPlatformFilter(p)}
+              >
+                {p === "all" ? "All" : p === "claude" ? "Claude" : p === "cursor" ? "Cursor" : p === "opencode" ? "OpenCode" : p === "antigravity" ? "Antigravity" : p === "hermes" ? "Hermes" : p}
+              </button>
+            ))}
+          {sessionsTruncated && totalSessions != null && (
             <button
-              key={p}
               type="button"
-              className={`sidebar-platform-btn ${platformFilter === p ? platformFilterActiveClass(p) : ""}`}
-              onClick={() => setPlatformFilter(p)}
+              className="sidebar-platform-btn load-all-sessions-pill"
+              onClick={onLoadAllSessions}
+              title="Load every session into the sidebar (slower)"
             >
-              {p === "all" ? "All" : p === "claude" ? "Claude" : p === "cursor" ? "Cursor" : p === "opencode" ? "OpenCode" : p === "antigravity" ? "Antigravity" : p === "hermes" ? "Hermes" : p}
+              All ({totalSessions})
             </button>
-          ))}
+          )}
         </div>
       )}
       {grouped ? (
@@ -984,7 +1025,16 @@ function Sidebar({ projects, projectsLoading, totalSessions, selected, onSelect,
           ))}
         </>
       )}
-      {projectsLoading && projects.length === 0 && <div className="sidebar-empty"><span className="sidebar-spinner" />{totalSessions != null ? `Loading ${totalSessions} sessions…` : "Loading…"}</div>}
+      {projectsLoading && projects.length === 0 && (
+        <div className="sidebar-empty">
+          <span className="sidebar-spinner" />
+          {sessionsTruncated || listMode === "recent"
+            ? "Loading recent sessions…"
+            : totalSessions != null
+              ? `Loading ${totalSessions} sessions…`
+              : "Loading…"}
+        </div>
+      )}
       {!projectsLoading && projects.length === 0 && <div className="sidebar-empty">No sessions found</div>}
       <div className="sidebar-resize-handle" onPointerDown={onDragStart} />
     </nav>
@@ -1007,7 +1057,15 @@ function parseUrlSession(): { project: string; session: string } | null {
 }
 
 export default function App() {
-  const { projects, connected, projectsLoading, totalSessions } = useProjects()
+  const {
+    projects,
+    connected,
+    projectsLoading,
+    totalSessions,
+    listMode,
+    sessionsTruncated,
+    loadAllSessions,
+  } = useProjects()
   const capabilities = useCapabilities()
   const [selected, setSelected] = useState<{ project: string; session: string } | null>(parseUrlSession)
   const [showSettings, setShowSettings] = useState(false)
@@ -1082,6 +1140,9 @@ export default function App() {
               projects={projects}
               projectsLoading={projectsLoading}
               totalSessions={totalSessions}
+              listMode={listMode}
+              sessionsTruncated={sessionsTruncated}
+              onLoadAllSessions={loadAllSessions}
               selected={selected}
               onSelect={(p, s) => setSelected({ project: p, session: s })}
               width={sidebarWidth}

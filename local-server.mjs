@@ -12,7 +12,7 @@ import { dirname, extname, join, sep } from "path"
 import http from "http"
 import { fileURLToPath } from "url"
 import { exec } from "child_process"
-import { stripXml } from "./shared-utils.mjs"
+import { stripXml, trimProjectsByRecentSessionCount, countSessionsInProjects } from "./shared-utils.mjs"
 import {
   readCursorSessions,
   readCursorAgentSessions,
@@ -63,7 +63,7 @@ function parseJsonl(fp) {
   } catch { return [] }
 }
 
-async function loadProjects() {
+async function loadProjectsFull() {
   const config = loadConfig()
   const names = config.names ?? {}
   const projects = []
@@ -168,6 +168,14 @@ async function loadProjects() {
   })
 }
 
+async function loadProjectsBundle(maxSessions) {
+  const full = await loadProjectsFull()
+  const total = countSessionsInProjects(full)
+  const n = Number(maxSessions)
+  if (!Number.isFinite(n) || n <= 0 || total <= n) return { projects: full, total }
+  return { projects: trimProjectsByRecentSessionCount(full, n), total }
+}
+
 // ── In-memory message cache for non-JSONL platforms ───────────────────────────
 const msgCache = new Map() // `projectPath/sessionId` → SessionMessage[]
 
@@ -255,14 +263,22 @@ function checkHeaderAuth(req) {
 
 // --- SSE ---
 
+/** @type {Set<{ res: import('http').ServerResponse, maxSessions: number | null }>} */
 const sseClients = new Set()
 
 async function broadcastProjects() {
   if (sseClients.size === 0) return
-  const data = JSON.stringify(await loadProjects())
-  for (const res of sseClients) {
-    try { res.write(`event: projects\ndata: ${data}\n\n`) }
-    catch { sseClients.delete(res) }
+  const full = await loadProjectsFull()
+  for (const c of sseClients) {
+    const payload =
+      c.maxSessions != null && c.maxSessions > 0
+        ? trimProjectsByRecentSessionCount(full, c.maxSessions)
+        : full
+    try {
+      c.res.write(`event: projects\ndata: ${JSON.stringify(payload)}\n\n`)
+    } catch {
+      sseClients.delete(c)
+    }
   }
 }
 
@@ -315,6 +331,7 @@ const server = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*")
   res.setHeader("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS")
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Auth-Pin")
+  res.setHeader("Access-Control-Expose-Headers", "X-Total-Sessions")
 
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return }
 
@@ -389,22 +406,35 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  // GET /api/projects
+  // GET /api/projects?maxSessions=30 — omit or maxSessions=0 for full list
   if (url.pathname === "/api/projects") {
-    json(await loadProjects())
+    const maxRaw = url.searchParams.get("maxSessions")
+    const maxParsed = maxRaw != null && maxRaw !== "" ? Number(maxRaw) : null
+    const { projects, total } = await loadProjectsBundle(maxParsed ?? 0)
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "X-Total-Sessions": String(total),
+    })
+    res.end(JSON.stringify(projects))
     return
   }
 
-  // GET /api/stream  (SSE)
+  // GET /api/stream  (SSE) — optional ?maxSessions=30 to match initial list
   if (url.pathname === "/api/stream") {
+    const maxRaw = url.searchParams.get("maxSessions")
+    const maxParsed = maxRaw != null && maxRaw !== "" ? Number(maxRaw) : null
+    const maxSessions = Number.isFinite(maxParsed) && maxParsed > 0 ? maxParsed : null
+    const { projects, total } = await loadProjectsBundle(maxSessions ?? 0)
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
+      "X-Total-Sessions": String(total),
     })
-    res.write(`event: projects\ndata: ${JSON.stringify(await loadProjects())}\n\n`)
-    sseClients.add(res)
-    req.on("close", () => sseClients.delete(res))
+    const client = { res, maxSessions }
+    res.write(`event: projects\ndata: ${JSON.stringify(projects)}\n\n`)
+    sseClients.add(client)
+    req.on("close", () => sseClients.delete(client))
     return
   }
 
@@ -442,7 +472,7 @@ const server = http.createServer(async (req, res) => {
 
   // GET /api/debug
   if (url.pathname === "/api/debug") {
-    const projects = loadProjects()
+    const projects = await loadProjectsFull()
     json({ sessionCount: projects.flatMap(p => p.sessions).length, projectCount: projects.length })
     return
   }
