@@ -16,7 +16,12 @@ function checkSyncAuth(request: Request, env: Env): boolean {
 }
 
 function corsHeaders(extra: Record<string, string> = {}): Headers {
-  return new Headers({ "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, PUT, OPTIONS", ...extra })
+  return new Headers({
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, PUT, OPTIONS",
+    "Access-Control-Expose-Headers": "X-Total-Sessions",
+    ...extra,
+  })
 }
 
 async function getProjects(env: Env): Promise<{ projects: ReturnType<typeof buildProjects>; total: number }> {
@@ -60,6 +65,39 @@ function buildProjects(map: Record<string, unknown[]>) {
     const bDate = String((b.sessions[0] as Record<string,unknown>)?.lastActivity ?? "")
     return bDate.localeCompare(aDate)
   })
+}
+
+type ProjectRow = ReturnType<typeof buildProjects>[number]
+
+function trimProjectsByRecentSessionCount(projects: ProjectRow[], max: number): ProjectRow[] {
+  if (max <= 0 || !projects.length) return projects
+  const flat: { p: ProjectRow; s: Record<string, unknown>; la: string }[] = []
+  for (const p of projects) {
+    for (const s of p.sessions) {
+      flat.push({ p, s, la: String(s.lastActivity ?? "") })
+    }
+  }
+  if (flat.length <= max) return projects
+  flat.sort((a, b) => b.la.localeCompare(a.la))
+  const keep = new Set(flat.slice(0, max).map(({ p, s }) => `${p.path}\x1f${String(s.id)}`))
+  const out: ProjectRow[] = []
+  for (const p of projects) {
+    const sessions = p.sessions.filter(s => keep.has(`${p.path}\x1f${String(s.id)}`))
+    if (sessions.length) out.push({ ...p, sessions })
+  }
+  out.sort((a, b) => {
+    const aDate = String((a.sessions[0] as Record<string, unknown>)?.lastActivity ?? "")
+    const bDate = String((b.sessions[0] as Record<string, unknown>)?.lastActivity ?? "")
+    return bDate.localeCompare(aDate)
+  })
+  return out
+}
+
+function parseMaxSessions(url: URL): number | null {
+  const raw = url.searchParams.get("maxSessions")
+  if (raw == null || raw === "") return null
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : null
 }
 
 export default {
@@ -201,10 +239,13 @@ export default {
 
     if (url.pathname === "/api/projects") {
       const { projects, total } = await getProjects(env)
-      return Response.json(projects, { headers: corsHeaders({ "X-Total-Sessions": String(total) }) })
+      const max = parseMaxSessions(url)
+      const body = max != null && total > max ? trimProjectsByRecentSessionCount(projects, max) : projects
+      return Response.json(body, { headers: corsHeaders({ "X-Total-Sessions": String(total) }) })
     }
 
     if (url.pathname === "/api/stream") {
+      const maxSessions = parseMaxSessions(url)
       const { readable, writable } = new TransformStream()
       const writer = writable.getWriter()
       const enc = new TextEncoder()
@@ -212,11 +253,19 @@ export default {
         writer.write(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
       ;(async () => {
         try {
-          await send("projects", (await getProjects(env)).projects)
+          const push = async () => {
+            const { projects, total } = await getProjects(env)
+            const payload =
+              maxSessions != null && total > maxSessions
+                ? trimProjectsByRecentSessionCount(projects, maxSessions)
+                : projects
+            await send("projects", payload)
+          }
+          await push()
           const deadline = Date.now() + 88_000
           while (Date.now() < deadline && !request.signal.aborted) {
             await new Promise(r => setTimeout(r, 4000))
-            await send("projects", (await getProjects(env)).projects)
+            await push()
           }
         } catch { /* disconnect */ }
         finally { writer.close() }
