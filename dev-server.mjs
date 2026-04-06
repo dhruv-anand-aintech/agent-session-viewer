@@ -1,15 +1,17 @@
 /**
- * Local Express server for dev — reads ~/.claude/projects/ directly
- * and serves /api/projects + /api/stream SSE.
+ * Minimal local API for dev — Claude JSONL only (no Cursor/OpenCode/etc.).
  *
- * Run: node dev-server.mjs
- * Then: vite (in another terminal) — proxies /api → localhost:3001
+ * Run: node dev-server.mjs  OR  npm run dev:api
+ * Then: vite — proxies /api → localhost:3001
+ *
+ * Must match pathname (not full req.url) so ?maxSessions=30 from the SPA is handled.
  */
 
-import { createReadStream, readdirSync, readFileSync, statSync, watchFile } from "fs"
+import { readdirSync, readFileSync, statSync } from "fs"
 import { homedir } from "os"
 import { join } from "path"
 import http from "http"
+import { trimProjectsByRecentSessionCount, countSessionsInProjects } from "./shared-utils.mjs"
 
 const CLAUDE_DIR = join(homedir(), ".claude", "projects")
 const PORT = 3001
@@ -58,29 +60,60 @@ function loadProjects() {
   })
 }
 
+function projectsBundle(maxSessions) {
+  const full = loadProjects()
+  const total = countSessionsInProjects(full)
+  const n = Number(maxSessions)
+  if (!Number.isFinite(n) || n <= 0 || total <= n) return { projects: full, total }
+  return { projects: trimProjectsByRecentSessionCount(full, n), total }
+}
+
+/** @type {Set<{ res: import('http').ServerResponse, maxSessions: number | null }>} */
 const sseClients = new Set()
 
 http.createServer((req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*")
+  res.setHeader("Access-Control-Expose-Headers", "X-Total-Sessions")
 
-  if (req.url === "/api/projects") {
+  const url = new URL(req.url || "/", "http://127.0.0.1")
+  const path = url.pathname
+
+  if (path === "/api/capabilities") {
     res.setHeader("Content-Type", "application/json")
-    res.end(JSON.stringify(loadProjects()))
+    res.end(JSON.stringify({ openPath: false, debugStream: true, pinRequired: false }))
     return
   }
 
-  if (req.url === "/api/stream") {
-    res.setHeader("Content-Type", "text/event-stream")
-    res.setHeader("Cache-Control", "no-cache")
-    res.setHeader("Connection", "keep-alive")
+  if (path === "/api/projects") {
+    const maxRaw = url.searchParams.get("maxSessions")
+    const maxParsed = maxRaw != null && maxRaw !== "" ? Number(maxRaw) : null
+    const { projects, total } = projectsBundle(maxParsed ?? 0)
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "X-Total-Sessions": String(total),
+    })
+    res.end(JSON.stringify(projects))
+    return
+  }
 
-    const send = (event, data) => {
-      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
-    }
+  if (path === "/api/stream") {
+    const maxRaw = url.searchParams.get("maxSessions")
+    const maxParsed = maxRaw != null && maxRaw !== "" ? Number(maxRaw) : null
+    const maxSessions = Number.isFinite(maxParsed) && maxParsed > 0 ? maxParsed : null
+    const { projects, total } = projectsBundle(maxSessions ?? 0)
 
-    send("projects", loadProjects())
-    sseClients.add(res)
-    req.on("close", () => sseClients.delete(res))
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+      "X-Total-Sessions": String(total),
+    })
+
+    const client = { res, maxSessions }
+    res.write(`event: projects\ndata: ${JSON.stringify(projects)}\n\n`)
+    sseClients.add(client)
+    req.on("close", () => sseClients.delete(client))
     return
   }
 
@@ -88,14 +121,17 @@ http.createServer((req, res) => {
   res.end()
 }).listen(PORT, () => console.log(`Dev server on http://localhost:${PORT}`))
 
-// Watch ~/.claude/projects for changes and push SSE updates
 setInterval(() => {
-  const projects = loadProjects()
-  for (const client of sseClients) {
+  const full = loadProjects()
+  for (const c of sseClients) {
+    const payload =
+      c.maxSessions != null && c.maxSessions > 0
+        ? trimProjectsByRecentSessionCount(full, c.maxSessions)
+        : full
     try {
-      client.write(`event: projects\ndata: ${JSON.stringify(projects)}\n\n`)
+      c.res.write(`event: projects\ndata: ${JSON.stringify(payload)}\n\n`)
     } catch {
-      sseClients.delete(client)
+      sseClients.delete(c)
     }
   }
 }, 3000)
