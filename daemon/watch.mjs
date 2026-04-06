@@ -25,7 +25,10 @@ import { execFileSync } from "node:child_process"
 import { stripXml } from "../shared-utils.mjs"
 import {
   normProjectDir as _normProjectDir,
-  readCursorSessions,
+  readCodexSessions,
+  readCodexSession,
+  CODEX_SESSIONS_ROOT,
+  readCursorSessionsFull,
   readCursorAgentSessions,
   readCursorAgentSessionFile,
   parseCursorAgentTranscriptFilePath,
@@ -70,6 +73,7 @@ function scDel(key) { delete _syncCache[key]; flushSyncCache() }
 // Namespace helpers for each platform
 const sc = {
   claude: { get: k => scGet(`c:${k}`), set: (k, v) => scSet(`c:${k}`, v) },
+  codex: { get: k => scGet(`cx:${k}`), set: (k, v) => scSet(`cx:${k}`, v), del: k => scDel(`cx:${k}`) },
   // Bump prefix when Cursor reader output shape changes (forces re-sync; was bubble-count-only cache).
   cursor: { get: k => scGet(`cuv3:${k}`), set: (k, v) => scSet(`cuv3:${k}`, v) },
   cursorAgent: { get: k => scGet(`ca-v1:${k}`), set: (k, v) => scSet(`ca-v1:${k}`, v) },
@@ -833,7 +837,7 @@ async function syncCursorResult(result) {
 
 async function initialSyncCursor() {
   if (!fs.existsSync(CURSOR_GLOBAL_DB)) { log("Cursor globalStorage DB not found — Cursor sync disabled"); return }
-  const results = readCursorSessions(
+  const results = readCursorSessionsFull(
     id => sc.cursor.get(id),
     (id, v) => sc.cursor.set(id, v)
   )
@@ -848,7 +852,7 @@ function startCursorWatcher() {
   const globalStorageDir = path.dirname(CURSOR_GLOBAL_DB)
   watch(globalStorageDir, { recursive: false }, (_event, filename) => {
     if (!filename?.includes("state.vscdb")) return
-    const results = readCursorSessions(
+    const results = readCursorSessionsFull(
       id => cursorComposerLastSync.get(id),
       (id, v) => cursorComposerLastSync.set(id, v)
     )
@@ -907,6 +911,54 @@ function startCursorAgentWatcher() {
     if (result) syncCursorAgentResult(result).catch(() => {})
   })
   log(`Watching Cursor CLI transcripts at ${CURSOR_PROJECTS_ROOT}`)
+}
+
+// ── Codex adaptor (via platform-readers.mjs) ─────────────────────────────────
+
+async function syncCodexResult(result) {
+  try {
+    const resp = await fetch(`${WORKER_URL}/api/sync`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "X-Auth-Pin": AUTH_PIN },
+      body: JSON.stringify(result),
+    })
+    if (resp.ok) {
+      log(`✓ codex ${result.meta.projectPath}/${String(result.meta.id).slice(0, 8)} (${result.msgs.length} msgs)`)
+    } else {
+      log(`✗ codex sync failed ${resp.status}`)
+    }
+  } catch (e) {
+    log(`✗ codex fetch error: ${e.message}`)
+  }
+}
+
+async function initialSyncCodex() {
+  if (!fs.existsSync(CODEX_SESSIONS_ROOT)) {
+    log("Codex sessions not found — Codex sync disabled")
+    return
+  }
+  const results = readCodexSessions(
+    filePath => sc.codex.get(filePath),
+    (filePath, v) => sc.codex.set(filePath, v)
+  )
+  for (const result of results) await syncCodexResult(result)
+  log(`Codex: synced ${results.length} session(s)`)
+}
+
+function startCodexWatcher() {
+  if (!fs.existsSync(CODEX_SESSIONS_ROOT)) return
+  watch(CODEX_SESSIONS_ROOT, { recursive: true }, (_event, filename) => {
+    if (!filename?.endsWith(".jsonl")) return
+    const full = path.join(CODEX_SESSIONS_ROOT, filename)
+    if (!fs.existsSync(full)) return
+    const result = readCodexSession(
+      full,
+      filePath => sc.codex.get(filePath),
+      (filePath, v) => sc.codex.set(filePath, v)
+    )
+    if (result) syncCodexResult(result).catch(() => {})
+  })
+  log(`Watching Codex sessions at ${CODEX_SESSIONS_ROOT}`)
 }
 
 // ── OpenCode adaptor (via platform-readers.mjs) ───────────────────────────────
@@ -1058,6 +1110,7 @@ if (activeTools.length > 0) {
 }
 
 await initialSync()
+await initialSyncCodex()
 await initialSyncAntigravity()
 await initialSyncCursor()
 await initialSyncCursorAgent()
@@ -1080,6 +1133,7 @@ const picoStyleTools  = activeTools.filter(t => t.isPicoStyle)
 startWatcher(nanocStyleTools)
 startClawPollers(nanocStyleTools)
 for (const tool of picoStyleTools) startPicoClawWatcher(tool)
+startCodexWatcher()
 startAntigravityWatcher()
 startCursorWatcher()
 startCursorAgentWatcher()

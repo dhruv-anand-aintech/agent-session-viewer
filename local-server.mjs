@@ -14,7 +14,10 @@ import { fileURLToPath } from "url"
 import { exec } from "child_process"
 import { stripXml, trimProjectsByRecentSessionCount, countSessionsInProjects } from "./shared-utils.mjs"
 import {
+  readCodexSessions,
+  CODEX_SESSIONS_ROOT,
   readCursorSessions,
+  readCursorSessionMsgs,
   readCursorAgentSessions,
   CURSOR_PROJECTS_ROOT,
   readOpenCodeSession,
@@ -154,6 +157,7 @@ async function loadProjectsFull() {
   // Merge in external platform sessions
   const allProjects = [
     ...projects,
+    ...loadCodexSessions(),
     ...loadCursorSessions(),
     ...loadCursorAgentSessions(),
     ...loadOpenCodeSessions(),
@@ -204,6 +208,11 @@ function resultsToProjects(results, platformPrefix) {
 
 function loadCursorSessions() {
   return resultsToProjects(readCursorSessions(), "cursor")
+}
+
+function loadCodexSessions() {
+  if (!existsSync(CODEX_SESSIONS_ROOT)) return []
+  return resultsToProjects(readCodexSessions(null, null), "codex")
 }
 
 function loadCursorAgentSessions() {
@@ -429,6 +438,7 @@ const server = http.createServer(async (req, res) => {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
       "X-Total-Sessions": String(total),
     })
     const client = { res, maxSessions }
@@ -438,18 +448,44 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  // GET /api/session/:project/:id
+  // GET /api/session/:project/:id[?tail=N&skip=M]
+  // tail=N  → return last N messages (default: all)
+  // skip=M  → skip M messages from the end before taking tail (for pagination)
   const sessionMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/([^/]+)$/)
   if (sessionMatch) {
     const projectPath = decodeURIComponent(sessionMatch[1])
     const sessionId = sessionMatch[2]
-    // Non-Claude platforms store messages in the msgCache (populated by loadProjects)
+    const tailParam = url.searchParams.get("tail")
+    const skipParam = url.searchParams.get("skip")
+    const tail = tailParam ? Math.max(1, parseInt(tailParam) || 0) : 0
+    const skip = skipParam ? Math.max(0, parseInt(skipParam) || 0) : 0
+
+    function sliceMsgs(all) {
+      const total = all.length
+      if (!tail) return { msgs: all, total }
+      const end = total - skip
+      const start = Math.max(0, end - tail)
+      return { msgs: all.slice(start, end > 0 ? end : 0), total }
+    }
+
+    function jsonPaged(all) {
+      const { msgs, total } = sliceMsgs(all)
+      res.writeHead(200, { "Content-Type": "application/json", "X-Message-Total": String(total) })
+      res.end(JSON.stringify(msgs))
+    }
+
+    // Cursor: load on demand (not cached upfront — avoids reading 50k+ bubble rows at startup)
+    if (projectPath.startsWith("cursor:")) {
+      jsonPaged(readCursorSessionMsgs(sessionId))
+      return
+    }
+    // Other non-Claude platforms store messages in the msgCache (populated by loadProjects)
     const cacheKey = `${projectPath}/${sessionId}`
-    if (msgCache.has(cacheKey)) { json(msgCache.get(cacheKey)); return }
+    if (msgCache.has(cacheKey)) { jsonPaged(msgCache.get(cacheKey)); return }
     // Claude: read JSONL file directly
     const fp = join(CLAUDE_DIR, projectPath, `${sessionId}.jsonl`)
     if (!existsSync(fp)) { res.writeHead(404); res.end("Not Found"); return }
-    json(parseJsonl(fp))
+    jsonPaged(parseJsonl(fp))
     return
   }
 

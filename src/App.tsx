@@ -122,14 +122,16 @@ function useProjects() {
 
 // ── IDB-backed windowed message store ─────────────────────────────────────────
 
-const CHUNK = 60        // messages to load per step
-const MAX_DOM = 180     // max messages to keep in DOM at once
+const CHUNK = 60           // messages to load per step (client windowing)
+const MAX_DOM = 180        // max messages to keep in DOM at once
+const INITIAL_TAIL = 80    // messages to fetch from server on first load
 const IDB_KEY = (projectDir: string, sessionId: string) => `sess/${projectDir}/${sessionId}`
 
 interface MsgWindow {
   msgs: SessionMessage[]
-  startIdx: number  // index in full array where this window starts
-  total: number     // total messages in full array
+  startIdx: number  // index in locally-held array where this window starts
+  total: number     // server-side total (may exceed locally-held length)
+  serverFetchedFrom: number  // how many msgs from tail have been fetched (locally-held = fullRef.current.length)
 }
 
 // Adaptive page size for backward compat
@@ -144,30 +146,42 @@ function adaptivePage(all: SessionMessage[], fromIdx: number): number {
   return Math.max(count, 5)
 }
 
+function sessionUrl(projectDir: string, sessionId: string, tail?: number, skip?: number) {
+  const base = `/api/session/${encodeURIComponent(projectDir)}/${sessionId}`
+  const params = new URLSearchParams()
+  if (tail) params.set("tail", String(tail))
+  if (skip) params.set("skip", String(skip))
+  const qs = params.toString()
+  return qs ? `${base}?${qs}` : base
+}
+
 function useWindowedMessages(projectDir: string | null, sessionId: string | null, isActive: boolean) {
   const [win, setWin] = useState<MsgWindow | null>(null)
   const [loading, setLoading] = useState(false)
-  // Full array lives here (module-scope per hook instance — not React state)
+  const [loadingMore, setLoadingMore] = useState(false)
+  // Locally-held messages (tail of the full session)
   const fullRef = useRef<SessionMessage[]>([])
 
   const idbKey = projectDir && sessionId ? IDB_KEY(projectDir, sessionId) : null
 
-  const initWindow = useCallback((all: SessionMessage[]) => {
-    const filtered = all.filter(m => m.type !== "file-history-snapshot")
+  const initWindow = useCallback((msgs: SessionMessage[], serverTotal: number) => {
+    const filtered = msgs.filter(m => m.type !== "file-history-snapshot")
     fullRef.current = filtered
+    // Position window at the end of locally-held messages
     const startIdx = Math.max(0, filtered.length - MAX_DOM)
-    setWin({ msgs: filtered.slice(startIdx), startIdx, total: filtered.length })
+    setWin({ msgs: filtered.slice(startIdx), startIdx, total: serverTotal, serverFetchedFrom: serverTotal - filtered.length })
   }, [])
 
-  // Fetch from remote, store in IDB, init window
+  // Fetch the tail from server
   const fetchRemote = useCallback(async () => {
     if (!projectDir || !sessionId || !idbKey) return
     try {
-      const r = await fetch(`/api/session/${encodeURIComponent(projectDir)}/${sessionId}`)
+      const r = await fetch(sessionUrl(projectDir, sessionId, INITIAL_TAIL))
       if (!r.ok) return
+      const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || 0
       const msgs: SessionMessage[] = await r.json()
       await idbPut(idbKey, msgs)
-      initWindow(msgs)
+      initWindow(msgs, serverTotal || msgs.length)
       setLoading(false)
     } catch { setLoading(false) }
   }, [projectDir, sessionId, idbKey, initWindow])
@@ -181,10 +195,10 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
     ;(async () => {
       const cached = await idbGet<SessionMessage[]>(idbKey)
       if (cached && cached.length > 0) {
-        initWindow(cached)
+        // Show cached without knowing serverTotal — will be corrected by fetchRemote
+        initWindow(cached, cached.length)
         setLoading(false)
       }
-      // Always fetch fresh (cached view is instant, remote updates it)
       await fetchRemote()
     })()
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -195,66 +209,100 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
     if (!isActive || !projectDir || !sessionId || !idbKey) return
     const t = setInterval(async () => {
       try {
-        const r = await fetch(`/api/session/${encodeURIComponent(projectDir)}/${sessionId}`)
+        const r = await fetch(sessionUrl(projectDir, sessionId, INITIAL_TAIL))
         if (!r.ok) return
+        const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || 0
         const msgs: SessionMessage[] = await r.json()
         await idbPut(idbKey, msgs)
         const filtered = msgs.filter(m => m.type !== "file-history-snapshot")
-        fullRef.current = filtered
-        // Extend window to include new tail messages
+        // Merge new tail: keep any earlier-loaded messages, append new ones
         setWin(prev => {
-          if (!prev) return { msgs: filtered.slice(Math.max(0, filtered.length - MAX_DOM)), startIdx: Math.max(0, filtered.length - MAX_DOM), total: filtered.length }
+          if (!prev) {
+            const startIdx = Math.max(0, filtered.length - MAX_DOM)
+            fullRef.current = filtered
+            return { msgs: filtered.slice(startIdx), startIdx, total: serverTotal || filtered.length, serverFetchedFrom: (serverTotal || filtered.length) - filtered.length }
+          }
+          // Prepend any older messages we already have that aren't in new tail
+          const alreadyHeld = fullRef.current.slice(0, prev.serverFetchedFrom > 0 ? fullRef.current.length - filtered.length : 0)
+          const merged = [...alreadyHeld, ...filtered]
+          fullRef.current = merged
           const newStart = prev.startIdx
-          const newMsgs = filtered.slice(newStart)
-          // If window grew too large, trim from start
+          const newMsgs = merged.slice(newStart)
           if (newMsgs.length > MAX_DOM) {
             const trimStart = newStart + (newMsgs.length - MAX_DOM)
-            return { msgs: filtered.slice(trimStart), startIdx: trimStart, total: filtered.length }
+            return { msgs: merged.slice(trimStart), startIdx: trimStart, total: serverTotal || merged.length, serverFetchedFrom: (serverTotal || merged.length) - merged.length }
           }
-          return { msgs: newMsgs, startIdx: newStart, total: filtered.length }
+          return { msgs: newMsgs, startIdx: newStart, total: serverTotal || merged.length, serverFetchedFrom: (serverTotal || merged.length) - merged.length }
         })
       } catch { /* ignore */ }
     }, 4000)
     return () => clearInterval(t)
   }, [isActive, projectDir, sessionId, idbKey])
 
-  const hasEarlier = win ? win.startIdx > 0 : false
-  const hasLater = win ? win.startIdx + win.msgs.length < win.total : false
+  // true if there are more messages to show — either locally-held earlier ones OR unfetched on server
+  const hasEarlier = win ? (win.startIdx > 0 || win.serverFetchedFrom > 0) : false
+  const hasLater = win ? win.startIdx + win.msgs.length < fullRef.current.length : false
 
-  // Lock refs prevent the IntersectionObserver from firing a new load
-  // while a previous load is still being processed, avoiding runaway loops.
   const loadingEarlierRef = useRef(false)
   const loadingLaterRef = useRef(false)
 
-  function loadEarlier() {
-    if (!win || win.startIdx === 0) return
+  async function loadEarlier() {
+    if (!win || !projectDir || !sessionId) return
     const full = fullRef.current
-    const newStart = Math.max(0, win.startIdx - adaptivePage(full, win.startIdx))
-    // Keep the existing bottom boundary — don't evict messages from the bottom end
-    const existingEnd = win.startIdx + win.msgs.length
-    const newMsgs = full.slice(newStart, existingEnd)
-    // Only trim from the bottom if we exceed MAX_DOM
-    const trimmed = newMsgs.length > MAX_DOM ? newMsgs.slice(0, MAX_DOM) : newMsgs
-    setWin({ msgs: trimmed, startIdx: newStart, total: win.total })
+
+    // Case 1: still have locally-held messages earlier in the window
+    if (win.startIdx > 0) {
+      const newStart = Math.max(0, win.startIdx - adaptivePage(full, win.startIdx))
+      const existingEnd = win.startIdx + win.msgs.length
+      const newMsgs = full.slice(newStart, existingEnd)
+      const trimmed = newMsgs.length > MAX_DOM ? newMsgs.slice(0, MAX_DOM) : newMsgs
+      setWin({ ...win, msgs: trimmed, startIdx: newStart })
+      return
+    }
+
+    // Case 2: need to fetch more from server
+    if (win.serverFetchedFrom <= 0) return
+    setLoadingMore(true)
+    try {
+      const skip = win.total - win.serverFetchedFrom  // messages already held from tail
+      const r = await fetch(sessionUrl(projectDir, sessionId, CHUNK, skip))
+      if (!r.ok) return
+      const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || win.total
+      const newMsgs: SessionMessage[] = await r.json()
+      const newFiltered = newMsgs.filter(m => m.type !== "file-history-snapshot")
+      // Prepend to held messages
+      const merged = [...newFiltered, ...full]
+      fullRef.current = merged
+      const newServerFetchedFrom = Math.max(0, win.serverFetchedFrom - newFiltered.length)
+      // Show window ending just before the old start of fullRef
+      const newEnd = newFiltered.length + Math.min(win.msgs.length, MAX_DOM - newFiltered.length)
+      const startIdx = 0
+      setWin({
+        msgs: merged.slice(startIdx, Math.min(MAX_DOM, newEnd)),
+        startIdx,
+        total: serverTotal,
+        serverFetchedFrom: newServerFetchedFrom,
+      })
+    } catch { /* ignore */ }
+    finally { setLoadingMore(false) }
   }
 
   function loadLater() {
     if (!win) return
     const full = fullRef.current
     const currentEnd = win.startIdx + win.msgs.length
-    if (currentEnd >= win.total) return
-    const newEnd = Math.min(win.total, currentEnd + CHUNK)
+    if (currentEnd >= full.length) return
+    const newEnd = Math.min(full.length, currentEnd + CHUNK)
     const newMsgs = full.slice(win.startIdx, newEnd)
-    // Trim from top if too large
     if (newMsgs.length > MAX_DOM) {
       const trimStart = win.startIdx + (newMsgs.length - MAX_DOM)
-      setWin({ msgs: full.slice(trimStart, newEnd), startIdx: trimStart, total: win.total })
+      setWin({ ...win, msgs: full.slice(trimStart, newEnd), startIdx: trimStart })
     } else {
-      setWin({ msgs: newMsgs, startIdx: win.startIdx, total: win.total })
+      setWin({ ...win, msgs: newMsgs })
     }
   }
 
-  return { win, loading, hasEarlier, hasLater, loadEarlier, loadLater, fullRef, loadingEarlierRef, loadingLaterRef }
+  return { win, loading, loadingMore, hasEarlier, hasLater, loadEarlier, loadLater, fullRef, loadingEarlierRef, loadingLaterRef }
 }
 
 // ── Session pane ──────────────────────────────────────────────────────────────
@@ -270,7 +318,7 @@ function wordOverlap(a: string, b: string): number {
 }
 
 function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projectDir: string; sessionMeta: SessionMeta; onBack?: () => void; capabilities: Capabilities }) {
-  const { win, loading, hasEarlier, hasLater, loadEarlier, loadLater, loadingEarlierRef, loadingLaterRef } =
+  const { win, loading, loadingMore, hasEarlier, hasLater, loadEarlier, loadLater, loadingEarlierRef, loadingLaterRef } =
     useWindowedMessages(projectDir, sessionMeta.id, isRecentlyActive(sessionMeta.lastActivity))
 
   const [suggestions, setSuggestions] = useState<Record<string, Suggestion>>({})
@@ -500,9 +548,9 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
           <div>
             <div ref={topSentinelRef} style={{ height: 1 }} />
             <div className="load-more-wrap">
-              <button className="load-more-pill" onClick={loadEarlierPreserveScroll}>
-                ↑ Load earlier messages
-                <span className="load-more-count">{startIdx} remaining</span>
+              <button className="load-more-pill" onClick={loadEarlierPreserveScroll} disabled={loadingMore}>
+                {loadingMore ? "Loading…" : "↑ Load earlier messages"}
+                <span className="load-more-count">{(win?.serverFetchedFrom ?? 0) + startIdx} remaining</span>
               </button>
             </div>
           </div>
