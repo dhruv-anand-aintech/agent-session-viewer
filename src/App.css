@@ -501,3 +501,146 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   /* Settings modal full-width on mobile */
   .settings-modal { width: 95vw; max-height: 90vh; }
 }
+
+/* ── Nanoclaw floating chat ─────────────────────────────────────────────────── */
+.nc-fab {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: #222;
+  color: #666;
+  font-size: 18px;
+  cursor: pointer;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.4);
+  transition: background 0.2s, color 0.2s;
+}
+.nc-fab:hover { background: #2a2a2a; color: #aaa; }
+.nc-fab--on { color: #4caf50; }
+
+.nc-panel {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  width: 320px;
+  height: 420px;
+  background: #111;
+  border: 1px solid #222;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  z-index: 200;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+  overflow: hidden;
+}
+.nc-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #222;
+  flex-shrink: 0;
+}
+.nc-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: #333;
+  flex-shrink: 0;
+}
+.nc-dot--on { background: #4caf50; }
+.nc-title { font-size: 13px; font-weight: 600; flex: 1; }
+.nc-close {
+  background: none; border: none; color: #555; cursor: pointer;
+  font-size: 14px; padding: 2px 4px;
+}
+.nc-close:hover { color: #aaa; }
+.nc-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.nc-empty { font-size: 12px; color: #444; text-align: center; margin-top: 12px; }
+.nc-msg {
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 7px 10px;
+  border-radius: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 90%;
+}
+.nc-msg--user {
+  align-self: flex-end;
+  background: #1a5fd4;
+  color: #fff;
+  border-bottom-right-radius: 3px;
+}
+.nc-msg--assistant {
+  align-self: flex-start;
+  background: #1e1e1e;
+  border: 1px solid #2a2a2a;
+  border-bottom-left-radius: 3px;
+}
+.nc-msg--status {
+  align-self: center;
+  font-size: 11px;
+  color: #444;
+  background: none;
+  border: none;
+  padding: 0;
+}
+.nc-msg--typing {
+  align-self: flex-start;
+  background: #1e1e1e;
+  border: 1px solid #2a2a2a;
+  border-bottom-left-radius: 3px;
+  color: #555;
+}
+.nc-input-row {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid #222;
+  flex-shrink: 0;
+}
+.nc-input {
+  flex: 1;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  color: #e8e8e8;
+  font-size: 13px;
+  padding: 7px 10px;
+  resize: none;
+  outline: none;
+  font-family: inherit;
+  min-height: 34px;
+  max-height: 100px;
+}
+.nc-input:focus { border-color: #3a3a3a; }
+.nc-send {
+  background: #1a5fd4;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  width: 34px;
+  font-size: 16px;
+  cursor: pointer;
+  align-self: flex-end;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.nc-send:disabled { background: #222; color: #444; cursor: default; }
+.nc-send:not(:disabled):hover { background: #1550b8; }
