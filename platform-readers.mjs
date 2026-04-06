@@ -163,30 +163,155 @@ function cursorBubbleText(row) {
  * Pass `changedSet` (Set of composerIds) to limit to specific sessions,
  * or null/undefined to read all.
  */
+/**
+ * Convert raw bubble rows for a composerId into SessionMessage[].
+ * `composerRow` is the composerData meta (for timestamps); `rows` are bubble rows.
+ */
+function cursorBubblesToMsgs(composerId, rows, composerRow) {
+  const composerCreatedMs = parseCursorMs(composerRow?.createdAt)
+  const composerUpdatedMs = parseCursorMs(composerRow?.lastUpdatedAt) ?? composerCreatedMs
+
+  const sorted = [...rows].sort((a, b) => {
+    const ta = parseCursorMs(a.ts)
+    const tb = parseCursorMs(b.ts)
+    if (ta != null && tb != null) return ta - tb
+    if (ta != null) return -1
+    if (tb != null) return 1
+    return 0
+  })
+
+  const n = sorted.length
+  const perBubbleMs = sorted.map((row, idx) => {
+    const direct = parseCursorMs(row.ts)
+    if (direct != null) return direct
+    if (n <= 1) return composerUpdatedMs ?? composerCreatedMs ?? 0
+    const c = composerCreatedMs ?? 0
+    const u = composerUpdatedMs ?? c
+    return c + ((u - c) * idx) / (n - 1)
+  })
+
+  const converted = []
+  for (let si = 0; si < sorted.length; si++) {
+    const msg = sorted[si]
+    const role = msg.type === 2 ? "assistant" : "user"
+    let content = cursorBubbleText(msg)
+    if (!content.trim() && role === "user") continue
+    if (!content.trim() && role === "assistant") content = "_(empty Cursor bubble)_"
+    const bubbleId = msg.bid ?? `${composerId}-${converted.length}`
+    converted.push({
+      uuid: `cursor-${composerId}-${bubbleId}`,
+      parentUuid: null,
+      type: role === "assistant" ? "assistant" : "human",
+      sessionId: composerId,
+      timestamp: msToIso(perBubbleMs[si]),
+      isSidechain: false,
+      message: { role, content },
+    })
+  }
+  return converted
+}
+
+const CURSOR_BUBBLE_SELECT =
+  "SELECT substr(key,10,36) as cid, json_extract(value,'$.type') as type, json_extract(value,'$.text') as text, json_extract(value,'$.richText') as richText, json_extract(value,'$.toolFormerData.name') as toolName, json_extract(value,'$.toolFormerData.status') as toolStatus, json_extract(value,'$.toolFormerData.rawArgs') as toolRawArgs, substr(json_extract(value,'$.toolFormerData.result'),1,8000) as toolResultPreview, json_extract(value,'$.codeBlocks[0].content') as codeBlock0, COALESCE(json_extract(value,'$.createdAt'), json_extract(value,'$.timestamp')) as ts, json_extract(value,'$.bubbleId') as bid FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'"
+
+/**
+ * Load full messages for a single Cursor composer session.
+ * Used by local-server on /api/session/ — fast since it queries only one composerId.
+ */
+export function readCursorSessionMsgs(composerId) {
+  if (!fs.existsSync(CURSOR_GLOBAL_DB)) return []
+  const composerRows = sqliteQuery(CURSOR_GLOBAL_DB,
+    `SELECT substr(key,14) as cid, json_extract(value,'$.name') as name, json_extract(value,'$.lastUpdatedAt') as lastUpdatedAt, json_extract(value,'$.createdAt') as createdAt FROM cursorDiskKV WHERE key = 'composerData:${composerId}' LIMIT 1`)
+  const composerRow = composerRows[0] ?? null
+  const rows = sqliteQuery(CURSOR_GLOBAL_DB,
+    `${CURSOR_BUBBLE_SELECT} AND key LIKE 'bubbleId:${composerId}:%' ORDER BY key`)
+  return cursorBubblesToMsgs(composerId, rows, composerRow)
+}
+
+/**
+ * Reads Cursor session metadata (fast — no full bubble text fetched).
+ * Returns { meta, msgs: [] }[] — msgs is always empty; use readCursorSessionMsgs() on demand.
+ *
+ * Uses only bubble aggregate queries (COUNT + first/last key join) to avoid reading
+ * composerData blobs (up to 600KB each, 320 sessions = ~150MB total disk I/O).
+ */
 export function readCursorSessions(cacheGet, cacheSet, changedSet) {
+  if (!fs.existsSync(CURSOR_GLOBAL_DB)) return []
+
+  const wsMap = buildCursorComposerWorkspaceMap()
+
+  // Single query: count + last-bubble timestamp + first-bubble snippet (all key-based, fast)
+  // The JOIN on maxKey/minKey is a PK lookup — ~0.2s total vs 37s reading full blobs.
+  const rows = sqliteQuery(CURSOR_GLOBAL_DB, `
+    SELECT b.cid, b.n,
+      COALESCE(json_extract(last_val.value,'$.createdAt'), json_extract(last_val.value,'$.timestamp')) as lastTs,
+      substr(json_extract(first_val.value,'$.text'),1,80) as firstText,
+      json_extract(first_val.value,'$.type') as firstType
+    FROM (
+      SELECT substr(key,10,36) as cid, count(*) as n, max(key) as maxKey, min(key) as minKey
+      FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'
+      GROUP BY substr(key,10,36)
+    ) b
+    JOIN cursorDiskKV last_val ON last_val.key = b.maxKey
+    JOIN cursorDiskKV first_val ON first_val.key = b.minKey
+  `)
+
+  const results = []
+  for (const row of rows) {
+    const composerId = row.cid
+    if (!composerId || !row.n) continue
+
+    const cacheVal = String(row.n)
+    if (cacheGet && cacheGet(composerId) === cacheVal) continue
+    if (cacheSet) cacheSet(composerId, cacheVal)
+
+    const lastActivityMs = parseCursorMs(row.lastTs) ?? 0
+    const workspaceFolder = wsMap.get(composerId) ?? ""
+    const projectDir = workspaceFolder ? normProjectDir(workspaceFolder) : "cursor-unknown"
+    // firstText is from first bubble; type=1 is user, type=2 is assistant
+    const firstName = row.firstType === 1 && row.firstText ? row.firstText.replace(/<[^>]+>/g, "").trim() : null
+
+    results.push({
+      meta: {
+        id: composerId,
+        projectPath: `cursor:${projectDir}`,
+        messageCount: Number(row.n),
+        userMessageCount: null,  // unknown without loading bubbles
+        lastActivity: msToIso(lastActivityMs),
+        isActive: false,
+        firstName,
+        source: "cursor",
+      },
+      msgs: [],  // loaded on demand via readCursorSessionMsgs()
+    })
+  }
+
+  return results
+}
+
+/**
+ * Full Cursor session reader — loads all bubble text for every session.
+ * Slow (reads all 50k+ rows) but needed by the daemon to sync messages to the Worker.
+ * local-server uses readCursorSessions (metadata only) + readCursorSessionMsgs (on-demand).
+ */
+export function readCursorSessionsFull(cacheGet, cacheSet, changedSet) {
   if (!fs.existsSync(CURSOR_GLOBAL_DB)) return []
 
   const wsMap = buildCursorComposerWorkspaceMap()
   const results = []
 
-  // Pre-fetch only needed fields from composerData (full values avg 50KB — use json_extract)
-  // Keys are "composerData:<composerId>"; SQLite substr is 1-based — start at 14 (first char after "composerData:").
   const composerMetaRows = sqliteQuery(CURSOR_GLOBAL_DB,
     "SELECT substr(key,14) as cid, json_extract(value,'$.name') as name, json_extract(value,'$.lastUpdatedAt') as lastUpdatedAt, json_extract(value,'$.createdAt') as createdAt FROM cursorDiskKV WHERE key LIKE 'composerData:%'")
   const composerMeta = new Map()
   for (const row of composerMetaRows) composerMeta.set(row.cid, row)
 
-  // Bubble rows can be 40k+; one sqlite3 -json blob can exceed 150MB and blow execFileSync maxBuffer.
-  // Paginate so each chunk stays well under the buffer cap (see sqliteQuery default).
   const BUBBLE_CHUNK = 2500
   const chunkBuf = 64 * 1024 * 1024
-  const bubbleSelect =
-    "SELECT substr(key,10,36) as cid, json_extract(value,'$.type') as type, json_extract(value,'$.text') as text, json_extract(value,'$.richText') as richText, json_extract(value,'$.toolFormerData.name') as toolName, json_extract(value,'$.toolFormerData.status') as toolStatus, json_extract(value,'$.toolFormerData.rawArgs') as toolRawArgs, substr(json_extract(value,'$.toolFormerData.result'),1,8000) as toolResultPreview, json_extract(value,'$.codeBlocks[0].content') as codeBlock0, COALESCE(json_extract(value,'$.createdAt'), json_extract(value,'$.timestamp')) as ts, json_extract(value,'$.bubbleId') as bid FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'"
   const allRows = []
   for (let offset = 0; ; offset += BUBBLE_CHUNK) {
     const chunk = sqliteQuery(
       CURSOR_GLOBAL_DB,
-      `${bubbleSelect} ORDER BY key LIMIT ${BUBBLE_CHUNK} OFFSET ${offset}`,
+      `${CURSOR_BUBBLE_SELECT} ORDER BY key LIMIT ${BUBBLE_CHUNK} OFFSET ${offset}`,
       { maxBuffer: chunkBuf }
     )
     if (!chunk.length) break
@@ -194,7 +319,6 @@ export function readCursorSessions(cacheGet, cacheSet, changedSet) {
     if (chunk.length < BUBBLE_CHUNK) break
   }
 
-  // Group by cid
   const byCid = new Map()
   for (const row of allRows) {
     if (!row.cid) continue
@@ -203,63 +327,21 @@ export function readCursorSessions(cacheGet, cacheSet, changedSet) {
   }
 
   for (const [composerId, rows] of byCid) {
-    // Change detection via bubble count
     const bubbleCount = String(rows.length)
     if (cacheGet && cacheGet(composerId) === bubbleCount) continue
     if (cacheSet) cacheSet(composerId, bubbleCount)
 
     const composer = composerMeta.get(composerId) ?? null
+    const converted = cursorBubblesToMsgs(composerId, rows, composer)
+    if (!converted.length) continue
+
     const composerCreatedMs = parseCursorMs(composer?.createdAt)
     const composerUpdatedMs = parseCursorMs(composer?.lastUpdatedAt) ?? composerCreatedMs
-
-    const sorted = [...rows].sort((a, b) => {
-      const ta = parseCursorMs(a.ts)
-      const tb = parseCursorMs(b.ts)
-      if (ta != null && tb != null) return ta - tb
-      if (ta != null) return -1
-      if (tb != null) return 1
-      return 0
-    })
-
-    const n = sorted.length
-    const perBubbleMs = sorted.map((row, idx) => {
-      const direct = parseCursorMs(row.ts)
-      if (direct != null) return direct
-      if (n <= 1) return composerUpdatedMs ?? composerCreatedMs ?? 0
-      const c = composerCreatedMs ?? 0
-      const u = composerUpdatedMs ?? c
-      return c + ((u - c) * idx) / (n - 1)
-    })
-
-    let lastActivityMs = 0
-    for (const t of perBubbleMs) {
-      if (t > lastActivityMs) lastActivityMs = t
+    let lastActivityMs = composerUpdatedMs ?? composerCreatedMs ?? 0
+    for (const m of converted) {
+      const t = Date.parse(m.timestamp)
+      if (Number.isFinite(t) && t > lastActivityMs) lastActivityMs = t
     }
-    if (composerUpdatedMs != null) lastActivityMs = Math.max(lastActivityMs, composerUpdatedMs)
-    if (composerCreatedMs != null) lastActivityMs = Math.max(lastActivityMs, composerCreatedMs)
-
-    // Convert to SessionMessage format
-    const converted = []
-    for (let si = 0; si < sorted.length; si++) {
-      const msg = sorted[si]
-      const role = msg.type === 2 ? "assistant" : "user"
-      let content = cursorBubbleText(msg)
-      if (!content.trim() && role === "user") continue  // skip empty user turns (after richText / fallbacks)
-      if (!content.trim() && role === "assistant") content = "_(empty Cursor bubble)_"
-      const bubbleId = msg.bid ?? `${composerId}-${converted.length}`
-      const tsMs = perBubbleMs[si]
-      converted.push({
-        uuid: `cursor-${composerId}-${bubbleId}`,
-        parentUuid: null,
-        type: role === "assistant" ? "assistant" : "human",
-        sessionId: composerId,
-        timestamp: msToIso(tsMs),
-        isSidechain: false,
-        message: { role, content },
-      })
-    }
-
-    if (!converted.length) continue
 
     const workspaceFolder = wsMap.get(composerId) ?? ""
     const projectDir = workspaceFolder ? normProjectDir(workspaceFolder) : "cursor-unknown"
@@ -640,6 +722,257 @@ export function* iterOpenCodeSessions(cacheGet, cacheSet) {
 }
 
 export { OPENCODE_STORAGE }
+
+// ── Codex ─────────────────────────────────────────────────────────────────────
+//
+// Codex stores rollout transcripts as JSONL event streams under:
+//   ~/.codex/sessions/YYYY/MM/DD/rollout-<iso>-<sessionId>.jsonl
+//
+// Relevant records:
+//   session_meta            — session id, cwd, cli version
+//   turn_context            — cwd/model/sandbox metadata
+//   event_msg user_message  — plain user text
+//   event_msg agent_message — commentary/status updates
+//   response_item message   — assistant text
+//   response_item function_call / function_call_output
+//   response_item reasoning — may be encrypted; include only plain summaries when available
+
+export const CODEX_SESSIONS_ROOT = path.join(homedir(), ".codex", "sessions")
+
+function stringifyCodexToolOutput(value) {
+  if (typeof value === "string") return value
+  if (value == null) return ""
+  try { return JSON.stringify(value, null, 2) } catch { return String(value) }
+}
+
+function codexAssistantTextFromContent(content) {
+  if (!Array.isArray(content)) return ""
+  return content
+    .map(item => item?.type === "output_text" && typeof item.text === "string" ? item.text : "")
+    .filter(Boolean)
+    .join("\n\n")
+    .trim()
+}
+
+function codexReasoningText(payload) {
+  if (typeof payload?.content === "string" && payload.content.trim()) return payload.content.trim()
+  if (!Array.isArray(payload?.summary)) return ""
+  return payload.summary
+    .map(part => {
+      if (typeof part === "string") return part
+      if (typeof part?.text === "string") return part.text
+      if (typeof part?.summary_text === "string") return part.summary_text
+      return ""
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim()
+}
+
+function pushCodexAssistantBlocks(out, sessionId, seq, ts, blocks) {
+  if (!blocks.length) return seq
+  out.push({
+    uuid: `codex-${sessionId}-a-${seq}`,
+    parentUuid: out.length > 0 ? out[out.length - 1].uuid : null,
+    type: "assistant",
+    sessionId,
+    timestamp: ts,
+    isSidechain: false,
+    message: { role: "assistant", content: blocks },
+  })
+  return seq + 1
+}
+
+function pushCodexToolResults(out, sessionId, seq, ts, blocks) {
+  if (!blocks.length) return seq
+  out.push({
+    uuid: `codex-${sessionId}-u-${seq}`,
+    parentUuid: out.length > 0 ? out[out.length - 1].uuid : null,
+    type: "human",
+    sessionId,
+    timestamp: ts,
+    isSidechain: false,
+    message: { role: "user", content: blocks },
+  })
+  return seq + 1
+}
+
+function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
+  if (!rows.length) return null
+
+  const sessionMeta = rows.find(r => r.type === "session_meta")?.payload ?? {}
+  const turnContext = rows.find(r => r.type === "turn_context")?.payload ?? {}
+  const sessionId = sessionMeta.id ?? path.basename(filePath, ".jsonl")
+  if (!sessionId) return null
+
+  const cwd = sessionMeta.cwd ?? turnContext.cwd ?? ""
+  const projectDir = cwd ? normProjectDir(cwd) : "codex-global"
+  const out = []
+  let seq = 0
+  let pendingAssistantBlocks = []
+  let pendingToolResults = []
+  let pendingTs = null
+
+  function flushPending() {
+    if (pendingAssistantBlocks.length) seq = pushCodexAssistantBlocks(out, sessionId, seq, pendingTs ?? new Date(fileMtimeMs).toISOString(), pendingAssistantBlocks)
+    if (pendingToolResults.length) seq = pushCodexToolResults(out, sessionId, seq, pendingTs ?? new Date(fileMtimeMs).toISOString(), pendingToolResults)
+    pendingAssistantBlocks = []
+    pendingToolResults = []
+    pendingTs = null
+  }
+
+  for (const row of rows) {
+    const ts = typeof row.timestamp === "string" ? row.timestamp : new Date(fileMtimeMs).toISOString()
+    if (row.type === "event_msg" && row.payload?.type === "user_message") {
+      flushPending()
+      const text = typeof row.payload.message === "string" ? row.payload.message.trim() : ""
+      if (!text) continue
+      out.push({
+        uuid: `codex-${sessionId}-u-${seq++}`,
+        parentUuid: out.length > 0 ? out[out.length - 1].uuid : null,
+        type: "human",
+        sessionId,
+        timestamp: ts,
+        isSidechain: false,
+        message: { role: "user", content: text },
+      })
+      continue
+    }
+
+    if (row.type === "event_msg" && row.payload?.type === "agent_message") {
+      flushPending()
+      const text = typeof row.payload.message === "string" ? row.payload.message.trim() : ""
+      if (!text) continue
+      out.push({
+        uuid: `codex-${sessionId}-a-${seq++}`,
+        parentUuid: out.length > 0 ? out[out.length - 1].uuid : null,
+        type: "assistant",
+        sessionId,
+        timestamp: ts,
+        isSidechain: false,
+        message: { role: "assistant", content: text },
+      })
+      continue
+    }
+
+    if (row.type !== "response_item" || !row.payload?.type) continue
+    pendingTs ??= ts
+
+    if (row.payload.type === "reasoning") {
+      const thinking = codexReasoningText(row.payload)
+      if (thinking) pendingAssistantBlocks.push({ type: "thinking", thinking })
+      continue
+    }
+
+    if (row.payload.type === "function_call") {
+      let input = {}
+      try { input = JSON.parse(row.payload.arguments ?? "{}") } catch { input = { _raw: row.payload.arguments ?? "" } }
+      pendingAssistantBlocks.push({
+        type: "tool_use",
+        id: row.payload.call_id ?? `${sessionId}-tool-${seq}-${pendingAssistantBlocks.length}`,
+        name: row.payload.name ?? "tool",
+        input,
+      })
+      continue
+    }
+
+    if (row.payload.type === "function_call_output") {
+      pendingToolResults.push({
+        type: "tool_result",
+        tool_use_id: row.payload.call_id ?? undefined,
+        content: stringifyCodexToolOutput(row.payload.output),
+      })
+      continue
+    }
+
+    if (row.payload.type === "message" && row.payload.role === "assistant") {
+      flushPending()
+      const text = codexAssistantTextFromContent(row.payload.content)
+      if (!text) continue
+      out.push({
+        uuid: `codex-${sessionId}-a-${seq++}`,
+        parentUuid: out.length > 0 ? out[out.length - 1].uuid : null,
+        type: "assistant",
+        sessionId,
+        timestamp: ts,
+        isSidechain: false,
+        message: { role: "assistant", content: text },
+      })
+    }
+  }
+
+  flushPending()
+  if (!out.length) return null
+
+  const firstUserText = out.find(m => m.message?.role === "user" && typeof m.message?.content === "string")?.message?.content
+  const firstName = typeof firstUserText === "string"
+    ? firstUserText.replace(/\s+/g, " ").trim().slice(0, 80)
+    : null
+  const lastActivity = out[out.length - 1]?.timestamp ?? new Date(fileMtimeMs).toISOString()
+  const userMessageCount = out.filter(m => m.message?.role === "user" && typeof m.message?.content === "string" && m.message.content.trim()).length
+
+  return {
+    meta: {
+      id: sessionId,
+      projectPath: `codex:${projectDir}`,
+      messageCount: out.length,
+      userMessageCount,
+      lastActivity,
+      isActive: Date.now() - fileMtimeMs < 5 * 60 * 1000,
+      firstName,
+      source: "codex",
+      version: sessionMeta.cli_version ?? null,
+      lastUsedModel: turnContext.model ?? null,
+    },
+    msgs: out,
+  }
+}
+
+export function listCodexSessionFiles() {
+  const out = []
+  if (!fs.existsSync(CODEX_SESSIONS_ROOT)) return out
+  const stack = [CODEX_SESSIONS_ROOT]
+  while (stack.length) {
+    const dir = stack.pop()
+    let entries
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { continue }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) stack.push(full)
+      else if (entry.isFile() && entry.name.endsWith(".jsonl")) out.push(full)
+    }
+  }
+  return out
+}
+
+export function readCodexSession(filePath, cacheGet, cacheSet) {
+  let st
+  try { st = fs.statSync(filePath) } catch { return null }
+  const cacheVal = `${st.mtimeMs}:${st.size}`
+  if (cacheGet && cacheGet(filePath) === cacheVal) return null
+
+  let rows
+  try {
+    rows = fs.readFileSync(filePath, "utf8").split("\n").filter(Boolean).flatMap(line => {
+      try { return [JSON.parse(line)] } catch { return [] }
+    })
+  } catch {
+    return null
+  }
+  const result = buildCodexSessionResult(filePath, rows, st.mtimeMs)
+  if (!result) return null
+  if (cacheSet) cacheSet(filePath, cacheVal)
+  return result
+}
+
+export function readCodexSessions(cacheGet, cacheSet) {
+  const results = []
+  for (const filePath of listCodexSessionFiles()) {
+    const result = readCodexSession(filePath, cacheGet, cacheSet)
+    if (result) results.push(result)
+  }
+  return results
+}
 
 // ── Antigravity ───────────────────────────────────────────────────────────────
 //
