@@ -12,6 +12,8 @@ function assistantLabelForSource(source?: string): string {
       return "Antigravity"
     case "hermes":
       return "Hermes"
+    case "codex":
+      return "Codex"
     case "claude":
       return "Claude"
     default:

@@ -2,7 +2,7 @@
 
 ![Claude Session Viewer UI](public/screenshot.png)
 
-A live multi-platform session viewer — browse AI coding assistant conversations across Claude Code, Cursor, OpenCode, and Antigravity in a unified dark-mode UI with markdown rendering, tool call cards, and thinking blocks.
+A live multi-platform session viewer — browse AI coding assistant conversations across Claude Code, Codex, Cursor, OpenCode, and Antigravity in a unified dark-mode UI with markdown rendering, tool call cards, and thinking blocks.
 
 Sessions are streamed to a Cloudflare Worker (KV storage) by a local daemon that watches your session directories. Works on desktop and mobile.
 
@@ -10,8 +10,8 @@ Sessions are streamed to a Cloudflare Worker (KV storage) by a local daemon that
 
 - **Live updates** — sessions appear as you work; SSE streaming keeps the UI current
 - **Pretty mode** — markdown rendering, thinking pills, tool call cards (Bash, Read, Edit, Write, Search…)
-- **Multi-platform** — Claude Code, Cursor, OpenCode, and Antigravity sessions in one place
-- **Platform filter** — filter the sidebar by platform (All / Claude / Cursor / OpenCode / Antigravity)
+- **Multi-platform** — Claude Code, Codex, Cursor, OpenCode, and Antigravity sessions in one place
+- **Platform filter** — filter the sidebar by platform (All / Claude / Codex / Cursor / OpenCode / Antigravity)
 - **Sub-agent runs marked** — messages from Claude Code sub-agents (sidechain sessions) are visually distinguished with a `⤷ sub-agent` indicator and indented left border
 - **Flat or grouped sidebar** — all sessions sorted by last activity, or grouped by project
 - **Session renaming** — give sessions memorable names via the pencil icon
@@ -26,6 +26,7 @@ The daemon auto-detects and syncs sessions from:
 | Platform | Storage location | Format |
 |---|---|---|
 | **Claude Code** | `~/.claude/projects/**/*.jsonl` | JSONL (native) |
+| **Codex** | `~/.codex/sessions/**/*.jsonl` | JSONL event stream |
 | **Cursor** | `~/.cursor/chats/{hash}/{uuid}/store.db` | SQLite blob store |
 | **OpenCode** | `~/.local/share/opencode/storage/` | Flat JSON files |
 | **Antigravity** | `~/.gemini/antigravity/brain/{uuid}/*.md` | Markdown artifacts |
@@ -33,6 +34,8 @@ The daemon auto-detects and syncs sessions from:
 All platforms are detected automatically — no configuration needed if the directories exist.
 
 ### Platform notes
+
+**Codex** — rollout transcripts are read from `~/.codex/sessions/`. Structured `function_call` / `function_call_output` entries are preserved as tool-use and tool-result blocks so pretty mode renders proper cards instead of flattening them to plain text.
 
 **Cursor** — sessions are read from the content-addressed SQLite blob store. Workspace → folder mapping is resolved via `~/Library/Application Support/Cursor/User/workspaceStorage/`. Sessions are tagged `source: "cursor"`.
 

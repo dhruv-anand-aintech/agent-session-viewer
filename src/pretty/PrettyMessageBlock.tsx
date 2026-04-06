@@ -54,8 +54,8 @@ function ThinkingCard({ text }: { text: string }) {
 
 function BashCard({ input, result }: { input: Record<string, unknown>; result?: string }) {
   const [open, setOpen] = useState(false)
-  const cmd = String(input.command ?? "")
-  const desc = String(input.description ?? "")
+  const cmd = String(input.command ?? input.cmd ?? "")
+  const desc = String(input.description ?? input.justification ?? "")
   return (
     <div className="pp-tool-card pp-bash">
       <div className="pp-tool-header" onClick={() => setOpen(!open)}>
