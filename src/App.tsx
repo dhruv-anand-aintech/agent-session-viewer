@@ -19,7 +19,7 @@ interface SessionMeta {
   firstName?: string
   customName?: string
   parentSessionId?: string
-  source?: "claude" | "cursor" | "opencode" | "antigravity" | "hermes" | string
+  source?: "claude" | "cursor" | "opencode" | "antigravity" | "hermes" | "codex" | string
 }
 
 function isRecentlyActive(iso: string): boolean {
@@ -1056,6 +1056,112 @@ function parseUrlSession(): { project: string; session: string } | null {
   return { project: decodeURIComponent(s.slice(0, slash)), session: s.slice(slash + 1) }
 }
 
+// ── Nanoclaw floating chat ────────────────────────────────────────────────────
+
+const NANOCLAW_WS = "ws://localhost:3000"
+
+function NanoclawChat() {
+  const [open, setOpen] = useState(false)
+  const [input, setInput] = useState("")
+  const [messages, setMessages] = useState<{ role: "user" | "assistant" | "status"; text: string }[]>([])
+  const [connected, setConnected] = useState(false)
+  const [typing, setTyping] = useState(false)
+  const ws = useRef<WebSocket | null>(null)
+  const msgCounter = useRef(0)
+  const bottomRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    function connect() {
+      const sock = new WebSocket(NANOCLAW_WS)
+      ws.current = sock
+      sock.onopen = () => setConnected(true)
+      sock.onclose = () => {
+        setConnected(false)
+        setTimeout(connect, 4000)
+      }
+      sock.onerror = () => sock.close()
+      sock.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data)
+          if (data.type === "typing") {
+            setTyping(!!data.value)
+          } else if (data.type === "message" && data.text) {
+            setTyping(false)
+            setMessages(prev => [...prev, { role: "assistant", text: data.text }])
+          }
+        } catch { /* ignore */ }
+      }
+    }
+    connect()
+    return () => { ws.current?.close(); ws.current = null }
+  }, [])
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" })
+  }, [messages, typing])
+
+  function send() {
+    const text = input.trim()
+    if (!text || !ws.current || ws.current.readyState !== WebSocket.OPEN) return
+    setMessages(prev => [...prev, { role: "user", text }])
+    ws.current.send(JSON.stringify({ type: "message", text, id: `csv-${++msgCounter.current}` }))
+    setInput("")
+  }
+
+  function onKeyDown(e: React.KeyboardEvent) {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send() }
+  }
+
+  if (!open) {
+    return (
+      <button
+        className={`nc-fab ${connected ? "nc-fab--on" : ""}`}
+        onClick={() => { setOpen(true); setTimeout(() => inputRef.current?.focus(), 50) }}
+        title="Chat with Nanoclaw"
+      >
+        ⚡
+      </button>
+    )
+  }
+
+  return (
+    <div className="nc-panel">
+      <div className="nc-header">
+        <span className={`nc-dot ${connected ? "nc-dot--on" : ""}`} />
+        <span className="nc-title">Nanoclaw</span>
+        <button className="nc-close" onClick={() => setOpen(false)}>✕</button>
+      </div>
+      <div className="nc-messages">
+        {messages.length === 0 && (
+          <div className="nc-empty">Send a message to Nanoclaw</div>
+        )}
+        {messages.map((m, i) => (
+          <div key={i} className={`nc-msg nc-msg--${m.role}`}>{m.text}</div>
+        ))}
+        {typing && <div className="nc-msg nc-msg--typing">…</div>}
+        <div ref={bottomRef} />
+      </div>
+      <div className="nc-input-row">
+        <textarea
+          ref={inputRef}
+          className="nc-input"
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder="Message…"
+          rows={1}
+        />
+        <button
+          className="nc-send"
+          onClick={send}
+          disabled={!connected || !input.trim()}
+        >↑</button>
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   const {
     projects,
@@ -1165,6 +1271,7 @@ export default function App() {
         )}
         {activeTab === "debug" && <DebugTab />}
       </div>
+      <NanoclawChat />
     </div>
   )
 }
