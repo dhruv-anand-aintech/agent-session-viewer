@@ -133,18 +133,32 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   margin-left: 2px;
 }
 
-/* Platform dot — start of each session row (matches filter pill hue) */
-.platform-dot {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
+/* Platform avatar — replace colored dots with brand favicon/glyph */
+.platform-icon-wrap {
+  width: 14px;
+  height: 14px;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
-.dot-claude { background: var(--color-claude); }
-.dot-cursor { background: var(--color-cursor); }
-.dot-opencode { background: var(--color-opencode); }
-.dot-antigravity { background: var(--color-antigravity); }
-.dot-hermes { background: var(--color-hermes); }
+.platform-icon {
+  width: 14px;
+  height: 14px;
+  display: block;
+  object-fit: contain;
+  border-radius: 4px;
+}
+.platform-icon-fallback {
+  background: var(--bg-300);
+  border: 1px solid var(--border-100);
+  color: var(--text-300);
+  font-size: 9px;
+  line-height: 1;
+  font-family: var(--font-mono);
+  text-align: center;
+  padding: 0;
+}
 
 .ss-subagents-toggle {
   flex-shrink: 0; padding: 1px 5px; border-radius: 4px; border: none;
@@ -218,8 +232,19 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   padding: 0 14px; height: 44px;
   border-bottom: 0.5px solid var(--border-100); flex-shrink: 0;
   background: var(--bg-100);
+  min-width: 0;
 }
 .session-id { font-family: var(--font-mono); font-size: 11px; color: var(--text-400); letter-spacing: 0.04em; }
+.session-cwd {
+  min-width: 0;
+  flex: 0 1 34ch;
+  font-size: 10px;
+  color: var(--text-300);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .session-path-btn { background: none; border: none; color: var(--text-400); font-size: 11px; cursor: pointer; padding: 2px 6px; border-radius: 4px; transition: all 0.12s; }
 .session-path-btn:hover { background: hsla(255,100%,100%,0.06); color: var(--text-200); }
 .git-branch { font-size: 11px; color: var(--text-400); }

@@ -78,7 +78,6 @@ function useProjects() {
   const [listMode, setListMode] = useState<"recent" | "full">("recent")
 
   useEffect(() => {
-    setProjectsLoading(true)
     const qs = listMode === "recent" ? `?maxSessions=${RECENT_SIDEBAR_SESSIONS}` : ""
     fetch(`/api/projects${qs}`, { credentials: "include" })
       .then(r => {
@@ -159,18 +158,25 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
   const [win, setWin] = useState<MsgWindow | null>(null)
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
+  const [chatDir, setChatDir] = useState<string | null>(null)
   // Locally-held messages (tail of the full session)
   const fullRef = useRef<SessionMessage[]>([])
 
   const idbKey = projectDir && sessionId ? IDB_KEY(projectDir, sessionId) : null
 
+  const updateChatDir = useCallback((msgs: SessionMessage[]) => {
+    const cwd = msgs.find(m => typeof m.cwd === "string" && m.cwd.trim())?.cwd?.trim() ?? null
+    setChatDir(cwd)
+  }, [])
+
   const initWindow = useCallback((msgs: SessionMessage[], serverTotal: number) => {
     const filtered = msgs.filter(m => m.type !== "file-history-snapshot")
     fullRef.current = filtered
+    updateChatDir(filtered)
     // Position window at the end of locally-held messages
     const startIdx = Math.max(0, filtered.length - MAX_DOM)
     setWin({ msgs: filtered.slice(startIdx), startIdx, total: serverTotal, serverFetchedFrom: serverTotal - filtered.length })
-  }, [])
+  }, [updateChatDir])
 
   // Fetch the tail from server
   const fetchRemote = useCallback(async () => {
@@ -201,8 +207,7 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
       }
       await fetchRemote()
     })()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectDir, sessionId])
+  }, [projectDir, sessionId, idbKey, fetchRemote, initWindow, updateChatDir])
 
   // Auto-refresh for active sessions — only update window tail with new messages
   useEffect(() => {
@@ -220,12 +225,14 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
           if (!prev) {
             const startIdx = Math.max(0, filtered.length - MAX_DOM)
             fullRef.current = filtered
+            updateChatDir(filtered)
             return { msgs: filtered.slice(startIdx), startIdx, total: serverTotal || filtered.length, serverFetchedFrom: (serverTotal || filtered.length) - filtered.length }
           }
           // Prepend any older messages we already have that aren't in new tail
           const alreadyHeld = fullRef.current.slice(0, prev.serverFetchedFrom > 0 ? fullRef.current.length - filtered.length : 0)
           const merged = [...alreadyHeld, ...filtered]
           fullRef.current = merged
+          updateChatDir(merged)
           const newStart = prev.startIdx
           const newMsgs = merged.slice(newStart)
           if (newMsgs.length > MAX_DOM) {
@@ -237,7 +244,7 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
       } catch { /* ignore */ }
     }, 4000)
     return () => clearInterval(t)
-  }, [isActive, projectDir, sessionId, idbKey])
+  }, [isActive, projectDir, sessionId, idbKey, updateChatDir])
 
   // true if there are more messages to show — either locally-held earlier ones OR unfetched on server
   const hasEarlier = win ? (win.startIdx > 0 || win.serverFetchedFrom > 0) : false
@@ -302,7 +309,7 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
     }
   }
 
-  return { win, loading, loadingMore, hasEarlier, hasLater, loadEarlier, loadLater, fullRef, loadingEarlierRef, loadingLaterRef }
+  return { win, loading, loadingMore, hasEarlier, hasLater, loadEarlier, loadLater, fullRef, loadingEarlierRef, loadingLaterRef, chatDir }
 }
 
 // ── Session pane ──────────────────────────────────────────────────────────────
@@ -318,7 +325,7 @@ function wordOverlap(a: string, b: string): number {
 }
 
 function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projectDir: string; sessionMeta: SessionMeta; onBack?: () => void; capabilities: Capabilities }) {
-  const { win, loading, loadingMore, hasEarlier, hasLater, loadEarlier, loadLater, loadingEarlierRef, loadingLaterRef } =
+  const { win, loading, loadingMore, hasEarlier, hasLater, loadEarlier, loadLater, loadingEarlierRef, loadingLaterRef, chatDir } =
     useWindowedMessages(projectDir, sessionMeta.id, isRecentlyActive(sessionMeta.lastActivity))
 
   const [suggestions, setSuggestions] = useState<Record<string, Suggestion>>({})
@@ -501,12 +508,14 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
   const visible = win?.msgs ?? []
   const total = win?.total ?? 0
   const startIdx = win?.startIdx ?? 0
+  const chatDirLabel = chatDir ?? projectDir
 
   return (
     <div className="session-pane">
       <div className="session-header">
         {onBack && <button className="back-btn" onClick={onBack} title="Back to sessions">←</button>}
         <span className="session-id">{sessionMeta.id.slice(0, 8)}</span>
+        {chatDirLabel && <span className="session-cwd hide-mobile" title={chatDirLabel}>{chatDirLabel}</span>}
         {capabilities.openPath && (
           <button
             className="session-path-btn hide-mobile"
@@ -590,24 +599,9 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
   )
 }
 
-// ── Platform chrome (sidebar dots + filter pills share hue tokens in App.css) ─
+// ── Platform chrome (sidebar icons + filter pills share hue tokens in App.css) ─
 
-function platformDotClass(source?: string): string {
-  switch (source ?? "claude") {
-    case "cursor":
-      return "dot-cursor"
-    case "opencode":
-      return "dot-opencode"
-    case "antigravity":
-      return "dot-antigravity"
-    case "hermes":
-      return "dot-hermes"
-    default:
-      return "dot-claude"
-  }
-}
-
-function platformTitle(source?: string): string {
+function platformIconLabel(source?: string): string {
   switch (source ?? "claude") {
     case "cursor":
       return "Cursor"
@@ -617,9 +611,67 @@ function platformTitle(source?: string): string {
       return "Antigravity"
     case "hermes":
       return "Hermes"
+    case "codex":
+      return "Codex"
     default:
       return "Claude"
   }
+}
+
+function platformIconSrc(source?: string): string | null {
+  switch (source ?? "claude") {
+    case "claude":
+      return "https://www.google.com/s2/favicons?sz=64&domain=claude.ai"
+    case "cursor":
+      return "https://www.google.com/s2/favicons?sz=64&domain=cursor.com"
+    case "opencode":
+      return "https://www.google.com/s2/favicons?sz=64&domain=opencode.ai"
+    case "codex":
+      return "https://www.google.com/s2/favicons?sz=64&domain=openai.com"
+    default:
+      return null
+  }
+}
+
+function platformFallbackGlyph(source?: string): string {
+  switch (source ?? "claude") {
+    case "cursor":
+      return "⌁"
+    case "opencode":
+      return "</>"
+    case "antigravity":
+      return "◌"
+    case "hermes":
+      return "⚚"
+    case "codex":
+      return "{}"
+    default:
+      return "C"
+  }
+}
+
+function AgentIcon({ source }: { source?: string }) {
+  const [failed, setFailed] = useState(false)
+  const src = platformIconSrc(source)
+  const label = platformIconLabel(source)
+
+  if (src && !failed) {
+    return (
+      <img
+        className="platform-icon"
+        src={src}
+        alt={label}
+        title={label}
+        onError={() => setFailed(true)}
+      />
+    )
+  }
+
+  return (
+    <span className="platform-icon platform-icon-fallback" title={label} aria-label={label} role="img">
+      {platformFallbackGlyph(source)}
+    </span>
+  )
 }
 
 const PLATFORM_FILTER_ACTIVE: Record<string, string> = {
@@ -648,9 +700,10 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState("")
+  const [customName, setCustomName] = useState<string | undefined>(s.customName)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const displayName = s.customName || s.firstName || s.id.slice(0, 8)
+  const displayName = customName || s.firstName || s.id.slice(0, 8)
   // Tooltip: show full display name, agent type, and session ID
   const tooltip = [
     displayName,
@@ -661,7 +714,7 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
 
   function startEdit(e: React.MouseEvent) {
     e.stopPropagation()
-    setDraft(s.customName ?? s.firstName ?? "")
+    setDraft(customName ?? s.firstName ?? "")
     setEditing(true)
     setTimeout(() => inputRef.current?.select(), 0)
   }
@@ -669,14 +722,14 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
   async function commitRename() {
     setEditing(false)
     const name = draft.trim()
-    if (name === (s.customName ?? "")) return  // no change
+    if (name === (customName ?? "")) return  // no change
     await fetch(`/api/names/${encodeURIComponent(projectPath)}/${s.id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
       body: JSON.stringify({ name }),
     })
-    s.customName = name || undefined
+    setCustomName(name || undefined)
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
@@ -703,12 +756,9 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
         />
       ) : (
         <>
-          <span
-            className={`platform-dot ${platformDotClass(s.source)}`}
-            title={platformTitle(s.source)}
-            role="img"
-            aria-label={platformTitle(s.source)}
-          />
+          <span className="platform-icon-wrap" aria-hidden="true">
+            <AgentIcon source={s.source} />
+          </span>
           {isRecentlyActive(s.lastActivity) && <span className="ss-live">●</span>}
           {s.isSidechain && <span className="ss-subagent-icon" title="Sub-agent session">⤷</span>}
           <span className="ss-name">{displayName}</span>
@@ -939,7 +989,11 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
   function toggleParent(id: string) {
     setExpandedParents(prev => {
       const next = new Set(prev)
-      next.has(id) ? next.delete(id) : next.add(id)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
       return next
     })
   }
@@ -1256,21 +1310,19 @@ export default function App() {
     return () => { window.removeEventListener("pointermove", onMove); window.removeEventListener("pointerup", onUp) }
   }, [])
 
-  useEffect(() => {
-    if (selected) {
-      const s = encodeURIComponent(selected.project) + "/" + selected.session
-      history.replaceState(null, "", "?s=" + s)
-    }
-  }, [selected])
+  const defaultProject = !selected ? projects[0]?.path ?? null : null
+  const defaultSession = !selected ? projects[0]?.sessions[0]?.id ?? null : null
+  const activeProjectPath = selected?.project ?? defaultProject
+  const activeSessionId = selected?.session ?? defaultSession
 
   useEffect(() => {
-    if (!selected && projects.length > 0 && projects[0].sessions.length > 0) {
-      setSelected({ project: projects[0].path, session: projects[0].sessions[0].id })
-    }
-  }, [projects, selected])
+    if (!activeProjectPath || !activeSessionId) return
+    const s = encodeURIComponent(activeProjectPath) + "/" + activeSessionId
+    history.replaceState(null, "", "?s=" + s)
+  }, [activeProjectPath, activeSessionId])
 
-  const activeProject = projects.find(p => p.path === selected?.project)
-  const activeMeta = activeProject?.sessions.find(s => s.id === selected?.session)
+  const activeProject = projects.find(p => p.path === activeProjectPath)
+  const activeMeta = activeProject?.sessions.find(s => s.id === activeSessionId)
 
   return (
     <div className="app">
