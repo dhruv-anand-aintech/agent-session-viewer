@@ -71,11 +71,21 @@ async function loadProjectsFull() {
   const names = config.names ?? {}
   const projects = []
 
+  // Collect all roots to scan: main ~/.claude/projects + any extraProjectRoots from config.
+  // Each extra root is { path: string, label?: string } — label prefixes project display names.
+  const roots = [{ path: CLAUDE_DIR, label: null }]
+  for (const extra of config.extraProjectRoots ?? []) {
+    const p = typeof extra === "string" ? extra : extra.path
+    const label = typeof extra === "object" ? (extra.label ?? null) : null
+    roots.push({ path: p.replace(/^~/, homedir()), label })
+  }
+
+  for (const { path: root, label } of roots) {
   let dirs
-  try { dirs = readdirSync(CLAUDE_DIR) } catch { return [] }
+  try { dirs = readdirSync(root) } catch { continue }
 
   for (const dir of dirs) {
-    const dp = join(CLAUDE_DIR, dir)
+    const dp = join(root, dir)
     try { if (!statSync(dp).isDirectory()) continue } catch { continue }
 
     const sessions = []
@@ -130,9 +140,10 @@ async function loadProjectsFull() {
 
       const messageCount = msgs.filter(m => m.type !== "file-history-snapshot").length
 
+      const projectKey = root === CLAUDE_DIR ? dir : `${root}/${dir}`
       sessions.push({
         id: sessionId,
-        projectPath: dir,
+        projectPath: projectKey,
         lastActivity: last?.timestamp ?? stat.mtime.toISOString(),
         version: first?.version,
         gitBranch: first?.gitBranch,
@@ -140,19 +151,21 @@ async function loadProjectsFull() {
         userMessageCount,
         messageCount,
         firstName,
-        customName: names[`${dir}/${sessionId}`] ?? null,
+        customName: names[`${projectKey}/${sessionId}`] ?? null,
         source: "claude",
       })
     }
 
     if (sessions.length > 0) {
+      const baseName = dir.replace(/^-Users-[^-]+-Code-/, "").replace(/-/g, "/")
       projects.push({
-        path: dir,
-        displayName: dir.replace(/^-Users-[^-]+-Code-/, "").replace(/-/g, "/"),
+        path: `${root}/${dir}`,
+        displayName: label ? `[${label}] ${baseName}` : baseName,
         sessions: sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity)),
       })
     }
   }
+  } // end roots loop
 
   // Merge in external platform sessions
   const allProjects = [
@@ -483,7 +496,10 @@ const server = http.createServer(async (req, res) => {
     const cacheKey = `${projectPath}/${sessionId}`
     if (msgCache.has(cacheKey)) { jsonPaged(msgCache.get(cacheKey)); return }
     // Claude: read JSONL file directly
-    const fp = join(CLAUDE_DIR, projectPath, `${sessionId}.jsonl`)
+    // projectPath is a slug for main root, or absolute path for extra roots
+    const fp = projectPath.startsWith("/")
+      ? join(projectPath, `${sessionId}.jsonl`)
+      : join(CLAUDE_DIR, projectPath, `${sessionId}.jsonl`)
     if (!existsSync(fp)) { res.writeHead(404); res.end("Not Found"); return }
     jsonPaged(parseJsonl(fp))
     return
@@ -628,7 +644,9 @@ const server = http.createServer(async (req, res) => {
     const project = url.searchParams.get("project")
     const session = url.searchParams.get("session")
     if (!project || !session) { json({ error: "Missing project or session" }, 400); return }
-    const filePath = join(CLAUDE_DIR, project, `${session}.jsonl`)
+    const filePath = project.startsWith("/")
+      ? join(project, `${session}.jsonl`)
+      : join(CLAUDE_DIR, project, `${session}.jsonl`)
     exec(`open "${filePath.replace(/"/g, '\\"')}"`, (err) => {
       if (err) json({ error: err.message }, 500)
       else json({ ok: true })
