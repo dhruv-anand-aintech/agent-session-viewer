@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Claude Session Viewer — local file-watcher daemon
+ * Agent Session Viewer — local file-watcher daemon
  *
  * Watches ~/.claude/projects/**\/*.jsonl for changes.
  * On each change, parses the session and PUTs it to the Cloudflare Worker
@@ -35,6 +35,8 @@ import {
   CURSOR_PROJECTS_ROOT,
   readOpenCodeSession,
   iterOpenCodeSessions,
+  OPENCODE_DIR,
+  OPENCODE_DB,
   OPENCODE_STORAGE,
   ANTIGRAVITY_BRAIN_DIR,
   parseAntigravitySessionIndex,
@@ -46,10 +48,10 @@ import {
 
 // ── Persistent sync cache ─────────────────────────────────────────────────────
 // Survives daemon restarts so already-uploaded sessions are not re-sent.
-// Stored at ~/.claude/session-viewer-sync-cache.json
+// Stored at ~/.claude/agent-session-viewer-sync-cache.json
 // Keys: `platform:sessionIdOrFilePath` → cacheVal string
 
-const SYNC_CACHE_FILE = path.join(homedir(), ".claude", "session-viewer-sync-cache.json")
+const SYNC_CACHE_FILE = path.join(homedir(), ".claude", "agent-session-viewer-sync-cache.json")
 let _syncCache = null
 let _syncCacheTimer = null
 
@@ -993,7 +995,10 @@ async function pushOpenCodeResult(result) {
 
 async function initialSyncOpenCode() {
   const sessionBaseDir = path.join(OPENCODE_STORAGE, "session")
-  if (!fs.existsSync(sessionBaseDir)) { log("OpenCode storage not found — OpenCode sync disabled"); return }
+  if (!fs.existsSync(sessionBaseDir) && !fs.existsSync(OPENCODE_DB)) {
+    log("OpenCode not found — OpenCode sync disabled")
+    return
+  }
   let count = 0
   for (const { result } of iterOpenCodeSessions(
     id => sc.opencode.get(id),
@@ -1007,7 +1012,28 @@ async function initialSyncOpenCode() {
 
 function startOpenCodeWatcher() {
   const sessionBaseDir = path.join(OPENCODE_STORAGE, "session")
-  if (!fs.existsSync(sessionBaseDir)) return
+  if (!fs.existsSync(sessionBaseDir) && !fs.existsSync(OPENCODE_DB)) return
+
+  let ocResyncTimer = null
+  const bumpOpenCodeResync = () => {
+    if (ocResyncTimer) clearTimeout(ocResyncTimer)
+    ocResyncTimer = setTimeout(() => {
+      initialSyncOpenCode().catch(() => {})
+    }, 600)
+  }
+
+  if (fs.existsSync(OPENCODE_DIR)) {
+    try {
+      watch(OPENCODE_DIR, { recursive: true }, bumpOpenCodeResync)
+    } catch {
+      try { watch(OPENCODE_DIR, bumpOpenCodeResync) } catch { /* ignore */ }
+    }
+  }
+
+  if (!fs.existsSync(sessionBaseDir)) {
+    log(`Watching OpenCode at ${OPENCODE_DIR} (SQLite + storage)`)
+    return
+  }
   watch(sessionBaseDir, { recursive: true }, (_event, filename) => {
     if (!filename?.endsWith(".json")) return
     const full = path.join(sessionBaseDir, filename)
@@ -1030,7 +1056,7 @@ function startOpenCodeWatcher() {
       }
     })
   }
-  log(`Watching OpenCode storage at ${OPENCODE_STORAGE}`)
+  log(`Watching OpenCode at ${OPENCODE_DIR} (SQLite + ${OPENCODE_STORAGE})`)
 }
 
 // ── Hermes adaptor (via platform-readers.mjs) ────────────────────────────────

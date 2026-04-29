@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Claude Session Viewer — one-command Cloudflare setup
+ * Agent Session Viewer — one-command Cloudflare setup
  *
  * Usage: node setup.mjs
  *
@@ -24,7 +24,7 @@ function prompt(question) {
   return new Promise(resolve => rl.question(question, ans => { rl.close(); resolve(ans.trim()) }))
 }
 
-console.log("🚀  Claude Session Viewer — Cloudflare setup\n")
+console.log("🚀  Agent Session Viewer — Cloudflare setup\n")
 
 // ── Step 1: Create KV namespace ────────────────────────────────────────────────
 console.log("Creating KV namespace SESSIONS_KV…")
@@ -75,14 +75,14 @@ execSync("npm run build && npx wrangler deploy", { stdio: "inherit" })
 
 // ── Done ───────────────────────────────────────────────────────────────────────
 const workerName = JSON.parse(readFileSync("wrangler.toml", "utf8").replace(/\[.*?\]\n/g, "")).name
-  ?? "claude-session-viewer"
+  ?? "agent-session-viewer"
 
 console.log(`
 ✅  Setup complete!
 
 Your viewer is live at: https://${workerName}.<your-subdomain>.workers.dev
 
-To start syncing your Claude sessions, run:
+To start syncing your sessions to the Worker, run:
 
   WORKER_URL=https://${workerName}.<your-subdomain>.workers.dev AUTH_PIN=${pin} npm run daemon
 
