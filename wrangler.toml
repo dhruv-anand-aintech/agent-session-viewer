@@ -1,4 +1,4 @@
-name = "claude-session-viewer"
+name = "agent-session-viewer"
 main = "worker/index.ts"
 compatibility_date = "2024-01-01"
 
