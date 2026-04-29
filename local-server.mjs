@@ -34,6 +34,7 @@ import {
   readAntigravityRpcSessions,
   HERMES_DB,
   readHermesSessions,
+  readCodexSessionById,
   normProjectDir,
 } from "./platform-readers.mjs"
 import { buildSidebarSearchDoc, runSidebarSessionSearch } from "./lib/session-search-core.mjs"
@@ -300,30 +301,19 @@ async function streamRecentSidebarInitial(res, maxSessions) {
       const chunk = scanOneClaudeFolder(root, label, dir, names, fileBySessKey)
       if (!chunk) continue
       acc = mergeProjectsInto(acc, [chunk])
-      const totalSoFar = countSessionsInProjects(acc)
-      const trimmed =
-        totalSoFar > maxSessions ? trimProjectsByRecentSessionCount(acc, maxSessions) : acc
-      sseWrite(res, "projects", trimmed)
+      sseWrite(res, "projects", sortProjectGroups(acc))
       await yieldEventLoopTick()
     }
   }
 
-  const platformLoads = [
+  const fastPlatformLoads = [
     loadCodexSessions,
-    loadCursorSessions,
-    loadCursorAgentSessions,
-    loadOpenCodeSessions,
-    async () => loadAntigravitySessions(),
-    loadHermesSessions,
   ]
-  for (const loadFn of platformLoads) {
+  for (const loadFn of fastPlatformLoads) {
     const part = await loadFn()
     if (!part.length) continue
     acc = mergeProjectsInto(acc, part)
-    const totalSoFar = countSessionsInProjects(acc)
-    const trimmed =
-      totalSoFar > maxSessions ? trimProjectsByRecentSessionCount(acc, maxSessions) : acc
-    sseWrite(res, "projects", trimmed)
+    sseWrite(res, "projects", sortProjectGroups(acc))
     await yieldEventLoopTick()
   }
 
@@ -340,6 +330,26 @@ async function streamRecentSidebarInitial(res, maxSessions) {
   })
   sseWrite(res, "projects", trimmed)
   sseWrite(res, "bootstrap_done", {})
+
+  setTimeout(async () => {
+    const slowPlatformLoads = [
+      loadCursorSessions,
+      loadCursorAgentSessions,
+      loadOpenCodeSessions,
+      async () => loadAntigravitySessions(),
+      loadHermesSessions,
+    ]
+    for (const loadFn of slowPlatformLoads) {
+      if (res.destroyed) return
+      const part = await loadFn()
+      if (!part.length) continue
+      acc = mergeProjectsInto(acc, part)
+      const nextTotal = countSessionsInProjects(acc)
+      sseWrite(res, "projects_meta", { total: nextTotal })
+      sseWrite(res, "projects", sortProjectGroups(acc))
+      await yieldEventLoopTick()
+    }
+  }, 1500)
 }
 
 function hydrateClaudeSessionsInProjects(projects, fileBySessKey, names) {
@@ -437,9 +447,8 @@ function loadSessionMessagesOndemand(projectPath, sessionId) {
     return null
   }
   if (projectPath.startsWith("codex:")) {
-    for (const { meta, msgs } of readCodexSessions(null, null)) {
-      if (meta.id === sessionId && meta.projectPath === projectPath) return msgs
-    }
+    const result = readCodexSessionById(sessionId, null, null)
+    if (result?.meta?.projectPath === projectPath && Array.isArray(result.msgs)) return result.msgs
     return null
   }
   if (projectPath.startsWith("hermes:")) {

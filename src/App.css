@@ -262,6 +262,26 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   padding: 8px 12px 4px; font-size: 10.5px; font-weight: 500;
   color: var(--text-400); letter-spacing: 0.02em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  position: relative;
+}
+.sidebar-project-name[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 8px;
+  background: var(--bg-000);
+  color: var(--text-100);
+  padding: 6px 10px;
+  border-radius: 4px;
+  border: 0.5px solid var(--border-100);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: min(540px, calc(100vw - 36px));
+  z-index: 1000;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.45);
+  pointer-events: none;
 }
 
 /* Session items: plain rows like Claude sidebar */
@@ -278,10 +298,10 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   content: attr(data-tooltip);
   position: absolute; bottom: 100%; left: 0; margin-bottom: 4px;
   background: var(--bg-000); color: var(--text-100);
-  padding: 4px 8px; border-radius: 4px; border: 0.5px solid var(--border-100);
-  font-size: 11px; white-space: pre-wrap; word-break: break-word;
-  max-width: 200px; z-index: 1000;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  padding: 6px 10px; border-radius: 4px; border: 0.5px solid var(--border-100);
+  font-size: 11px; font-family: var(--font-mono); white-space: pre-wrap; word-break: break-word;
+  max-width: min(520px, calc(100vw - 40px)); z-index: 1000;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.45); pointer-events: none;
 }
 .sidebar-session:hover { background: hsla(255,100%,100%,0.04); color: var(--text-100); }
 .sidebar-session:hover .ss-rename-btn { opacity: 1; }
@@ -342,6 +362,26 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   border-bottom: 0.5px solid var(--border-100); flex-shrink: 0;
   background: var(--bg-100);
   min-width: 0;
+  position: relative;
+}
+.session-header[data-tooltip]:hover::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: 14px;
+  top: calc(100% + 6px);
+  background: var(--bg-000);
+  color: var(--text-100);
+  padding: 6px 10px;
+  border-radius: 4px;
+  border: 0.5px solid var(--border-100);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: min(540px, calc(100vw - 36px));
+  z-index: 1000;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.45);
+  pointer-events: none;
 }
 .session-id { font-family: var(--font-mono); font-size: 11px; color: var(--text-400); letter-spacing: 0.04em; }
 .session-cwd {

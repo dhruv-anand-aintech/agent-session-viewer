@@ -1220,6 +1220,37 @@ export function listCodexSessionFiles() {
   return out
 }
 
+export function findCodexSessionFile(sessionId) {
+  if (!sessionId || !fs.existsSync(CODEX_SESSIONS_ROOT)) return null
+  const sid = String(sessionId).trim()
+  const files = listCodexSessionFiles()
+  if (!files.length) return null
+
+  const exact = []
+  const tail = []
+  const loose = []
+  for (const fp of files) {
+    const base = path.basename(fp, ".jsonl")
+    if (base === sid) exact.push(fp)
+    else if (base.endsWith(`-${sid}`) || base.endsWith(sid)) tail.push(fp)
+    else if (base.includes(sid)) loose.push(fp)
+  }
+  const pickNewest = paths => {
+    if (paths.length <= 1) return paths[0] ?? null
+    return [...paths].sort((a, b) => {
+      try {
+        return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs
+      } catch {
+        return 0
+      }
+    })[0]
+  }
+  if (exact.length) return pickNewest(exact)
+  if (tail.length) return pickNewest(tail)
+  if (loose.length) return pickNewest(loose)
+  return null
+}
+
 export function readCodexSession(filePath, cacheGet, cacheSet) {
   let st
   try { st = fs.statSync(filePath) } catch { return null }
@@ -1238,6 +1269,11 @@ export function readCodexSession(filePath, cacheGet, cacheSet) {
   if (!result) return null
   if (cacheSet) cacheSet(filePath, cacheVal)
   return result
+}
+
+export function readCodexSessionById(sessionId, cacheGet, cacheSet) {
+  const filePath = findCodexSessionFile(sessionId)
+  return filePath ? readCodexSession(filePath, cacheGet, cacheSet) : null
 }
 
 export function readCodexSessions(cacheGet, cacheSet) {
