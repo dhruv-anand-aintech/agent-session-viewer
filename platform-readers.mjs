@@ -146,8 +146,26 @@ function formatCursorToolBubble(row) {
     }
   }
   if (row.toolResultPreview) {
-    const tr = String(row.toolResultPreview)
-    body += "\n\n**Result:**\n```\n" + tr.slice(0, 5000) + (tr.length > 5000 ? "\n…" : "") + "\n```"
+    const tr = String(row.toolResultPreview).trim()
+    if (tr === '[REDACTED]') {
+      body += "\n\n_(tool result redacted by Cursor)_"
+    } else {
+      body += "\n\n**Result:**\n```\n" + tr.slice(0, 5000) + (tr.length > 5000 ? "\n…" : "") + "\n```"
+    }
+  }
+  if (row.allThinkingBlocks) {
+    const raw = String(row.allThinkingBlocks).trim()
+    if (raw && raw !== '[]' && raw !== 'null') {
+      try {
+        const blocks = JSON.parse(raw)
+        if (Array.isArray(blocks) && blocks.length > 0) {
+          const thinkingText = blocks.map(b => b.thinking ?? b.text ?? JSON.stringify(b)).filter(Boolean).join("\n\n")
+          if (thinkingText) body += "\n\n<details><summary>Thinking</summary>\n\n" + thinkingText.slice(0, 8000) + "\n\n</details>"
+        }
+      } catch {
+        body += "\n\n_(thinking block redacted by Cursor)_"
+      }
+    }
   }
   return head + st + body
 }
@@ -175,7 +193,8 @@ function cursorBubbleText(row) {
  * Convert raw bubble rows for a composerId into SessionMessage[].
  * `composerRow` is the composerData meta (for timestamps); `rows` are bubble rows.
  */
-function cursorBubblesToMsgs(composerId, rows, composerRow) {
+/** startIdx/totalN let callers pass position context when rows is a tail slice. */
+function cursorBubblesToMsgs(composerId, rows, composerRow, { startIdx = 0, totalN = 0 } = {}) {
   const composerCreatedMs = parseCursorMs(composerRow?.createdAt)
   const composerUpdatedMs = parseCursorMs(composerRow?.lastUpdatedAt) ?? composerCreatedMs
 
@@ -188,14 +207,14 @@ function cursorBubblesToMsgs(composerId, rows, composerRow) {
     return 0
   })
 
-  const n = sorted.length
+  const n = totalN > 0 ? totalN : sorted.length
   const perBubbleMs = sorted.map((row, idx) => {
     const direct = parseCursorMs(row.ts)
     if (direct != null) return direct
     if (n <= 1) return composerUpdatedMs ?? composerCreatedMs ?? 0
     const c = composerCreatedMs ?? 0
     const u = composerUpdatedMs ?? c
-    return c + ((u - c) * idx) / (n - 1)
+    return c + ((u - c) * (startIdx + idx)) / (n - 1)
   })
 
   const converted = []
@@ -250,20 +269,38 @@ function cursorBubblesToMsgs(composerId, rows, composerRow) {
 }
 
 const CURSOR_BUBBLE_SELECT =
-  "SELECT substr(key,10,36) as cid, json_extract(value,'$.type') as type, json_extract(value,'$.text') as text, json_extract(value,'$.richText') as richText, json_extract(value,'$.toolFormerData.name') as toolName, json_extract(value,'$.toolFormerData.status') as toolStatus, json_extract(value,'$.toolFormerData.rawArgs') as toolRawArgs, substr(json_extract(value,'$.toolFormerData.result'),1,8000) as toolResultPreview, json_extract(value,'$.codeBlocks[0].content') as codeBlock0, COALESCE(json_extract(value,'$.createdAt'), json_extract(value,'$.timestamp')) as ts, json_extract(value,'$.bubbleId') as bid FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'"
+  "SELECT substr(key,10,36) as cid, json_extract(value,'$.type') as type, json_extract(value,'$.text') as text, json_extract(value,'$.richText') as richText, json_extract(value,'$.toolFormerData.name') as toolName, json_extract(value,'$.toolFormerData.status') as toolStatus, json_extract(value,'$.toolFormerData.rawArgs') as toolRawArgs, substr(json_extract(value,'$.toolFormerData.result'),1,8000) as toolResultPreview, json_extract(value,'$.codeBlocks[0].content') as codeBlock0, COALESCE(json_extract(value,'$.createdAt'), json_extract(value,'$.timestamp')) as ts, json_extract(value,'$.bubbleId') as bid, json_extract(value,'$.allThinkingBlocks') as allThinkingBlocks FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'"
 
 /**
- * Load full messages for a single Cursor composer session.
- * Used by local-server on /api/session/ — fast since it queries only one composerId.
+ * Load messages for a single Cursor composer session.
+ * When tail > 0, only fetches the last `tail` bubbles (skipping `skip` from the end),
+ * using a single SQLite call with a correlated COUNT subquery for the total.
+ * Returns { msgs, total } — total is the full bubble count (not just the slice).
  */
-export function readCursorSessionMsgs(composerId) {
-  if (!fs.existsSync(CURSOR_GLOBAL_DB)) return []
+export function readCursorSessionMsgs(composerId, { tail = 0, skip = 0 } = {}) {
+  if (!fs.existsSync(CURSOR_GLOBAL_DB)) return { msgs: [], total: 0 }
   const composerRows = sqliteQuery(CURSOR_GLOBAL_DB,
     `SELECT substr(key,14) as cid, json_extract(value,'$.name') as name, json_extract(value,'$.lastUpdatedAt') as lastUpdatedAt, json_extract(value,'$.createdAt') as createdAt FROM cursorDiskKV WHERE key = 'composerData:${composerId}' LIMIT 1`)
   const composerRow = composerRows[0] ?? null
-  const rows = sqliteQuery(CURSOR_GLOBAL_DB,
-    `${CURSOR_BUBBLE_SELECT} AND key LIKE 'bubbleId:${composerId}:%' ORDER BY key`)
-  return cursorBubblesToMsgs(composerId, rows, composerRow)
+
+  let rows, total
+  if (tail > 0) {
+    // Single sqlite3 call: LIMIT/OFFSET tail from end + correlated COUNT for total.
+    // cursorBubblesToMsgs re-sorts by timestamp so outer ORDER BY is unnecessary.
+    const cols = "substr(key,10,36) as cid, json_extract(value,'$.type') as type, json_extract(value,'$.text') as text, json_extract(value,'$.richText') as richText, json_extract(value,'$.toolFormerData.name') as toolName, json_extract(value,'$.toolFormerData.status') as toolStatus, json_extract(value,'$.toolFormerData.rawArgs') as toolRawArgs, substr(json_extract(value,'$.toolFormerData.result'),1,8000) as toolResultPreview, json_extract(value,'$.codeBlocks[0].content') as codeBlock0, COALESCE(json_extract(value,'$.createdAt'), json_extract(value,'$.timestamp')) as ts, json_extract(value,'$.bubbleId') as bid, json_extract(value,'$.allThinkingBlocks') as allThinkingBlocks"
+    const sql = `SELECT q.*, (SELECT COUNT(*) FROM cursorDiskKV WHERE key LIKE 'bubbleId:${composerId}:%') as __total FROM (SELECT ${cols} FROM cursorDiskKV WHERE key LIKE 'bubbleId:${composerId}:%' ORDER BY key DESC LIMIT ${tail} OFFSET ${skip}) q`
+    const rawRows = sqliteQuery(CURSOR_GLOBAL_DB, sql)
+    total = rawRows[0]?.__total ?? 0
+    rows = rawRows
+  } else {
+    rows = sqliteQuery(CURSOR_GLOBAL_DB,
+      `${CURSOR_BUBBLE_SELECT} AND key LIKE 'bubbleId:${composerId}:%' ORDER BY key`)
+    total = rows.length
+  }
+
+  const startIdx = tail > 0 ? Math.max(0, total - skip - tail) : 0
+  const msgs = cursorBubblesToMsgs(composerId, rows, composerRow, { startIdx, totalN: total })
+  return { msgs, total }
 }
 
 /**

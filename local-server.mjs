@@ -6,7 +6,7 @@
  * Config persisted to: ~/.claude/agent-session-viewer-local.json
  */
 
-import { createReadStream, existsSync, readdirSync, readFileSync, realpathSync, statSync, watch, writeFileSync } from "fs"
+import { createReadStream, existsSync, openSync, readSync, closeSync, readdirSync, readFileSync, realpathSync, statSync, watch, writeFileSync } from "fs"
 import { homedir } from "os"
 import { dirname, extname, join, sep } from "path"
 import http from "http"
@@ -71,6 +71,37 @@ function parseJsonl(fp) {
       try { return [JSON.parse(line)] } catch { return [] }
     })
   } catch { return [] }
+}
+
+/** Read just the first ~4KB of a JSONL to cheaply extract the first user message text. */
+function cheapReadFirstUserMsg(fp, maxLines = 30) {
+  try {
+    const fd = openSync(fp, "r")
+    const buf = Buffer.alloc(65536)
+    const n = readSync(fd, buf, 0, 65536, 0)
+    closeSync(fd)
+    const raw = buf.toString("utf8", 0, n)
+    const lines = raw.split("\n")
+    for (let i = 0; i < Math.min(maxLines, lines.length); i++) {
+      const line = lines[i].trim()
+      if (!line) continue
+      try {
+        const msg = JSON.parse(line)
+        if (msg.type !== "user") continue
+        const c = msg.message?.content
+        if (!c) continue
+        if (typeof c === "string" && c.trim()) return stripXml(c).slice(0, 100)
+        if (Array.isArray(c)) {
+          const tb = c.find(b => b.type === "text" && b.text?.trim() && !c.some(x => x.type === "tool_result"))
+          if (tb) return stripXml(tb.text).slice(0, 100)
+          // fallback: any text block that isn't only tool results
+          const anyTb = c.find(b => b.type === "text" && b.text?.trim())
+          if (anyTb) return stripXml(anyTb.text).slice(0, 100)
+        }
+      } catch { continue }
+    }
+    return null
+  } catch { return null }
 }
 
 /** Roots: ~/.claude/projects plus config extraProjectRoots */
@@ -222,7 +253,7 @@ function scanOneClaudeFolder(root, label, dir, names, fileBySessKey) {
       isActive: Date.now() - stat.mtimeMs < FIVE_MIN,
       userMessageCount: 0,
       messageCount: 0,
-      firstName: null,
+      firstName: cheapReadFirstUserMsg(fp),
       customName: names[`${projectKey}/${sessionId}`] ?? null,
       source: "claude",
     })
@@ -308,6 +339,8 @@ async function streamRecentSidebarInitial(res, maxSessions) {
 
   const fastPlatformLoads = [
     loadCodexSessions,
+    loadOpenCodeSessions,
+    loadHermesSessions,
   ]
   for (const loadFn of fastPlatformLoads) {
     const part = await loadFn()
@@ -320,24 +353,33 @@ async function streamRecentSidebarInitial(res, maxSessions) {
   const total = countSessionsInProjects(acc)
   sseWrite(res, "projects_meta", { total })
 
-  const trimmed =
-    total > maxSessions ? trimProjectsByRecentSessionCount(acc, maxSessions) : sortProjectGroups(acc)
-  hydrateClaudeSessionsInProjects(trimmed, fileBySessKey, names)
-  trimmed.sort((a, b) => {
-    const aLast = a.sessions[0]?.lastActivity ?? ""
-    const bLast = b.sessions[0]?.lastActivity ?? ""
-    return String(bLast).localeCompare(String(aLast))
-  })
-  sseWrite(res, "projects", trimmed)
+  // Hydrate full metadata (message counts, accurate firstName) for the most recent sessions only.
+  // firstName is already set cheaply for all sessions via cheapReadFirstUserMsg in scanOneClaudeFolder.
+  const hydrateN = maxSessions ?? 50
+  const forHydration = hydrateN > 0
+    ? trimProjectsByRecentSessionCount(acc, hydrateN)
+    : sortProjectGroups(acc)
+  hydrateClaudeSessionsInProjects(forHydration, fileBySessKey, names)
+  // Copy hydrated firstName values back to acc so all SSE events carry correct titles
+  for (const p of forHydration) {
+    const ap = acc.find(a => a.path === p.path)
+    if (!ap) continue
+    const byId = new Map(ap.sessions.map(s => [s.id, s]))
+    for (const s of p.sessions) {
+      const as = byId.get(s.id)
+      if (as && s.firstName) as.firstName = s.firstName
+    }
+  }
+  // Emit ALL sessions (no trim) — older sessions visible immediately; firstName set for all via cheap scan
+  const allSorted = sortProjectGroups(acc)
+  sseWrite(res, "projects", allSorted)
   sseWrite(res, "bootstrap_done", {})
 
   setTimeout(async () => {
     const slowPlatformLoads = [
       loadCursorSessions,
       loadCursorAgentSessions,
-      loadOpenCodeSessions,
       async () => loadAntigravitySessions(),
-      loadHermesSessions,
     ]
     for (const loadFn of slowPlatformLoads) {
       if (res.destroyed) return
@@ -416,7 +458,7 @@ const msgCache = new Map() // `projectPath/sessionId` → SessionMessage[]
 function loadSessionMessagesOndemand(projectPath, sessionId) {
   if (projectPath.startsWith("cursor:")) {
     try {
-      const msgs = readCursorSessionMsgs(sessionId)
+      const { msgs } = readCursorSessionMsgs(sessionId)
       return msgs.length ? msgs : null
     } catch { return null }
   }
@@ -470,7 +512,7 @@ function loadSessionMessagesOndemand(projectPath, sessionId) {
 /** Full message array for a session (no tail windowing). */
 function getSessionMessagesAll(projectPath, sessionId) {
   if (projectPath.startsWith("cursor:")) {
-    return readCursorSessionMsgs(sessionId)
+    return readCursorSessionMsgs(sessionId).msgs
   }
   const cacheKey = `${projectPath}/${sessionId}`
   if (msgCache.has(cacheKey)) return msgCache.get(cacheKey)
@@ -698,6 +740,7 @@ const server = http.createServer(async (req, res) => {
       openPath: true,
       debugStream: true,
       pinRequired: Boolean(AUTH_PIN),
+      homeDir: homedir(),
     })
     return
   }
@@ -827,9 +870,11 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify(msgs))
     }
 
-    // Cursor: load on demand (not cached upfront — avoids reading 50k+ bubble rows at startup)
+    // Cursor: push tail/skip into SQLite — avoids reading all bubbles for a tail fetch
     if (projectPath.startsWith("cursor:")) {
-      jsonPaged(readCursorSessionMsgs(sessionId))
+      const { msgs, total } = readCursorSessionMsgs(sessionId, { tail, skip })
+      res.writeHead(200, { "Content-Type": "application/json", "X-Message-Total": String(total) })
+      res.end(JSON.stringify(msgs))
       return
     }
     // Other non-Claude platforms: msgCache (filled by /api/projects) or on-demand read
@@ -988,6 +1033,24 @@ const server = http.createServer(async (req, res) => {
     }, 500)
 
     req.on("close", () => clearInterval(timer))
+    return
+  }
+
+  // GET /api/raw-jsonl — serve raw JSONL file as text for in-browser viewing
+  if (url.pathname.startsWith("/api/raw-jsonl")) {
+    const project = url.searchParams.get("project")
+    const session = url.searchParams.get("session")
+    if (!project || !session) { json({ error: "Missing project or session" }, 400); return }
+    const filePath = project.startsWith("/")
+      ? join(project, `${session}.jsonl`)
+      : join(CLAUDE_DIR, project, `${session}.jsonl`)
+    try {
+      const content = readFileSync(filePath, "utf8")
+      res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" })
+      res.end(content)
+    } catch (err) {
+      json({ error: err.message }, 404)
+    }
     return
   }
 
