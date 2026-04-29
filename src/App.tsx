@@ -3,6 +3,7 @@ import type { SessionMessage } from "./types"
 import MessageBlock from "./MessageBlock"
 import PrettyMessageBlock, { charCountMsg } from "./pretty/PrettyMessageBlock"
 import { idbPut, idbGet } from "./idb"
+import { runThreadSearch } from "./threadSearch"
 import "./App.css"
 
 interface SessionMeta {
@@ -79,27 +80,37 @@ function useProjects() {
 
   useEffect(() => {
     const qs = listMode === "recent" ? `?maxSessions=${RECENT_SIDEBAR_SESSIONS}` : ""
-    fetch(`/api/projects${qs}`, { credentials: "include" })
-      .then(r => {
-        const total = r.headers.get("X-Total-Sessions")
-        if (total) setTotalSessions(Number(total))
-        return r.json()
-      })
-      .then(data => {
-        setProjects(data as ProjectData[])
-        setProjectsLoading(false)
-      })
-      .catch(() => setProjectsLoading(false))
-
+    queueMicrotask(() => {
+      setProjectsLoading(true)
+      setProjects([])
+      setTotalSessions(null)
+    })
     const es = new EventSource(`/api/stream${qs}`)
     es.onopen = () => setConnected(true)
-    es.onerror = () => setConnected(false)
-    es.addEventListener("projects", (e) => {
+    es.onerror = () => {
+      setConnected(false)
+      setProjectsLoading(false)
+    }
+    es.addEventListener("projects_meta", e => {
+      try {
+        const o = JSON.parse((e as MessageEvent).data) as { total?: unknown }
+        if (typeof o.total === "number") setTotalSessions(o.total)
+      } catch {
+        /* ignore */
+      }
+    })
+    es.addEventListener("projects", e => {
       try {
         setProjects(JSON.parse((e as MessageEvent).data) as ProjectData[])
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     })
-    return () => es.close()
+    es.addEventListener("bootstrap_done", () => setProjectsLoading(false))
+    return () => {
+      es.close()
+      setProjectsLoading(false)
+    }
   }, [listMode])
 
   const visibleCount = projects.reduce((n, p) => n + p.sessions.length, 0)
@@ -182,14 +193,17 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
   const fetchRemote = useCallback(async () => {
     if (!projectDir || !sessionId || !idbKey) return
     try {
-      const r = await fetch(sessionUrl(projectDir, sessionId, INITIAL_TAIL))
+      const r = await fetch(sessionUrl(projectDir, sessionId, INITIAL_TAIL), { credentials: "include" })
       if (!r.ok) return
       const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || 0
       const msgs: SessionMessage[] = await r.json()
       await idbPut(idbKey, msgs)
       initWindow(msgs, serverTotal || msgs.length)
+    } catch {
+      /* network or parse */
+    } finally {
       setLoading(false)
-    } catch { setLoading(false) }
+    }
   }, [projectDir, sessionId, idbKey, initWindow])
 
   // Initial load: try IDB first for instant display, then refresh from remote
@@ -214,7 +228,7 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
     if (!isActive || !projectDir || !sessionId || !idbKey) return
     const t = setInterval(async () => {
       try {
-        const r = await fetch(sessionUrl(projectDir, sessionId, INITIAL_TAIL))
+        const r = await fetch(sessionUrl(projectDir, sessionId, INITIAL_TAIL), { credentials: "include" })
         if (!r.ok) return
         const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || 0
         const msgs: SessionMessage[] = await r.json()
@@ -272,7 +286,7 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
     setLoadingMore(true)
     try {
       const skip = win.total - win.serverFetchedFrom  // messages already held from tail
-      const r = await fetch(sessionUrl(projectDir, sessionId, CHUNK, skip))
+      const r = await fetch(sessionUrl(projectDir, sessionId, CHUNK, skip), { credentials: "include" })
       if (!r.ok) return
       const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || win.total
       const newMsgs: SessionMessage[] = await r.json()
@@ -309,7 +323,54 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
     }
   }
 
-  return { win, loading, loadingMore, hasEarlier, hasLater, loadEarlier, loadLater, fullRef, loadingEarlierRef, loadingLaterRef, chatDir }
+  /** Replace local buffer with a full session fetch (e.g. thread search). */
+  const injectFullMessages = useCallback(
+    async (all: SessionMessage[]) => {
+      const filtered = all.filter(m => m.type !== "file-history-snapshot")
+      fullRef.current = filtered
+      updateChatDir(filtered)
+      const total = filtered.length
+      const startIdx = Math.max(0, total - MAX_DOM)
+      setWin({
+        msgs: filtered.slice(startIdx, Math.min(total, startIdx + MAX_DOM)),
+        startIdx,
+        total,
+        serverFetchedFrom: 0,
+      })
+      if (idbKey) await idbPut(idbKey, filtered)
+    },
+    [idbKey, updateChatDir]
+  )
+
+  /** Scroll window so message at global index is in DOM, then caller can scrollIntoView on data-msg-index. */
+  const bringMessageIndexIntoView = useCallback((targetIdx: number) => {
+    setWin(prev => {
+      if (!prev) return prev
+      const full = fullRef.current
+      if (targetIdx < 0 || targetIdx >= full.length) return prev
+      if (targetIdx >= prev.startIdx && targetIdx < prev.startIdx + prev.msgs.length) return prev
+      const half = Math.floor(MAX_DOM / 2)
+      const newStart = Math.min(Math.max(0, targetIdx - half), Math.max(0, full.length - MAX_DOM))
+      const end = Math.min(full.length, newStart + MAX_DOM)
+      return { ...prev, startIdx: newStart, msgs: full.slice(newStart, end) }
+    })
+  }, [])
+
+  return {
+    win,
+    loading,
+    loadingMore,
+    hasEarlier,
+    hasLater,
+    loadEarlier,
+    loadLater,
+    fullRef,
+    loadingEarlierRef,
+    loadingLaterRef,
+    chatDir,
+    injectFullMessages,
+    bringMessageIndexIntoView,
+  }
 }
 
 // ── Session pane ──────────────────────────────────────────────────────────────
@@ -325,8 +386,70 @@ function wordOverlap(a: string, b: string): number {
 }
 
 function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projectDir: string; sessionMeta: SessionMeta; onBack?: () => void; capabilities: Capabilities }) {
-  const { win, loading, loadingMore, hasEarlier, hasLater, loadEarlier, loadLater, loadingEarlierRef, loadingLaterRef, chatDir } =
-    useWindowedMessages(projectDir, sessionMeta.id, isRecentlyActive(sessionMeta.lastActivity))
+  const {
+    win,
+    loading,
+    loadingMore,
+    hasEarlier,
+    hasLater,
+    loadEarlier,
+    loadLater,
+    loadingEarlierRef,
+    loadingLaterRef,
+    chatDir,
+    injectFullMessages,
+    bringMessageIndexIntoView,
+  } = useWindowedMessages(projectDir, sessionMeta.id, isRecentlyActive(sessionMeta.lastActivity))
+
+  const [threadSearchOpen, setThreadSearchOpen] = useState(false)
+  const [threadSearchQuery, setThreadSearchQuery] = useState("")
+  const [threadSearchLoading, setThreadSearchLoading] = useState(false)
+  const [threadSearchMsgs, setThreadSearchMsgs] = useState<SessionMessage[] | null>(null)
+  const [threadHits, setThreadHits] = useState<{ idx: number; text: string; score?: number }[]>([])
+  const [threadHitPos, setThreadHitPos] = useState(0)
+  const threadSearchInputRef = useRef<HTMLInputElement>(null)
+
+  async function prepareThreadSearch() {
+    setThreadSearchOpen(true)
+    setThreadSearchLoading(true)
+    try {
+      const r = await fetch(`/api/session/${encodeURIComponent(projectDir)}/${sessionMeta.id}`, { credentials: "include" })
+      if (!r.ok) return
+      const msgs: SessionMessage[] = await r.json()
+      const filtered = msgs.filter(m => m.type !== "file-history-snapshot")
+      await injectFullMessages(msgs)
+      setThreadSearchMsgs(filtered)
+      setThreadSearchQuery("")
+      setThreadHits([])
+      setThreadHitPos(0)
+      setTimeout(() => threadSearchInputRef.current?.focus(), 0)
+    } finally {
+      setThreadSearchLoading(false)
+    }
+  }
+
+  function closeThreadSearch() {
+    setThreadSearchOpen(false)
+    setThreadSearchQuery("")
+    setThreadHits([])
+    setThreadHitPos(0)
+    setThreadSearchMsgs(null)
+  }
+
+  useEffect(() => {
+    if (!threadSearchOpen || !threadSearchMsgs?.length) {
+      setThreadHits([])
+      return
+    }
+    const q = threadSearchQuery.trim()
+    if (!q) {
+      setThreadHits([])
+      setThreadHitPos(0)
+      return
+    }
+    setThreadHits(runThreadSearch(q, threadSearchMsgs))
+    setThreadHitPos(0)
+  }, [threadSearchOpen, threadSearchQuery, threadSearchMsgs])
 
   const [suggestions, setSuggestions] = useState<Record<string, Suggestion>>({})
   useEffect(() => {
@@ -380,6 +503,18 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
     const el = e.currentTarget
     setAutoScroll(el.scrollHeight - el.scrollTop - el.clientHeight < 40)
   }, [])
+
+  useEffect(() => {
+    if (!threadSearchOpen || threadHits.length === 0) return
+    const hit = threadHits[threadHitPos]
+    if (!hit) return
+    bringMessageIndexIntoView(hit.idx)
+    let raf = 0
+    raf = requestAnimationFrame(() => {
+      scrollRef.current?.querySelector(`[data-msg-index="${hit.idx}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" })
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [threadHitPos, threadHits, threadSearchOpen, bringMessageIndexIntoView])
 
   function jumpToBottom() {
     const el = scrollRef.current
@@ -528,6 +663,14 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
         {sessionMeta.gitBranch && <span className="git-branch hide-mobile">⎇ {sessionMeta.gitBranch}</span>}
         {isRecentlyActive(sessionMeta.lastActivity) && <span className="active-badge">● Live</span>}
         <span className="msg-count hide-mobile">{sessionMeta.messageCount} messages</span>
+        <button
+          type="button"
+          className={`user-nav-btn thread-search-toggle ${threadSearchOpen ? "active" : ""}`}
+          onClick={() => (threadSearchOpen ? closeThreadSearch() : void prepareThreadSearch())}
+          title={threadSearchOpen ? "Close thread search" : "Search messages in this thread"}
+        >
+          🔎
+        </button>
         <div className="user-nav">
           <button className="user-nav-btn" onClick={jumpToFirst} title="Jump to first message">⤒</button>
           <button className="user-nav-btn" onClick={() => navUserMsg("prev")} title="Previous user message">↑</button>
@@ -541,6 +684,40 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
           <button className={`mode-toggle-btn ${prettyMode ? "active" : ""}`} onClick={() => setPrettyMode(true)}>Pretty</button>
         </div>
       </div>
+      {threadSearchOpen && (
+        <div className="thread-search-panel">
+          <input
+            ref={threadSearchInputRef}
+            className="thread-search-input"
+            placeholder="Search this thread…"
+            value={threadSearchQuery}
+            onChange={e => setThreadSearchQuery(e.target.value)}
+            aria-label="Search messages in this thread"
+          />
+          {threadSearchLoading ? (
+            <span className="thread-search-meta">Loading full transcript…</span>
+          ) : threadHits.length > 0 ? (
+            <>
+              <span className="thread-search-meta">
+                Match {Math.min(threadHitPos + 1, threadHits.length)} of {threadHits.length}
+              </span>
+              <button type="button" className="thread-search-step" onClick={() => setThreadHitPos(p => (p - 1 + threadHits.length) % threadHits.length)} title="Previous match (↑)">
+                ◀
+              </button>
+              <button type="button" className="thread-search-step" onClick={() => setThreadHitPos(p => (p + 1) % threadHits.length)} title="Next match (↓)">
+                ▶
+              </button>
+            </>
+          ) : threadSearchMsgs && threadSearchQuery.trim() ? (
+            <span className="thread-search-meta muted">No matches</span>
+          ) : threadSearchMsgs ? (
+            <span className="thread-search-meta muted">Type to search.</span>
+          ) : null}
+          <button type="button" className="thread-search-close" onClick={closeThreadSearch} title="Close">
+            ✕
+          </button>
+        </div>
+      )}
       {todos && todos.items.length > 0 && (
         <div className="session-todos">
           {todos.items.map((item, i) => (
@@ -570,7 +747,7 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
           const nextText = nextUserMsg ? (typeof nextUserMsg.message?.content === "string" ? nextUserMsg.message.content : (nextUserMsg.message?.content as {type:string;text?:string}[])?.filter(b => b.type === "text").map(b => b.text).join("") ?? "") : ""
           const chosen = sugg && nextText ? wordOverlap(sugg.text, nextText) > 0.4 : false
           return (
-            <div key={msg.uuid ?? i} className={sugg ? "msg-with-suggestion" : undefined}>
+            <div key={msg.uuid ?? i} className={sugg ? "msg-with-suggestion" : undefined} data-msg-index={startIdx + i}>
               <Block msg={msg} index={startIdx + i} nextMsg={visible[i + 1]} source={sessionMeta.source} />
               {sugg && (
                 <div className="suggestion-pill" title={sugg.text}>
@@ -689,7 +866,7 @@ function platformFilterActiveClass(p: string): string {
 
 // ── Session item ──────────────────────────────────────────────────────────────
 
-function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, subagentsExpanded, onToggleSubagents }: {
+function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, subagentsExpanded, onToggleSubagents, searchHint }: {
   s: SessionMeta
   projectPath: string
   isSelected: boolean
@@ -697,6 +874,8 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
   subagentCount?: number
   subagentsExpanded?: boolean
   onToggleSubagents?: () => void
+  /** When set (e.g. global search), show a second line under the title. */
+  searchHint?: string
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState("")
@@ -739,7 +918,7 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
 
   return (
     <div
-      className={`sidebar-session ${isSelected ? "active" : ""} ${s.isSidechain ? "sidechain" : ""}`}
+      className={`sidebar-session ${isSelected ? "active" : ""} ${s.isSidechain ? "sidechain" : ""} ${searchHint ? "sidebar-session--multiline" : ""}`}
       onClick={onSelect}
       data-tooltip={tooltip}
     >
@@ -762,6 +941,7 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
           {isRecentlyActive(s.lastActivity) && <span className="ss-live">●</span>}
           {s.isSidechain && <span className="ss-subagent-icon" title="Sub-agent session">⤷</span>}
           <span className="ss-name">{displayName}</span>
+          {searchHint && <div className="ss-search-hint" title={searchHint}>{searchHint}</div>}
           {onToggleSubagents && (
             <button className="ss-subagents-toggle" onClick={e => { e.stopPropagation(); onToggleSubagents() }} title={`${subagentsExpanded ? "Hide" : "Show"} ${subagentCount} subagents`}>
               {subagentsExpanded ? "▾" : "▸"}{subagentCount}
@@ -950,6 +1130,32 @@ function SettingsModal({ onClose }: { onClose: () => void }) {
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
 
+function searchFieldLabel(key: string): string {
+  switch (key) {
+    case "title":
+      return "Title"
+    case "firstUser":
+      return "First user"
+    case "allUser":
+      return "User"
+    case "system":
+      return "System"
+    case "assistant":
+      return "Assistant"
+    default:
+      return key
+  }
+}
+
+interface SidebarSearchHit {
+  projectPath: string
+  sessionId: string
+  displayTitle: string
+  bestKey: string
+  snippet: string
+  meta: SessionMeta
+}
+
 function useIsMobile() {
   const [mobile, setMobile] = useState(() => window.matchMedia("(max-width: 640px)").matches)
   useEffect(() => {
@@ -980,6 +1186,48 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
   const [grouped, setGrouped] = useState(() => localStorage.getItem("sidebarGrouped") === "true")
   const [expandedParents, setExpandedParents] = useState<Set<string>>(new Set())
   const [platformFilter, setPlatformFilter] = useState<string>("all")
+
+  const [sidebarSearchQuery, setSidebarSearchQuery] = useState("")
+  const [sidebarSearchLoading, setSidebarSearchLoading] = useState(false)
+  const [sidebarSearchHits, setSidebarSearchHits] = useState<SidebarSearchHit[] | null>(null)
+
+  useEffect(() => {
+    const q = sidebarSearchQuery.trim()
+    if (!q) return
+    let cancelled = false
+    const tid = window.setTimeout(() => {
+      setSidebarSearchLoading(true)
+      fetch(`/api/search/sessions?q=${encodeURIComponent(q)}`, { credentials: "include" })
+        .then(r => (r.ok ? r.json() : { results: [] }))
+        .then((data: { results?: Record<string, unknown>[] }) => {
+          if (cancelled) return
+          const mapped: SidebarSearchHit[] = (data.results ?? []).map(raw => ({
+            projectPath: String(raw.projectPath ?? ""),
+            sessionId: String(raw.sessionId ?? ""),
+            displayTitle: String(raw.displayTitle ?? ""),
+            bestKey: String(raw.bestKey ?? ""),
+            snippet: String(raw.snippet ?? ""),
+            meta: raw.meta as SessionMeta,
+          }))
+          setSidebarSearchHits(mapped)
+        })
+        .catch(() => {
+          if (!cancelled) setSidebarSearchHits([])
+        })
+        .finally(() => {
+          if (!cancelled) setSidebarSearchLoading(false)
+        })
+    }, 300)
+    return () => {
+      cancelled = true
+      clearTimeout(tid)
+    }
+  }, [sidebarSearchQuery])
+
+  const searchBrowseActive = sidebarSearchQuery.trim().length > 0
+  const filteredSearchHits = (sidebarSearchHits ?? []).filter(
+    h => platformFilter === "all" || (h.meta.source ?? "claude") === platformFilter
+  )
 
   function toggleGrouped(val: boolean) {
     setGrouped(val)
@@ -1028,21 +1276,25 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
     onMobileClose()
   }
 
+  const listedSessionCount = projects.reduce((n, p) => n + p.sessions.length, 0)
+  const moreSessionsHidden =
+    totalSessions != null && listMode === "recent" ? Math.max(0, totalSessions - listedSessionCount) : 0
+
   return (
     <>
       {mobileOpen && <div className="sidebar-backdrop" onClick={onMobileClose} />}
     <nav className={`sidebar${mobileOpen ? " mobile-open" : ""}`} style={isMobile ? undefined : { width }}>
-      <div className="sidebar-title">
-        Sessions
-        <div className="sidebar-view-toggle">
-          <button className={`sidebar-view-btn ${!grouped ? "active" : ""}`} onClick={() => toggleGrouped(false)}>Flat</button>
-          <button className={`sidebar-view-btn ${grouped ? "active" : ""}`} onClick={() => toggleGrouped(true)}>Groups</button>
+      <div className="sidebar-top">
+        <div className="sidebar-title">
+          Sessions
+          <div className="sidebar-view-toggle">
+            <button className={`sidebar-view-btn ${!grouped ? "active" : ""}`} onClick={() => toggleGrouped(false)}>Flat</button>
+            <button className={`sidebar-view-btn ${grouped ? "active" : ""}`} onClick={() => toggleGrouped(true)}>Groups</button>
+          </div>
         </div>
-      </div>
-      {(showPlatformFilter || sessionsTruncated) && (
-        <div className="sidebar-platform-filter">
-          {showPlatformFilter &&
-            ["all", ...presentPlatforms].map(p => (
+        {showPlatformFilter && (
+          <div className="sidebar-platform-filter">
+            {["all", ...presentPlatforms].map(p => (
               <button
                 key={p}
                 type="button"
@@ -1052,92 +1304,158 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
                 {p === "all" ? "All" : p === "claude" ? "Claude" : p === "cursor" ? "Cursor" : p === "opencode" ? "OpenCode" : p === "antigravity" ? "Antigravity" : p === "hermes" ? "Hermes" : p}
               </button>
             ))}
-          {sessionsTruncated && totalSessions != null && (
+          </div>
+        )}
+        <div className="sidebar-search-row">
+          <span className="sidebar-search-icon" aria-hidden>🔎</span>
+          <input
+            type="search"
+            className="sidebar-search-input"
+            placeholder="Search threads…"
+            value={sidebarSearchQuery}
+            onChange={e => {
+              const v = e.target.value
+              setSidebarSearchQuery(v)
+              if (!v.trim()) {
+                setSidebarSearchHits(null)
+                setSidebarSearchLoading(false)
+              }
+            }}
+            aria-label="Search all threads"
+          />
+          {sidebarSearchQuery ? (
             <button
               type="button"
-              className="sidebar-platform-btn load-all-sessions-pill"
-              onClick={onLoadAllSessions}
-              title="Load every session into the sidebar (slower)"
+              className="sidebar-search-clear"
+              onClick={() => {
+                setSidebarSearchQuery("")
+                setSidebarSearchHits(null)
+                setSidebarSearchLoading(false)
+              }}
+              title="Clear search"
             >
-              All ({totalSessions})
+              ✕
             </button>
-          )}
+          ) : null}
         </div>
-      )}
-      {grouped ? (
-        projects
-          .map(project => ({
-            ...project,
-            sessions: project.sessions.filter(s => platformFilter === "all" || (s.source ?? "claude") === platformFilter),
-          }))
-          .filter(p => p.sessions.length > 0)
-          .map(project => (
-          <div key={project.path} className="sidebar-project">
-            <div className="sidebar-project-name" title={project.path}>{project.displayName}</div>
-            {project.sessions.map(s => (
-              <SessionItem
-                key={s.id}
-                s={s}
-                projectPath={project.path}
-                isSelected={selected?.session === s.id}
-                onSelect={() => handleSelect(project.path, s.id)}
+      </div>
+      <div className="sidebar-body">
+        <div className="sidebar-sessions-scroll">
+        {searchBrowseActive ? (
+          <>
+            {sidebarSearchLoading && (
+              <div className="sidebar-empty">
+                <span className="sidebar-spinner" />
+                Searching…
+              </div>
+            )}
+            {!sidebarSearchLoading && sidebarSearchHits !== null && filteredSearchHits.length === 0 && (
+              <div className="sidebar-empty">No threads match your search.</div>
+            )}
+            {!sidebarSearchLoading &&
+              sidebarSearchHits !== null &&
+              filteredSearchHits.map(hit => (
+                <SessionItem
+                  key={`${hit.projectPath}/${hit.sessionId}`}
+                  s={{ ...hit.meta, id: hit.meta.id ?? hit.sessionId }}
+                  projectPath={hit.projectPath}
+                  isSelected={selected?.session === hit.sessionId && selected?.project === hit.projectPath}
+                  onSelect={() => handleSelect(hit.projectPath, hit.sessionId)}
+                  searchHint={[searchFieldLabel(hit.bestKey), hit.snippet].filter(Boolean).join(" · ") || undefined}
+                />
+              ))}
+          </>
+        ) : grouped ? (
+          projects
+            .map(project => ({
+              ...project,
+              sessions: project.sessions.filter(s => platformFilter === "all" || (s.source ?? "claude") === platformFilter),
+            }))
+            .filter(p => p.sessions.length > 0)
+            .map(project => (
+            <div key={project.path} className="sidebar-project">
+              <div className="sidebar-project-name" title={project.path}>{project.displayName}</div>
+              {project.sessions.map(s => (
+                <SessionItem
+                  key={s.id}
+                  s={s}
+                  projectPath={project.path}
+                  isSelected={selected?.session === s.id}
+                  onSelect={() => handleSelect(project.path, s.id)}
 
+                />
+              ))}
+            </div>
+          ))
+        ) : (
+          <>
+            {topLevel.map(({ s, projectPath }) => {
+              const children = subagentsByParent.get(s.id) ?? []
+              const expanded = expandedParents.has(s.id)
+              return (
+                <div key={`${projectPath}/${s.id}`}>
+                  <SessionItem
+                    s={s}
+                    projectPath={projectPath}
+                    isSelected={selected?.session === s.id}
+                    onSelect={() => handleSelect(projectPath, s.id)}
+
+                    subagentCount={children.length}
+                    subagentsExpanded={expanded}
+                    onToggleSubagents={children.length > 0 ? () => toggleParent(s.id) : undefined}
+                  />
+                  {expanded && children.map(({ s: cs, projectPath: cp }) => (
+                    <SessionItem
+                      key={`${cp}/${cs.id}`}
+                      s={cs}
+                      projectPath={cp}
+                      isSelected={selected?.session === cs.id}
+                      onSelect={() => handleSelect(cp, cs.id)}
+
+                    />
+                  ))}
+                </div>
+              )
+            })}
+            {orphans.map(({ s, projectPath }) => (
+              <SessionItem
+                key={`${projectPath}/${s.id}`}
+                s={s}
+                projectPath={projectPath}
+                isSelected={selected?.session === s.id}
+                onSelect={() => handleSelect(projectPath, s.id)}
               />
             ))}
+          </>
+        )}
+        {projectsLoading && projects.length === 0 && !searchBrowseActive && (
+          <div className="sidebar-empty">
+            <span className="sidebar-spinner" />
+            {sessionsTruncated || listMode === "recent"
+              ? "Loading recent sessions…"
+              : totalSessions != null
+                ? `Loading ${totalSessions} sessions…`
+                : "Loading…"}
           </div>
-        ))
-      ) : (
-        <>
-          {topLevel.map(({ s, projectPath }) => {
-            const children = subagentsByParent.get(s.id) ?? []
-            const expanded = expandedParents.has(s.id)
-            return (
-              <div key={`${projectPath}/${s.id}`}>
-                <SessionItem
-                  s={s}
-                  projectPath={projectPath}
-                  isSelected={selected?.session === s.id}
-                  onSelect={() => handleSelect(projectPath, s.id)}
-  
-                  subagentCount={children.length}
-                  subagentsExpanded={expanded}
-                  onToggleSubagents={children.length > 0 ? () => toggleParent(s.id) : undefined}
-                />
-                {expanded && children.map(({ s: cs, projectPath: cp }) => (
-                  <SessionItem
-                    key={`${cp}/${cs.id}`}
-                    s={cs}
-                    projectPath={cp}
-                    isSelected={selected?.session === cs.id}
-                    onSelect={() => handleSelect(cp, cs.id)}
-    
-                  />
-                ))}
-              </div>
-            )
-          })}
-          {orphans.map(({ s, projectPath }) => (
-            <SessionItem
-              key={`${projectPath}/${s.id}`}
-              s={s}
-              projectPath={projectPath}
-              isSelected={selected?.session === s.id}
-              onSelect={() => handleSelect(projectPath, s.id)}
-            />
-          ))}
-        </>
-      )}
-      {projectsLoading && projects.length === 0 && (
-        <div className="sidebar-empty">
-          <span className="sidebar-spinner" />
-          {sessionsTruncated || listMode === "recent"
-            ? "Loading recent sessions…"
-            : totalSessions != null
-              ? `Loading ${totalSessions} sessions…`
-              : "Loading…"}
+        )}
+        {!projectsLoading && projects.length === 0 && !searchBrowseActive && <div className="sidebar-empty">No sessions found</div>}
         </div>
-      )}
-      {!projectsLoading && projects.length === 0 && <div className="sidebar-empty">No sessions found</div>}
+        {sessionsTruncated && totalSessions != null && moreSessionsHidden > 0 && !searchBrowseActive && (
+          <div className="sidebar-load-more">
+            <button
+              type="button"
+              className="sidebar-load-more-btn"
+              onClick={onLoadAllSessions}
+              title="Load every session into the sidebar (slower for very large libraries)"
+            >
+              <span className="sidebar-load-more-label">Load older sessions</span>
+              <span className="sidebar-load-more-meta">
+                {moreSessionsHidden} more of {totalSessions} total
+              </span>
+            </button>
+          </div>
+        )}
+      </div>
       <div className="sidebar-resize-handle" onPointerDown={onDragStart} />
     </nav>
     </>
@@ -1156,112 +1474,6 @@ function parseUrlSession(): { project: string; session: string } | null {
   const slash = s.lastIndexOf("/")
   if (slash < 1) return null
   return { project: decodeURIComponent(s.slice(0, slash)), session: s.slice(slash + 1) }
-}
-
-// ── Nanoclaw floating chat ────────────────────────────────────────────────────
-
-const NANOCLAW_WS = "ws://localhost:3000"
-
-function NanoclawChat() {
-  const [open, setOpen] = useState(false)
-  const [input, setInput] = useState("")
-  const [messages, setMessages] = useState<{ role: "user" | "assistant" | "status"; text: string }[]>([])
-  const [connected, setConnected] = useState(false)
-  const [typing, setTyping] = useState(false)
-  const ws = useRef<WebSocket | null>(null)
-  const msgCounter = useRef(0)
-  const bottomRef = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLTextAreaElement>(null)
-
-  useEffect(() => {
-    function connect() {
-      const sock = new WebSocket(NANOCLAW_WS)
-      ws.current = sock
-      sock.onopen = () => setConnected(true)
-      sock.onclose = () => {
-        setConnected(false)
-        setTimeout(connect, 4000)
-      }
-      sock.onerror = () => sock.close()
-      sock.onmessage = (e) => {
-        try {
-          const data = JSON.parse(e.data)
-          if (data.type === "typing") {
-            setTyping(!!data.value)
-          } else if (data.type === "message" && data.text) {
-            setTyping(false)
-            setMessages(prev => [...prev, { role: "assistant", text: data.text }])
-          }
-        } catch { /* ignore */ }
-      }
-    }
-    connect()
-    return () => { ws.current?.close(); ws.current = null }
-  }, [])
-
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [messages, typing])
-
-  function send() {
-    const text = input.trim()
-    if (!text || !ws.current || ws.current.readyState !== WebSocket.OPEN) return
-    setMessages(prev => [...prev, { role: "user", text }])
-    ws.current.send(JSON.stringify({ type: "message", text, id: `csv-${++msgCounter.current}` }))
-    setInput("")
-  }
-
-  function onKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send() }
-  }
-
-  if (!open) {
-    return (
-      <button
-        className={`nc-fab ${connected ? "nc-fab--on" : ""}`}
-        onClick={() => { setOpen(true); setTimeout(() => inputRef.current?.focus(), 50) }}
-        title="Chat with Nanoclaw"
-      >
-        ⚡
-      </button>
-    )
-  }
-
-  return (
-    <div className="nc-panel">
-      <div className="nc-header">
-        <span className={`nc-dot ${connected ? "nc-dot--on" : ""}`} />
-        <span className="nc-title">Nanoclaw</span>
-        <button className="nc-close" onClick={() => setOpen(false)}>✕</button>
-      </div>
-      <div className="nc-messages">
-        {messages.length === 0 && (
-          <div className="nc-empty">Send a message to Nanoclaw</div>
-        )}
-        {messages.map((m, i) => (
-          <div key={i} className={`nc-msg nc-msg--${m.role}`}>{m.text}</div>
-        ))}
-        {typing && <div className="nc-msg nc-msg--typing">…</div>}
-        <div ref={bottomRef} />
-      </div>
-      <div className="nc-input-row">
-        <textarea
-          ref={inputRef}
-          className="nc-input"
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder="Message…"
-          rows={1}
-        />
-        <button
-          className="nc-send"
-          onClick={send}
-          disabled={!connected || !input.trim()}
-        >↑</button>
-      </div>
-    </div>
-  )
 }
 
 export default function App() {
@@ -1328,7 +1540,7 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <button className="topbar-menu-btn" onClick={() => setMobileSidebarOpen(o => !o)} title="Sessions">☰</button>
-        <span className="topbar-title">Claude Session Viewer</span>
+        <span className="topbar-title">Agent Session Viewer</span>
         <div className="topbar-tabs">
           <button className={`topbar-tab ${activeTab === "sessions" ? "active" : ""}`} onClick={() => setActiveTab("sessions")}>Sessions</button>
           {capabilities.debugStream && <button className={`topbar-tab ${activeTab === "debug" ? "active" : ""}`} onClick={() => setActiveTab("debug")}>Debug</button>}
@@ -1371,7 +1583,6 @@ export default function App() {
         )}
         {activeTab === "debug" && <DebugTab />}
       </div>
-      <NanoclawChat />
     </div>
   )
 }

@@ -32,7 +32,7 @@ export default function PinGate({ onAuth }: { onAuth: () => void }) {
   return (
     <div className="pin-gate">
       <div className="pin-card">
-        <div className="pin-title">Claude Session Viewer</div>
+        <div className="pin-title">Agent Session Viewer</div>
         <div className="pin-subtitle">Enter your PIN to continue</div>
         <form onSubmit={submit} className="pin-form">
           <input
