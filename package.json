@@ -1,5 +1,5 @@
 {
-  "name": "claude-session-viewer",
+  "name": "agent-session-viewer",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -14,9 +14,10 @@
     "daemon": "node daemon/watch.mjs",
     "daemon:launchd-install": "bash scripts/install-launchd-daemon.sh",
     "daemon:launchd-uninstall": "bash scripts/uninstall-launchd-daemon.sh",
-    "daemon:launchd-restart": "bash -c 'launchctl kickstart -k gui/$(id -u)/com.dhruvanand.claude-session-viewer.daemon'"
+    "daemon:launchd-restart": "bash -c 'launchctl kickstart -k gui/$(id -u)/com.dhruvanand.agent-session-viewer.daemon'"
   },
   "dependencies": {
+    "fuse.js": "^7.3.0",
     "marked": "^17.0.5",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
