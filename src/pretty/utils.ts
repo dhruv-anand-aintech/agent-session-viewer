@@ -40,13 +40,31 @@ export type ToolCategory =
   | "web-search" | "web-fetch" | "agent" | "tool-search"
   | "mcp-generic" | "unknown"
 
+const LOWER = (s: string) => s.toLowerCase()
+
 export function classifyTool(name: string): ToolCategory {
-  if (name === "Bash" || name === "exec_command" || name === "write_stdin") return "bash"
-  if (name === "Read" || name === "read_mcp_resource" || name === "view_image") return "read"
-  if (name === "Write") return "write"
-  if (name === "Edit" || name === "apply_patch") return "edit"
-  if (name === "Glob") return "glob"
-  if (name === "Grep") return "grep"
+  const n = name.trim()
+  const l = LOWER(n)
+  if (
+    n === "Bash" ||
+    n === "Shell" ||
+    l === "run_terminal_cmd" ||
+    l === "exec_command" ||
+    l === "write_stdin"
+  )
+    return "bash"
+  if (n === "Read" || l === "read_file" || n === "read_mcp_resource" || n === "view_image")
+    return "read"
+  if (n === "Write" || l === "write") return "write"
+  if (
+    n === "Edit" ||
+    n === "apply_patch" ||
+    l === "str_replace" ||
+    l === "search_replace"
+  )
+    return "edit"
+  if (n === "Glob" || l === "glob_file_search") return "glob"
+  if (n === "Grep" || l === "codebase_search" || l === "grep") return "grep"
   if (name === "WebSearch") return "web-search"
   if (name === "WebFetch" || name === "web.run") return "web-fetch"
   if (name === "Agent" || name === "spawn_agent" || name === "send_input" || name === "multi_tool_use.parallel") return "agent"

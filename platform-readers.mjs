@@ -202,10 +202,40 @@ function cursorBubblesToMsgs(composerId, rows, composerRow) {
   for (let si = 0; si < sorted.length; si++) {
     const msg = sorted[si]
     const role = msg.type === 2 ? "assistant" : "user"
-    let content = cursorBubbleText(msg)
-    if (!content.trim() && role === "user") continue
-    if (!content.trim() && role === "assistant") content = "_(empty Cursor bubble)_"
     const bubbleId = msg.bid ?? `${composerId}-${converted.length}`
+
+    const rawBubble = String(msg.text ?? "").trim()
+    const fromLex = extractLexicalPlainText(msg.richText)
+    const hasBubbleText = Boolean(rawBubble || fromLex)
+    /** @type {string | unknown[]} */
+    let content
+
+    if (!hasBubbleText && msg.toolName && msg.toolRawArgs) {
+      try {
+        const input = JSON.parse(msg.toolRawArgs)
+        const toolId = `cursor-${composerId}-${bubbleId}`
+        content = [{ type: "tool_use", id: toolId, name: msg.toolName, input }]
+        const preview = msg.toolResultPreview
+        if (preview)
+          content.push({
+            type: "tool_result",
+            tool_use_id: toolId,
+            content:
+              typeof preview === "string" ? preview : preview != null ? JSON.stringify(preview) : "",
+          })
+      } catch {
+        content = cursorBubbleText(msg)
+      }
+    } else {
+      content = cursorBubbleText(msg)
+    }
+
+    const emptyContent =
+      typeof content === "string"
+        ? !content.trim()
+        : !Array.isArray(content) || content.length === 0
+    if (emptyContent && role === "user") continue
+    if (emptyContent && role === "assistant") content = "_(empty Cursor bubble)_"
     converted.push({
       uuid: `cursor-${composerId}-${bubbleId}`,
       parentUuid: null,
@@ -418,6 +448,97 @@ function extractCursorAgentMessageText(content) {
   return parts.join("\n\n").trim()
 }
 
+/** Plain user-visible text only (sidebar preview / title), no tool payloads. */
+function cursorAgentFlattenUserText(content) {
+  if (content == null) return ""
+  if (typeof content === "string") return content.trim()
+  if (!Array.isArray(content)) return ""
+  const parts = []
+  for (const block of content) {
+    if (block?.type === "text" && typeof block.text === "string") parts.push(block.text)
+  }
+  return parts.join("\n").trim()
+}
+
+/**
+ * Preserve structured blocks for Pretty mode (parallel to Claude/OpenCode ingestion).
+ * Returns a string only when transcript uses plain string messages.
+ */
+function cursorAgentBlocksFromMessageContent(raw, lineIdx) {
+  const line =
+    typeof lineIdx === "number" && Number.isFinite(lineIdx) ? Math.max(0, Math.floor(lineIdx)) : 0
+  if (raw == null) return ""
+  if (typeof raw === "string") return raw.trim()
+  if (!Array.isArray(raw)) return ""
+  const out = []
+  for (const block of raw) {
+    if (!block || typeof block !== "object") continue
+    const t = block.type
+    if (t === "text" && typeof block.text === "string") out.push({ type: "text", text: block.text })
+    else if (t === "thinking" || t === "reasoning") {
+      const th = typeof block.thinking === "string"
+        ? block.thinking
+        : typeof block.text === "string"
+          ? block.text
+          : typeof block.reasoning === "string"
+            ? block.reasoning
+            : ""
+      if (th) out.push({ type: "thinking", thinking: th })
+    } else if (t === "tool_use") {
+      const id =
+        block.id ??
+        block.tool_use_id ??
+        block.call_id ??
+        `cursor-agent-tool-${line}-${out.length}`
+      let input = block.input ?? {}
+      if (input && typeof input === "string") {
+        try {
+          input = JSON.parse(input)
+        } catch {
+          input = { _raw: block.input }
+        }
+      }
+      out.push({
+        type: "tool_use",
+        id,
+        name: block.name ?? "tool",
+        input,
+      })
+    } else if (t === "tool_result") {
+      const toolUseId =
+        block.tool_use_id ?? block.toolUseId ?? block.call_id ?? block.callId ?? block.id
+      out.push({
+        type: "tool_result",
+        tool_use_id: toolUseId ?? "unknown-tool",
+        content: block.content,
+      })
+    } else if (t === "image") {
+      out.push(block)
+    }
+  }
+  if (out.length) return out
+  if (Array.isArray(raw) && raw.length)
+    return extractCursorAgentMessageText(raw)
+  return ""
+}
+
+function cursorAgentRowHasAssistantBody(content) {
+  if (typeof content === "string") return Boolean(content.trim())
+  if (!Array.isArray(content)) return false
+  return content.some(
+    b =>
+      (b?.type === "text" && b.text?.trim()) ||
+      b?.type === "thinking" ||
+      b?.type === "tool_use",
+  )
+}
+
+function cursorAgentRowHasUserSignal(content) {
+  if (typeof content === "string") return Boolean(content.trim())
+  if (!Array.isArray(content)) return false
+  return content.some(b => (b?.type === "text" && b.text?.trim()) || b?.type === "tool_result")
+}
+
 function parseCursorAgentJsonlLines(filePath) {
   let raw
   try {
@@ -425,7 +546,7 @@ function parseCursorAgentJsonlLines(filePath) {
   } catch {
     return null
   }
-  const lines = raw.split("\n").filter(Boolean)
+  const lines = raw.split(/\n/).filter(Boolean)
   const converted = []
   for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
     let row
@@ -435,14 +556,29 @@ function parseCursorAgentJsonlLines(filePath) {
       continue
     }
     const role = row.role === "assistant" ? "assistant" : "user"
-    let text = extractCursorAgentMessageText(row.message?.content)
-    if (!text && role === "user") continue
-    if (!text && role === "assistant") text = "_(empty agent message)_"
+    const structured = cursorAgentBlocksFromMessageContent(row.message?.content, lineIdx)
+    /** @type {string | unknown[]} */
+    let content =
+      typeof structured === "string"
+        ? structured
+        : Array.isArray(structured) && structured.length
+          ? structured
+          : cursorAgentFlattenUserText(row.message?.content)
+
+    const flatCheck =
+      typeof content === "string"
+        ? content.trim()
+        : cursorAgentRowHasAssistantBody(content) || cursorAgentRowHasUserSignal(content)
+
+    if (!flatCheck && role === "user") continue
+    if (!flatCheck && role === "assistant") {
+      content = "_(empty agent message)_"
+    }
     const tsMs = Date.parse(row.timestamp) || null
     converted.push({
       lineIdx,
       role,
-      text,
+      content,
       tsMs,
     })
   }
@@ -555,11 +691,12 @@ function buildCursorAgentSessionMetaAndMsgs(filePath, slug, sessionId, parsed, f
       sessionId,
       timestamp: msToIso(perLineMs[i]),
       isSidechain: false,
-      message: { role, content: row.text },
+      message: { role, content: row.content },
     })
   }
 
-  const firstUserText = converted.find(r => r.role === "user")?.text
+  const firstUserRow = converted.find(r => r.role === "user")
+  const firstUserText = firstUserRow ? cursorAgentFlattenUserText(firstUserRow.content) : ""
   const firstName = firstUserText
     ? firstUserText.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, 80)
     : null
