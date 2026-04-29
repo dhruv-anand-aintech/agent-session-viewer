@@ -4,6 +4,7 @@ import MessageBlock from "./MessageBlock"
 import PrettyMessageBlock, { charCountMsg } from "./pretty/PrettyMessageBlock"
 import { idbPut, idbGet } from "./idb"
 import { runThreadSearch } from "./threadSearch"
+import { highlightTermsInPlainText } from "./searchHighlight"
 import "./App.css"
 
 interface SessionMeta {
@@ -496,7 +497,10 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
       setThreadHitPos(0)
       return
     }
-    setThreadHits(runThreadSearch(q, threadSearchMsgs))
+    // Sort by message index descending so first hit is the newest (bottom → top navigation)
+    const raw = runThreadSearch(q, threadSearchMsgs)
+    raw.sort((a, b) => b.idx - a.idx)
+    setThreadHits(raw)
     setThreadHitPos(0)
   }, [threadSearchOpen, threadSearchQuery, threadSearchMsgs])
 
@@ -737,6 +741,14 @@ const bottomRef = useRef<HTMLDivElement>(null)
             placeholder="Search this thread…"
             value={threadSearchQuery}
             onChange={e => setThreadSearchQuery(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === "Enter" && threadHits.length > 0) {
+                e.preventDefault()
+                setThreadHitPos(p => (p + 1) % threadHits.length)
+              } else if (e.key === "Escape") {
+                closeThreadSearch()
+              }
+            }}
             aria-label="Search messages in this thread"
           />
           {threadSearchLoading ? (
@@ -746,10 +758,10 @@ const bottomRef = useRef<HTMLDivElement>(null)
               <span className="thread-search-meta">
                 Match {Math.min(threadHitPos + 1, threadHits.length)} of {threadHits.length}
               </span>
-              <button type="button" className="thread-search-step" onClick={() => setThreadHitPos(p => (p - 1 + threadHits.length) % threadHits.length)} title="Previous match (↑)">
+              <button type="button" className="thread-search-step" onClick={() => setThreadHitPos(p => (p - 1 + threadHits.length) % threadHits.length)} title="Newer match (more recent in thread)">
                 ◀
               </button>
-              <button type="button" className="thread-search-step" onClick={() => setThreadHitPos(p => (p + 1) % threadHits.length)} title="Next match (↓)">
+              <button type="button" className="thread-search-step" onClick={() => setThreadHitPos(p => (p + 1) % threadHits.length)} title="Older match (earlier in thread) — same as Enter">
                 ▶
               </button>
             </>
@@ -782,8 +794,14 @@ const bottomRef = useRef<HTMLDivElement>(null)
           const nextUserMsg = sugg ? visible.slice(i + 1).find(m => m.type === "user") : undefined
           const nextText = nextUserMsg ? (typeof nextUserMsg.message?.content === "string" ? nextUserMsg.message.content : (nextUserMsg.message?.content as {type:string;text?:string}[])?.filter(b => b.type === "text").map(b => b.text).join("") ?? "") : ""
           const chosen = sugg && nextText ? wordOverlap(sugg.text, nextText) > 0.4 : false
+          const activeSearchIdx = threadSearchOpen && threadHits.length > 0 ? threadHits[threadHitPos]?.idx : undefined
+          const isThreadSearchHit = activeSearchIdx === startIdx + i
           return (
-            <div key={msg.uuid ?? i} className={sugg ? "msg-with-suggestion" : undefined} data-msg-index={startIdx + i}>
+            <div
+              key={msg.uuid ?? i}
+              className={[sugg ? "msg-with-suggestion" : "", isThreadSearchHit ? "msg-search-hit-wrap" : ""].filter(Boolean).join(" ") || undefined}
+              data-msg-index={startIdx + i}
+            >
               <Block msg={msg} index={startIdx + i} nextMsg={visible[i + 1]} source={sessionMeta.source} />
               {sugg && (
                 <div className="suggestion-pill" title={sugg.text}>
@@ -902,7 +920,14 @@ function platformFilterActiveClass(p: string): string {
 
 // ── Session item ──────────────────────────────────────────────────────────────
 
-function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, subagentsExpanded, onToggleSubagents, searchHint }: {
+interface SessionSearchMatch {
+  /** e.g. "User", "Title" — shown next to snippet */
+  fieldLabel?: string
+  snippet: string
+  highlightQuery: string
+}
+
+function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, subagentsExpanded, onToggleSubagents, searchHint, searchMatch, highlightTitleQuery }: {
   s: SessionMeta
   projectPath: string
   isSelected: boolean
@@ -910,13 +935,20 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
   subagentCount?: number
   subagentsExpanded?: boolean
   onToggleSubagents?: () => void
-  /** When set (e.g. global search), show a second line under the title. */
+  /** Plain second line under the title (no highlighting). */
   searchHint?: string
+  /** Structured search snippet with substring highlighting (not used for pure title matches — see highlightTitleQuery). */
+  searchMatch?: SessionSearchMatch
+  /** When set, highlight this query inside the primary title row instead of a separate "Title · …" line. */
+  highlightTitleQuery?: string
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState("")
   const [customName, setCustomName] = useState<string | undefined>(s.customName)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  const titleQuery = (highlightTitleQuery ?? "").trim()
+  const showTitleHits = titleQuery.length > 0
 
   const displayName = customName || s.firstName || s.id.slice(0, 8)
   function startEdit(e: React.MouseEvent) {
@@ -946,7 +978,7 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
 
   return (
     <div
-      className={`sidebar-session ${isSelected ? "active" : ""} ${s.isSidechain ? "sidechain" : ""} ${searchHint ? "sidebar-session--multiline" : ""}`}
+      className={`sidebar-session ${isSelected ? "active" : ""} ${s.isSidechain ? "sidechain" : ""} ${searchHint || searchMatch ? "sidebar-session--multiline" : ""}`}
       onClick={onSelect}
     >
       {editing ? (
@@ -967,8 +999,35 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
           </span>
           {isRecentlyActive(s.lastActivity) && <span className="ss-live">●</span>}
           {s.isSidechain && <span className="ss-subagent-icon" title="Sub-agent session">⤷</span>}
-          <span className="ss-name">{displayName}</span>
-          {searchHint && <div className="ss-search-hint" title={searchHint}>{searchHint}</div>}
+          <span className="ss-name">
+            {showTitleHits ? highlightTermsInPlainText(displayName, titleQuery) : displayName}
+          </span>
+          {(searchMatch || searchHint) && (
+            <div
+              className="ss-search-hint"
+              title={
+                searchMatch
+                  ? [searchMatch.fieldLabel, searchMatch.snippet].filter(Boolean).join(" · ")
+                  : searchHint
+              }
+            >
+              {searchMatch ? (
+                <>
+                  {searchMatch.fieldLabel && (
+                    <span className="ss-search-hint-field">{searchMatch.fieldLabel}</span>
+                  )}
+                  {searchMatch.fieldLabel && searchMatch.snippet.trim() ? " · " : null}
+                  {searchMatch.snippet.trim() ? (
+                    <span className="ss-search-hint-snippet">
+                      {highlightTermsInPlainText(searchMatch.snippet, searchMatch.highlightQuery)}
+                    </span>
+                  ) : null}
+                </>
+              ) : (
+                searchHint
+              )}
+            </div>
+          )}
           {onToggleSubagents && (
             <button className="ss-subagents-toggle" onClick={e => { e.stopPropagation(); onToggleSubagents() }} title={`${subagentsExpanded ? "Hide" : "Show"} ${subagentCount} subagents`}>
               {subagentsExpanded ? "▾" : "▸"}{subagentCount}
@@ -1290,15 +1349,19 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
               </div>
             )}
             {/* While API search is loading, show instant title matches so nothing disappears */}
-            {sidebarSearchLoading && titleMatchSessions.map(({ s, projectPath }) => (
+            {sidebarSearchLoading && titleMatchSessions.map(({ s, projectPath }) => {
+              const q = sidebarSearchQuery.trim()
+              return (
               <SessionItem
                 key={s.id}
                 s={s}
                 projectPath={projectPath}
                 isSelected={selected?.session === s.id && selected?.project === projectPath}
                 onSelect={() => handleSelect(projectPath, s.id)}
+                highlightTitleQuery={q}
               />
-            ))}
+              )
+            })}
             {!sidebarSearchLoading && sidebarSearchHits !== null && filteredSearchHits.length === 0 && titleMatchSessions.length === 0 && (
               <div className="sidebar-empty">No threads match your search.</div>
             )}
@@ -1311,19 +1374,32 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
                   projectPath={hit.projectPath}
                   isSelected={selected?.session === hit.sessionId && selected?.project === hit.projectPath}
                   onSelect={() => handleSelect(hit.projectPath, hit.sessionId)}
-                  searchHint={[searchFieldLabel(hit.bestKey), hit.snippet].filter(Boolean).join(" · ") || undefined}
+                  highlightTitleQuery={hit.bestKey === "title" ? sidebarSearchQuery.trim() : undefined}
+                  searchMatch={
+                    hit.bestKey === "title"
+                      ? undefined
+                      : {
+                          fieldLabel: searchFieldLabel(hit.bestKey),
+                          snippet: hit.snippet,
+                          highlightQuery: sidebarSearchQuery.trim(),
+                        }
+                  }
                 />
               ))}
             {/* API returned no hits but title matches exist — show them */}
-            {!sidebarSearchLoading && (sidebarSearchHits === null || filteredSearchHits.length === 0) && titleMatchSessions.map(({ s, projectPath }) => (
+            {!sidebarSearchLoading && (sidebarSearchHits === null || filteredSearchHits.length === 0) && titleMatchSessions.map(({ s, projectPath }) => {
+              const q = sidebarSearchQuery.trim()
+              return (
               <SessionItem
                 key={s.id}
                 s={s}
                 projectPath={projectPath}
                 isSelected={selected?.session === s.id && selected?.project === projectPath}
                 onSelect={() => handleSelect(projectPath, s.id)}
+                highlightTitleQuery={q}
               />
-            ))}
+              )
+            })}
           </>
         ) : grouped ? (
           projects

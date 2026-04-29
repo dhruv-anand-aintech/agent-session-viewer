@@ -38,6 +38,7 @@ import {
   normProjectDir,
 } from "./platform-readers.mjs"
 import { buildSidebarSearchDoc, runSidebarSessionSearch } from "./lib/session-search-core.mjs"
+import { indexSession, removeSession, getSearchRows } from "./lib/search-index.mjs"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -207,6 +208,9 @@ async function loadProjectsFull() {
     }
   }
 
+  const { fileBySessKey } = scanClaudeProjectsCheap(names)
+  scheduleClaudeJsonlIndexing(fileBySessKey, names)
+
   const allProjects = [
     ...projects,
     ...loadCodexSessions(),
@@ -318,6 +322,31 @@ function yieldEventLoopTick() {
   return new Promise(r => setImmediate(r))
 }
 
+/** Parse and index every Claude JSONL under `fileBySessKey` (yields so the event loop stays responsive). */
+async function backgroundIndexAllClaudeJsonl(fileBySessKey, names) {
+  let i = 0
+  for (const [sessKey, { fp, stat }] of fileBySessKey) {
+    const sep = sessKey.indexOf("\x1f")
+    if (sep === -1) continue
+    const projectPath = sessKey.slice(0, sep)
+    const sessionId = sessKey.slice(sep + 1)
+    try {
+      const msgs = parseJsonl(fp)
+      const projKey =
+        projectPath.startsWith(CLAUDE_DIR) ? projectPath.slice(CLAUDE_DIR.length + 1) : projectPath
+      const meta = claudeSessionMetaFromMsgs(msgs, sessionId, projKey, names, stat)
+      indexSession(projectPath, sessionId, msgs, meta)
+    } catch { /* ignore bad files */ }
+    if (++i % 20 === 0) await yieldEventLoopTick()
+  }
+}
+
+function scheduleClaudeJsonlIndexing(fileBySessKey, names) {
+  setImmediate(async () => {
+    await backgroundIndexAllClaudeJsonl(fileBySessKey, names)
+  })
+}
+
 /** Progressive recent sidebar: emit trimmed running snapshot after each Claude folder / platform, then hydrate. */
 async function streamRecentSidebarInitial(res, maxSessions) {
   const names = loadConfig().names ?? {}
@@ -374,6 +403,8 @@ async function streamRecentSidebarInitial(res, maxSessions) {
   const allSorted = sortProjectGroups(acc)
   sseWrite(res, "projects", allSorted)
   sseWrite(res, "bootstrap_done", {})
+
+  scheduleClaudeJsonlIndexing(fileBySessKey, names)
 
   setTimeout(async () => {
     const slowPlatformLoads = [
@@ -437,6 +468,7 @@ async function loadProjectsBundleRecent(maxSessions) {
     const bLast = b.sessions[0]?.lastActivity ?? ""
     return String(bLast).localeCompare(String(aLast))
   })
+  scheduleClaudeJsonlIndexing(fileBySessKey, names)
   return { projects: trimmed, total }
 }
 
@@ -539,6 +571,7 @@ function resultsToProjects(results, platformPrefix) {
   for (const { meta, msgs } of results) {
     const { id, projectPath, lastActivity } = meta
     msgCache.set(`${projectPath}/${id}`, msgs)
+    indexSession(projectPath, id, msgs, meta)
     if (!projects.has(projectPath)) {
       const dirPart = projectPath.replace(`${platformPrefix}:`, "")
       projects.set(projectPath, {
@@ -642,11 +675,31 @@ async function broadcastProjects() {
   }
 }
 
-// Watch ~/.claude/projects for file changes
+// Watch ~/.claude/projects for file changes; update search index for changed JSONL files.
+function handleClaudeFileChange(filename) {
+  if (!filename || !filename.endsWith(".jsonl")) { broadcastProjects(); return }
+  // filename is relative: "<projectDir>/<sessionId>.jsonl"
+  const parts = filename.split(/[\\/]/)
+  if (parts.length < 2) { broadcastProjects(); return }
+  const sessionId = parts[parts.length - 1].replace(".jsonl", "")
+  const projectDir = parts.slice(0, -1).join("/")
+  const projectPath = join(CLAUDE_DIR, projectDir)
+  const fp = join(projectPath, `${sessionId}.jsonl`)
+  if (!existsSync(fp)) { removeSession(projectPath, sessionId); broadcastProjects(); return }
+  try {
+    const stat = statSync(fp)
+    const names = loadConfig().names ?? {}
+    const projectKey = projectDir
+    const msgs = parseJsonl(fp)
+    const meta = claudeSessionMetaFromMsgs(msgs, sessionId, projectKey, names, stat)
+    indexSession(projectPath, sessionId, msgs, meta)
+  } catch { /* ignore */ }
+  broadcastProjects()
+}
+
 try {
-  watch(CLAUDE_DIR, { recursive: true }, () => broadcastProjects())
+  watch(CLAUDE_DIR, { recursive: true }, (_evt, filename) => handleClaudeFileChange(filename))
 } catch {
-  // Fallback to polling if watch fails (e.g., too many files)
   setInterval(broadcastProjects, 3000)
 }
 
@@ -780,27 +833,8 @@ const server = http.createServer(async (req, res) => {
   // GET /api/search/sessions?q= — fuzzy search across all threads (titles, users, system, …)
   if (url.pathname === "/api/search/sessions") {
     const q = url.searchParams.get("q")?.trim() ?? ""
-    if (!q) {
-      json({ results: [] })
-      return
-    }
-    const projects = await loadProjectsFull()
-    const rows = []
-    for (const p of projects) {
-      for (const s of p.sessions) {
-        const msgs = getSessionMessagesAll(p.path, s.id)
-        if (!msgs || !msgs.length) continue
-        const corpus = buildSidebarSearchDoc(msgs, s)
-        const displayTitle = s.customName || s.firstName || s.id.slice(0, 8)
-        rows.push({
-          projectPath: p.path,
-          sessionId: s.id,
-          displayTitle,
-          meta: s,
-          corpus,
-        })
-      }
-    }
+    if (!q) { json({ results: [] }); return }
+    const rows = getSearchRows()
     const results = runSidebarSessionSearch(q, rows)
     json({ results })
     return

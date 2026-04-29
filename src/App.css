@@ -314,6 +314,8 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
 .sidebar-session.active { color: var(--text-100); background: hsla(255,100%,100%,0.07); }
 
 .ss-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; font-size: 13px; line-height: 1.35; }
+.ss-name .search-highlight { vertical-align: baseline; }
+
 .sidebar-session.sidebar-session--multiline {
   flex-wrap: wrap;
   align-items: flex-start;
@@ -332,6 +334,22 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+.ss-search-hint-field {
+  font-weight: 600;
+  color: var(--text-300);
+}
+.ss-search-hint-snippet mark.search-highlight,
+.search-highlight {
+  background: hsla(48, 88%, 48%, 0.38);
+  color: inherit;
+  padding: 0 1px;
+  border-radius: 2px;
+}
+.msg-search-hit-wrap {
+  border-radius: 8px;
+  outline: 2px solid hsla(200, 65%, 52%, 0.55);
+  outline-offset: 2px;
 }
 .ss-live { color: var(--success); font-size: 8px; flex-shrink: 0; }
 .ss-subagent-icon { font-size: 11px; color: hsl(263, 50%, 65%); flex-shrink: 0; }
