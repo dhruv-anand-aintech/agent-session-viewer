@@ -2,7 +2,7 @@
 # Install the session viewer daemon as a user LaunchAgent (launchctl).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LABEL="com.dhruvanand.claude-session-viewer.daemon"
+LABEL="com.dhruvanand.agent-session-viewer.daemon"
 PLIST_SRC="$ROOT/scripts/${LABEL}.plist"
 LA_DIR="$HOME/Library/LaunchAgents"
 LA_PLIST="$LA_DIR/${LABEL}.plist"
@@ -27,6 +27,6 @@ launchctl bootstrap "gui/${UID_NUM}" "$LA_PLIST"
 launchctl enable "gui/${UID_NUM}/${LABEL}"
 
 echo "Installed: $LA_PLIST"
-echo "Logs: $LOG_DIR/claude-session-viewer-daemon.log"
+echo "Logs: $LOG_DIR/agent-session-viewer-daemon.log"
 echo "Restart: launchctl kickstart -k gui/${UID_NUM}/${LABEL}"
 echo "Stop:    launchctl bootout gui/${UID_NUM} $LA_PLIST"
