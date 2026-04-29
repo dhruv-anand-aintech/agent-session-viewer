@@ -1,3 +1,5 @@
+import { buildSidebarSearchDoc, runSidebarSessionSearch } from "../lib/session-search-core.mjs"
+
 export interface Env {
   SESSIONS_KV: KVNamespace
   AUTH_PIN: string
@@ -19,7 +21,7 @@ function corsHeaders(extra: Record<string, string> = {}): Headers {
   return new Headers({
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, PUT, OPTIONS",
-    "Access-Control-Expose-Headers": "X-Total-Sessions",
+    "Access-Control-Expose-Headers": "X-Total-Sessions, X-Message-Total",
     ...extra,
   })
 }
@@ -253,6 +255,7 @@ export default {
         writer.write(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
       ;(async () => {
         try {
+          let didBootstrap = false
           const push = async () => {
             const { projects, total } = await getProjects(env)
             const payload =
@@ -260,6 +263,11 @@ export default {
                 ? trimProjectsByRecentSessionCount(projects, maxSessions)
                 : projects
             await send("projects", payload)
+            if (!didBootstrap) {
+              await send("projects_meta", { total })
+              await send("bootstrap_done", {})
+              didBootstrap = true
+            }
           }
           await push()
           const deadline = Date.now() + 88_000
@@ -339,13 +347,58 @@ export default {
       return new Response(readable, { headers: corsHeaders({ "Content-Type": "text/event-stream", "Cache-Control": "no-cache" }) })
     }
 
+    // Fuzzy search across all synced sessions (Fusion of title, first user, all users, system, assistant)
+    if (url.pathname === "/api/search/sessions" && request.method === "GET") {
+      const q = url.searchParams.get("q")?.trim() ?? ""
+      if (!q) return Response.json({ results: [] }, { headers: corsHeaders() })
+      const { projects } = await getProjects(env)
+      type Row = {
+        projectPath: string
+        sessionId: string
+        displayTitle: string
+        meta: Record<string, unknown>
+        corpus: {
+          title: string
+          firstUser: string
+          allUser: string
+          system: string
+          assistant: string
+        }
+      }
+      const rows: Row[] = []
+      const flat = projects.flatMap(p => p.sessions.map(s => ({ projectPath: p.path, s })))
+      const BATCH = 24
+      for (let i = 0; i < flat.length; i += BATCH) {
+        const chunk = flat.slice(i, i + BATCH)
+        const part = await Promise.all(
+          chunk.map(async ({ projectPath, s }) => {
+            const meta = s as Record<string, unknown>
+            const sessionId = String(meta.id ?? "")
+            if (!sessionId) return null
+            const msgs = (await env.SESSIONS_KV.get(`msgs/${projectPath}/${sessionId}`, "json")) as unknown[] | null
+            if (!msgs?.length) return null
+            const corpus = buildSidebarSearchDoc(msgs, meta)
+            const displayTitle = String(meta.customName ?? meta.firstName ?? sessionId.slice(0, 8))
+            return { projectPath, sessionId, displayTitle, meta, corpus }
+          })
+        )
+        for (const item of part) {
+          if (item != null) rows.push(item)
+        }
+      }
+      const results = runSidebarSessionSearch(q, rows)
+      return Response.json({ results }, { headers: corsHeaders() })
+    }
+
     const sessionMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/([^/]+)$/)
     if (sessionMatch) {
       const key = `msgs/${decodeURIComponent(sessionMatch[1])}/${sessionMatch[2]}`
       const data = await env.SESSIONS_KV.get(key, "json")
-      return data
-        ? Response.json(data, { headers: corsHeaders() })
-        : new Response("Not Found", { status: 404, headers: corsHeaders() })
+      if (!data) {
+        return new Response("Not Found", { status: 404, headers: corsHeaders() })
+      }
+      const list = data as unknown[]
+      return Response.json(data, { headers: corsHeaders({ "X-Message-Total": String(list.length) }) })
     }
 
     // All other routes: let Cloudflare assets handle it (set by `assets = { directory }`)
