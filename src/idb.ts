@@ -1,5 +1,5 @@
 // Minimal IndexedDB wrapper for session message cache
-const DB_NAME = "session-viewer-cache"
+const DB_NAME = "agent-session-viewer-cache"
 const DB_VERSION = 1
 const STORE = "sessions"
 
