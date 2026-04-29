@@ -91,20 +91,44 @@ function FileReadCard({ input, result }: { input: Record<string, unknown>; resul
   )
 }
 
+function tryFormatMaybeJson(s: string): string {
+  const t = s.trim()
+  if (!t || (t[0] !== "{" && t[0] !== "[")) return s
+  try {
+    return JSON.stringify(JSON.parse(t), null, 2)
+  } catch {
+    return s
+  }
+}
+
 function FileWriteCard({ input }: { input: Record<string, unknown> }) {
   const [open, setOpen] = useState(false)
-  const path = String(input.file_path ?? input.path ?? "")
-  const filename = path.split("/").pop() ?? path
-  const content = String(input.content ?? "")
+  const pathsArr = Array.isArray(input.paths)
+    ? (input.paths as unknown[]).filter((p): p is string => typeof p === "string")
+    : []
+  const primaryPath = String(input.file_path ?? input.path ?? pathsArr[0] ?? "").trim() || "(no path)"
+  const filename = primaryPath.includes("/") ? primaryPath.split("/").pop() ?? primaryPath : primaryPath
+  const dirPart =
+    primaryPath.length > filename.length
+      ? primaryPath.slice(0, Math.max(0, primaryPath.length - filename.length))
+      : ""
+  const extraPathCount = pathsArr.length > 1 ? pathsArr.length - 1 : 0
+  const rawContent = String(input.contents ?? input.content ?? "")
+  const displayContent = tryFormatMaybeJson(rawContent)
   return (
     <div className="pp-tool-card pp-file-write">
       <div className="pp-tool-header" onClick={() => setOpen(!open)}>
         <span className="pp-tool-icon">✍️</span>
         <span className="pp-file-name">{filename}</span>
-        <span className="pp-file-path-muted">{path.replace(filename, "")}</span>
+        {extraPathCount > 0 && (
+          <span className="pp-write-more-paths" title={pathsArr.join("\n")}>
+            +{extraPathCount} file{extraPathCount === 1 ? "" : "s"}
+          </span>
+        )}
+        <span className="pp-file-path-muted">{dirPart}</span>
         <span className="pp-fold-arrow">{open ? "▾" : "▸"}</span>
       </div>
-      {open && <pre className="pp-file-body">{content.slice(0, 4000)}{content.length > 4000 ? "\n…[truncated]" : ""}</pre>}
+      {open && <pre className="pp-file-body">{displayContent.slice(0, 4000)}{displayContent.length > 4000 ? "\n…[truncated]" : ""}</pre>}
     </div>
   )
 }
@@ -136,7 +160,7 @@ function FileEditCard({ input }: { input: Record<string, unknown> }) {
 function SearchCard({ name, input, result }: { name: string; input: Record<string, unknown>; result?: string }) {
   const [open, setOpen] = useState(false)
   const meta = TOOL_META[classifyTool(name)]
-  const query = String(input.pattern ?? input.query ?? input.glob ?? "")
+  const query = String(input.pattern ?? input.query ?? input.glob ?? input.target_directory ?? "")
   return (
     <div className="pp-tool-card pp-search" style={{ "--tool-color": meta.color } as React.CSSProperties}>
       <div className="pp-tool-header" onClick={() => setOpen(!open)}>

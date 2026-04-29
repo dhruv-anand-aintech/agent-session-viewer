@@ -225,6 +225,16 @@
 .pp-file-write { border-color: hsla(40, 60%, 50%, 0.15); }
 .pp-file-write .pp-tool-header { background: hsla(40, 50%, 5%, 0.9); }
 .pp-file-write .pp-file-name { color: hsl(40, 75%, 65%); }
+.pp-write-more-paths {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  color: hsl(40, 55%, 55%);
+  background: hsla(40, 40%, 20%, 0.5);
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-right: 4px;
+}
 
 /* ── File edit ───────────────────────────────────────────────────────────── */
 .pp-file-edit { border-color: hsla(20, 55%, 50%, 0.15); }
