@@ -1,4 +1,4 @@
-# Claude Session Viewer — project context
+# Agent Session Viewer — project context
 
 ## Purpose
 
@@ -13,7 +13,7 @@ A **multi-platform** web UI for browsing AI coding assistant sessions: **Claude 
 |------|------|
 | `src/` | React app (`App.tsx` main shell; `pretty/` = Pretty mode markdown + tool cards) |
 | `worker/index.ts` | Cloudflare Worker: auth, `/api/sync`, `/api/session/...`, SSE `/api/stream`, debug ingest, todos |
-| `daemon/watch.mjs` | Watches/polls platform dirs; sync cache `~/.claude/session-viewer-sync-cache.json` |
+| `daemon/watch.mjs` | Watches/polls platform dirs; sync cache `~/.claude/agent-session-viewer-sync-cache.json` |
 | `platform-readers.mjs` | **Single source of truth** for reading non-JSONL platforms (Cursor, OpenCode, Antigravity, Hermes). Used by daemon **and** `local-server.mjs`. |
 | `local-server.mjs` | Standalone HTTP server: loads projects, proxies same API shape as Worker for dev |
 | `shared-utils.mjs` | Shared helpers (e.g. XML strip) for daemon |

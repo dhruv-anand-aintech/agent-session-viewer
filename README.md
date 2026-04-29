@@ -1,6 +1,6 @@
-# Claude Session Viewer
+# Agent Session Viewer
 
-![Claude Session Viewer UI](public/screenshot.png)
+![Agent Session Viewer UI](public/screenshot.png)
 
 A live multi-platform session viewer — browse AI coding assistant conversations across Claude Code, Codex, Cursor, OpenCode, and Antigravity in a unified dark-mode UI with markdown rendering, tool call cards, and thinking blocks.
 
@@ -45,7 +45,7 @@ All platforms are detected automatically — no configuration needed if the dire
 
 ## Claw bot integration
 
-Claude Session Viewer supports the full family of **claw-type messaging bots** — local AI agents that run Claude via WhatsApp or Telegram and store their session data in a standard directory layout.
+Agent Session Viewer supports the full family of **claw-type messaging bots** — local AI agents that run Claude via WhatsApp or Telegram and store their session data in a standard directory layout.
 
 Supported tools (auto-detected from `~/toolname`):
 
@@ -78,8 +78,8 @@ Path overrides can also be set via the **Settings** panel (⚙ in the top bar) w
 ## One-command setup
 
 ```bash
-git clone https://github.com/your/claude-session-viewer
-cd claude-session-viewer
+git clone https://github.com/your/agent-session-viewer
+cd agent-session-viewer
 npm install
 node setup.mjs
 ```
@@ -96,7 +96,7 @@ After setup, the script prints your Worker URL and the exact command to start th
 ## Running the daemon
 
 ```bash
-WORKER_URL=https://claude-session-viewer.<subdomain>.workers.dev \
+WORKER_URL=https://agent-session-viewer.<subdomain>.workers.dev \
 AUTH_PIN=<your-pin> \
 npm run daemon
 ```
@@ -133,6 +133,8 @@ npm run local      # Fully local mode — no Cloudflare needed
 ```
 
 `npm run local` starts a standalone server that reads all platform session directories directly — no daemon, no Cloudflare account, no KV. All platform sources (Claude, Cursor, OpenCode, Antigravity) are supported identically to the daemon+worker stack.
+
+**Migrating local state:** Under `~/.claude/`, if you still have the previous config filenames, rename `session-viewer-local.json` → `agent-session-viewer-local.json` and `session-viewer-sync-cache.json` → `agent-session-viewer-sync-cache.json` to keep settings and the daemon upload cache. After redeploying the Worker, the default `*.workers.dev` hostname may change unless you use a custom route.
 
 ## Deploying changes
 
