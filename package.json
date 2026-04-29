@@ -9,7 +9,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "local": "concurrently -n api,ui --kill-others \"node --watch local-server.mjs\" \"vite\"",
+    "local": "node scripts/run-local-dev.mjs",
     "deploy": "node deploy.mjs",
     "daemon": "node daemon/watch.mjs",
     "daemon:launchd-install": "bash scripts/install-launchd-daemon.sh",
