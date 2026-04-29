@@ -71,18 +71,48 @@ function useCapabilities(): Capabilities {
 
 const RECENT_SIDEBAR_SESSIONS = 30
 
+function mergeProjectData(existing: ProjectData[], incoming: ProjectData[]): ProjectData[] {
+  const projectsByPath = new Map(existing.map(p => [p.path, { ...p, sessions: [...p.sessions] }]))
+
+  for (const project of incoming) {
+    const current = projectsByPath.get(project.path)
+    if (!current) {
+      projectsByPath.set(project.path, { ...project, sessions: [...project.sessions] })
+      continue
+    }
+
+    current.displayName = project.displayName || current.displayName
+    const sessionsById = new Map(current.sessions.map(s => [s.id, s]))
+    for (const session of project.sessions) {
+      sessionsById.set(session.id, { ...sessionsById.get(session.id), ...session })
+    }
+    current.sessions = Array.from(sessionsById.values()).sort((a, b) =>
+      String(b.lastActivity ?? "").localeCompare(String(a.lastActivity ?? "")),
+    )
+  }
+
+  return Array.from(projectsByPath.values()).sort((a, b) =>
+    String(b.sessions[0]?.lastActivity ?? "").localeCompare(String(a.sessions[0]?.lastActivity ?? "")),
+  )
+}
+
 function useProjects() {
   const [projects, setProjects] = useState<ProjectData[]>([])
   const [connected, setConnected] = useState(false)
   const [projectsLoading, setProjectsLoading] = useState(true)
   const [totalSessions, setTotalSessions] = useState<number | null>(null)
   const [listMode, setListMode] = useState<"recent" | "full">("recent")
+  const projectsRef = useRef<ProjectData[]>([])
+
+  useEffect(() => {
+    projectsRef.current = projects
+  }, [projects])
 
   useEffect(() => {
     const qs = listMode === "recent" ? `?maxSessions=${RECENT_SIDEBAR_SESSIONS}` : ""
     queueMicrotask(() => {
       setProjectsLoading(true)
-      setProjects([])
+      if (listMode === "recent" || projectsRef.current.length === 0) setProjects([])
       setTotalSessions(null)
     })
     const es = new EventSource(`/api/stream${qs}`)
@@ -101,7 +131,8 @@ function useProjects() {
     })
     es.addEventListener("projects", e => {
       try {
-        setProjects(JSON.parse((e as MessageEvent).data) as ProjectData[])
+        const incoming = JSON.parse((e as MessageEvent).data) as ProjectData[]
+        setProjects(prev => mergeProjectData(prev, incoming))
       } catch {
         /* ignore */
       }
@@ -191,8 +222,8 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
 
   // Fetch the tail from server
   const fetchRemote = useCallback(async () => {
-    if (!projectDir || !sessionId || !idbKey) return
     try {
+      if (!projectDir || !sessionId || !idbKey) return
       const r = await fetch(sessionUrl(projectDir, sessionId, INITIAL_TAIL), { credentials: "include" })
       if (!r.ok) return
       const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || 0
@@ -647,7 +678,7 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
 
   return (
     <div className="session-pane">
-      <div className="session-header">
+      <div className="session-header" data-tooltip={`${projectDir}/${sessionMeta.id}`}>
         {onBack && <button className="back-btn" onClick={onBack} title="Back to sessions">←</button>}
         <span className="session-id">{sessionMeta.id.slice(0, 8)}</span>
         {chatDirLabel && <span className="session-cwd hide-mobile" title={chatDirLabel}>{chatDirLabel}</span>}
@@ -883,14 +914,6 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
   const inputRef = useRef<HTMLInputElement>(null)
 
   const displayName = customName || s.firstName || s.id.slice(0, 8)
-  // Tooltip: show full display name, agent type, and session ID
-  const tooltip = [
-    displayName,
-    s.agentType ? `[${s.agentType}]` : null,
-    s.firstName && s.firstName !== displayName ? s.firstName : null,
-    s.id,
-  ].filter(Boolean).join("\n\n")
-
   function startEdit(e: React.MouseEvent) {
     e.stopPropagation()
     setDraft(customName ?? s.firstName ?? "")
@@ -920,7 +943,6 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
     <div
       className={`sidebar-session ${isSelected ? "active" : ""} ${s.isSidechain ? "sidechain" : ""} ${searchHint ? "sidebar-session--multiline" : ""}`}
       onClick={onSelect}
-      data-tooltip={tooltip}
     >
       {editing ? (
         <input
@@ -1373,8 +1395,8 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
             }))
             .filter(p => p.sessions.length > 0)
             .map(project => (
-            <div key={project.path} className="sidebar-project">
-              <div className="sidebar-project-name" title={project.path}>{project.displayName}</div>
+              <div key={project.path} className="sidebar-project">
+              <div className="sidebar-project-name" data-tooltip={project.path}>{project.displayName}</div>
               {project.sessions.map(s => (
                 <SessionItem
                   key={s.id}
@@ -1469,11 +1491,23 @@ const SIDEBAR_MAX = 520
 const SIDEBAR_DEFAULT = 220
 
 function parseUrlSession(): { project: string; session: string } | null {
-  const s = new URLSearchParams(window.location.search).get("s")
-  if (!s) return null
-  const slash = s.lastIndexOf("/")
+  const raw = new URLSearchParams(window.location.search).get("s")
+  if (!raw) return null
+  const m = /^([\s\S]+)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(raw)
+  if (m) {
+    try {
+      return { project: decodeURIComponent(m[1]), session: m[2] }
+    } catch {
+      return null
+    }
+  }
+  const slash = raw.lastIndexOf("/")
   if (slash < 1) return null
-  return { project: decodeURIComponent(s.slice(0, slash)), session: s.slice(slash + 1) }
+  try {
+    return { project: decodeURIComponent(raw.slice(0, slash)), session: raw.slice(slash + 1) }
+  } catch {
+    return null
+  }
 }
 
 export default function App() {
