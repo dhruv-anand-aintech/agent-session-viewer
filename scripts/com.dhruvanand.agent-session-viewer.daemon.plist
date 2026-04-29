@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.dhruvanand.claude-session-viewer.daemon</string>
+	<string>com.dhruvanand.agent-session-viewer.daemon</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/bash</string>
@@ -16,9 +16,9 @@
 	<key>KeepAlive</key>
 	<true/>
 	<key>StandardOutPath</key>
-	<string>LOG_PLACEHOLDER/claude-session-viewer-daemon.log</string>
+	<string>LOG_PLACEHOLDER/agent-session-viewer-daemon.log</string>
 	<key>StandardErrorPath</key>
-	<string>LOG_PLACEHOLDER/claude-session-viewer-daemon.err.log</string>
+	<string>LOG_PLACEHOLDER/agent-session-viewer-daemon.err.log</string>
 	<key>ProcessType</key>
 	<string>Background</string>
 </dict>

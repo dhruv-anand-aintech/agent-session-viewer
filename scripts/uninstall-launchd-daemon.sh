@@ -2,7 +2,7 @@
 # Remove the LaunchAgent and stop the daemon.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LABEL="com.dhruvanand.claude-session-viewer.daemon"
+LABEL="com.dhruvanand.agent-session-viewer.daemon"
 LA_PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 UID_NUM="$(id -u)"
 
