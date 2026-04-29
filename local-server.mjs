@@ -3,7 +3,7 @@
  * Reads ~/.claude/projects/ directly; no Cloudflare account needed.
  *
  * Run via: npm run local
- * Config persisted to: ~/.claude/session-viewer-local.json
+ * Config persisted to: ~/.claude/agent-session-viewer-local.json
  */
 
 import { createReadStream, existsSync, readdirSync, readFileSync, realpathSync, statSync, watch, writeFileSync } from "fs"
@@ -19,9 +19,14 @@ import {
   readCursorSessions,
   readCursorSessionMsgs,
   readCursorAgentSessions,
+  readCursorAgentSessionFile,
+  listCursorAgentTranscriptFiles,
   CURSOR_PROJECTS_ROOT,
   readOpenCodeSession,
+  readOpenCodeSessionFromSqlite,
   iterOpenCodeSessions,
+  OPENCODE_DIR,
+  OPENCODE_DB,
   OPENCODE_STORAGE,
   ANTIGRAVITY_BRAIN_DIR,
   parseAntigravitySessionIndex,
@@ -31,11 +36,12 @@ import {
   readHermesSessions,
   normProjectDir,
 } from "./platform-readers.mjs"
+import { buildSidebarSearchDoc, runSidebarSessionSearch } from "./lib/session-search-core.mjs"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 const CLAUDE_DIR = join(homedir(), ".claude", "projects")
-const CONFIG_FILE = join(homedir(), ".claude", "session-viewer-local.json")
+const CONFIG_FILE = join(homedir(), ".claude", "agent-session-viewer-local.json")
 
 const DIST_DIR = join(__dirname, "dist")
 const PORT = parseInt(process.env.PORT ?? "3001")
@@ -66,108 +72,109 @@ function parseJsonl(fp) {
   } catch { return [] }
 }
 
-async function loadProjectsFull() {
+/** Roots: ~/.claude/projects plus config extraProjectRoots */
+function getClaudeScanRoots() {
   const config = loadConfig()
-  const names = config.names ?? {}
-  const projects = []
-
-  // Collect all roots to scan: main ~/.claude/projects + any extraProjectRoots from config.
-  // Each extra root is { path: string, label?: string } — label prefixes project display names.
   const roots = [{ path: CLAUDE_DIR, label: null }]
   for (const extra of config.extraProjectRoots ?? []) {
     const p = typeof extra === "string" ? extra : extra.path
     const label = typeof extra === "object" ? (extra.label ?? null) : null
     roots.push({ path: p.replace(/^~/, homedir()), label })
   }
+  return roots
+}
+
+function claudeSessionMetaFromMsgs(msgs, sessionId, projectKey, names, stat) {
+  const first = msgs.find(m => m.sessionId)
+  const last = [...msgs].reverse().find(m => m.timestamp)
+
+  const firstUserMsg = msgs.find(m => {
+    if (m.type !== "user") return false
+    const c = m.message?.content
+    if (!c) return false
+    if (typeof c === "string") return c.trim().length > 0
+    if (!Array.isArray(c)) return false
+    return c.some(b => b.type !== "tool_result")
+  })
+
+  let firstName = null
+  if (firstUserMsg?.message?.content) {
+    const content = firstUserMsg.message.content
+    let text = null
+    if (typeof content === "string") {
+      text = content
+    } else if (Array.isArray(content)) {
+      const textBlock = content.find(b => b.type === "text")
+      if (textBlock?.text) text = textBlock.text
+    }
+    if (text) firstName = stripXml(text).slice(0, 100)
+  }
+
+  const userMessageCount = msgs.filter(m => {
+    if (m.type !== "user") return false
+    const c = m.message?.content
+    if (!c) return false
+    if (typeof c === "string") return c.trim().length > 0
+    if (!Array.isArray(c)) return false
+    return c.some(b => b.type !== "tool_result")
+  }).length
+
+  const messageCount = msgs.filter(m => m.type !== "file-history-snapshot").length
+
+  return {
+    id: sessionId,
+    projectPath: projectKey,
+    lastActivity: last?.timestamp ?? stat.mtime.toISOString(),
+    version: first?.version,
+    gitBranch: first?.gitBranch,
+    isActive: Date.now() - stat.mtimeMs < FIVE_MIN,
+    userMessageCount,
+    messageCount,
+    firstName,
+    customName: names[`${projectKey}/${sessionId}`] ?? null,
+    source: "claude",
+  }
+}
+
+/** Full parse of every Claude JSONL — search, SSE refresh, “load all” sidebar. */
+async function loadProjectsFull() {
+  const names = loadConfig().names ?? {}
+  const projects = []
+  const roots = getClaudeScanRoots()
 
   for (const { path: root, label } of roots) {
-  let dirs
-  try { dirs = readdirSync(root) } catch { continue }
+    let dirs
+    try { dirs = readdirSync(root) } catch { continue }
 
-  for (const dir of dirs) {
-    const dp = join(root, dir)
-    try { if (!statSync(dp).isDirectory()) continue } catch { continue }
+    for (const dir of dirs) {
+      const dp = join(root, dir)
+      try { if (!statSync(dp).isDirectory()) continue } catch { continue }
 
-    const sessions = []
-    let files
-    try { files = readdirSync(dp).filter(f => f.endsWith(".jsonl")) } catch { continue }
+      const sessions = []
+      let files
+      try { files = readdirSync(dp).filter(f => f.endsWith(".jsonl")) } catch { continue }
 
-    for (const f of files) {
-      const fp = join(dp, f)
-      let stat
-      try { stat = statSync(fp) } catch { continue }
-
-      const msgs = parseJsonl(fp)
-      const first = msgs.find(m => m.sessionId)
-      const last = [...msgs].reverse().find(m => m.timestamp)
-      const sessionId = f.replace(".jsonl", "")
-
-      // Extract first user message text
-      const firstUserMsg = msgs.find(m => {
-        if (m.type !== "user") return false
-        const c = m.message?.content
-        if (!c) return false
-        if (typeof c === "string") return c.trim().length > 0
-        if (!Array.isArray(c)) return false
-        return c.some(b => b.type !== "tool_result")
-      })
-
-      let firstName = null
-      if (firstUserMsg?.message?.content) {
-        const content = firstUserMsg.message.content
-        let text = null
-        if (typeof content === "string") {
-          text = content
-        } else if (Array.isArray(content)) {
-          const textBlock = content.find(b => b.type === "text")
-          if (textBlock?.text) {
-            text = textBlock.text
-          }
-        }
-        if (text) {
-          firstName = stripXml(text).slice(0, 100)
-        }
+      for (const f of files) {
+        const fp = join(dp, f)
+        let stat
+        try { stat = statSync(fp) } catch { continue }
+        const sessionId = f.replace(".jsonl", "")
+        const projectKey = root === CLAUDE_DIR ? dir : `${root}/${dir}`
+        const msgs = parseJsonl(fp)
+        sessions.push(claudeSessionMetaFromMsgs(msgs, sessionId, projectKey, names, stat))
       }
 
-      const userMessageCount = msgs.filter(m => {
-        if (m.type !== "user") return false
-        const c = m.message?.content
-        if (!c) return false
-        if (typeof c === "string") return c.trim().length > 0
-        if (!Array.isArray(c)) return false
-        return c.some(b => b.type !== "tool_result")
-      }).length
-
-      const messageCount = msgs.filter(m => m.type !== "file-history-snapshot").length
-
-      const projectKey = root === CLAUDE_DIR ? dir : `${root}/${dir}`
-      sessions.push({
-        id: sessionId,
-        projectPath: projectKey,
-        lastActivity: last?.timestamp ?? stat.mtime.toISOString(),
-        version: first?.version,
-        gitBranch: first?.gitBranch,
-        isActive: Date.now() - stat.mtimeMs < FIVE_MIN,
-        userMessageCount,
-        messageCount,
-        firstName,
-        customName: names[`${projectKey}/${sessionId}`] ?? null,
-        source: "claude",
-      })
-    }
-
-    if (sessions.length > 0) {
-      const baseName = dir.replace(/^-Users-[^-]+-Code-/, "").replace(/-/g, "/")
-      projects.push({
-        path: `${root}/${dir}`,
-        displayName: label ? `[${label}] ${baseName}` : baseName,
-        sessions: sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity)),
-      })
+      if (sessions.length > 0) {
+        const baseName = dir.replace(/^-Users-[^-]+-Code-/, "").replace(/-/g, "/")
+        projects.push({
+          path: `${root}/${dir}`,
+          displayName: label ? `[${label}] ${baseName}` : baseName,
+          sessions: sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity)),
+        })
+      }
     }
   }
-  } // end roots loop
 
-  // Merge in external platform sessions
   const allProjects = [
     ...projects,
     ...loadCodexSessions(),
@@ -185,16 +192,296 @@ async function loadProjectsFull() {
   })
 }
 
+const SESS_PATH_KEY = (projectPath, sessionId) => `${projectPath}\x1f${sessionId}`
+
+/**
+ * One Claude project directory under a scan root. Fills `fileBySessKey`; returns a project row or null.
+ */
+function scanOneClaudeFolder(root, label, dir, names, fileBySessKey) {
+  const dp = join(root, dir)
+  try { if (!statSync(dp).isDirectory()) return null } catch { return null }
+  let files
+  try { files = readdirSync(dp).filter(f => f.endsWith(".jsonl")) } catch { return null }
+  if (!files.length) return null
+  const projectPath = `${root}/${dir}`
+  const projectKey = root === CLAUDE_DIR ? dir : `${root}/${dir}`
+  const sessions = []
+  for (const f of files) {
+    const fp = join(dp, f)
+    let stat
+    try { stat = statSync(fp) } catch { continue }
+    const sessionId = f.replace(".jsonl", "")
+    fileBySessKey.set(SESS_PATH_KEY(projectPath, sessionId), { fp, stat })
+    sessions.push({
+      id: sessionId,
+      projectPath: projectKey,
+      lastActivity: stat.mtime.toISOString(),
+      version: undefined,
+      gitBranch: undefined,
+      isActive: Date.now() - stat.mtimeMs < FIVE_MIN,
+      userMessageCount: 0,
+      messageCount: 0,
+      firstName: null,
+      customName: names[`${projectKey}/${sessionId}`] ?? null,
+      source: "claude",
+    })
+  }
+  const baseName = dir.replace(/^-Users-[^-]+-Code-/, "").replace(/-/g, "/")
+  return {
+    path: projectPath,
+    displayName: label ? `[${label}] ${baseName}` : baseName,
+    sessions: sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity)),
+  }
+}
+
+/**
+ * Stat-only Claude scan. `fileBySessKey`: `${root}/${dir}\\x1f${id}` → file for JSONL hydration.
+ */
+function scanClaudeProjectsCheap(names) {
+  const projects = []
+  /** @type {Map<string, { fp: string, stat: import('fs').Stats }>} */
+  const fileBySessKey = new Map()
+  for (const { path: root, label } of getClaudeScanRoots()) {
+    let dirs
+    try { dirs = readdirSync(root) } catch { continue }
+    for (const dir of dirs) {
+      const one = scanOneClaudeFolder(root, label, dir, names, fileBySessKey)
+      if (one) projects.push(one)
+    }
+  }
+  return { projects, fileBySessKey }
+}
+
+function sortProjectGroups(projects) {
+  return [...projects].sort((a, b) => {
+    const aLast = a.sessions[0]?.lastActivity ?? ""
+    const bLast = b.sessions[0]?.lastActivity ?? ""
+    return String(bLast).localeCompare(String(aLast))
+  })
+}
+
+/** Merge incoming project rows into acc (by path + session id), then sort groups by most recent row. */
+function mergeProjectsInto(acc, incoming) {
+  const map = new Map(acc.map(p => [p.path, { ...p, sessions: [...p.sessions] }]))
+  for (const inc of incoming) {
+    if (!map.has(inc.path)) {
+      map.set(inc.path, { ...inc, sessions: [...inc.sessions] })
+    } else {
+      const cur = map.get(inc.path)
+      const byId = new Map(cur.sessions.map(s => [s.id, s]))
+      for (const s of inc.sessions) byId.set(s.id, s)
+      cur.sessions = Array.from(byId.values()).sort((a, b) =>
+        String(b.lastActivity).localeCompare(String(a.lastActivity)),
+      )
+    }
+  }
+  return sortProjectGroups(Array.from(map.values()))
+}
+
+function sseWrite(res, event, data) {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+}
+
+function yieldEventLoopTick() {
+  return new Promise(r => setImmediate(r))
+}
+
+/** Progressive recent sidebar: emit trimmed running snapshot after each Claude folder / platform, then hydrate. */
+async function streamRecentSidebarInitial(res, maxSessions) {
+  const names = loadConfig().names ?? {}
+  /** @type {Map<string, { fp: string, stat: import('fs').Stats }>} */
+  const fileBySessKey = new Map()
+  let acc = []
+
+  for (const { path: root, label } of getClaudeScanRoots()) {
+    let dirs
+    try { dirs = readdirSync(root) } catch { continue }
+    for (const dir of dirs) {
+      const chunk = scanOneClaudeFolder(root, label, dir, names, fileBySessKey)
+      if (!chunk) continue
+      acc = mergeProjectsInto(acc, [chunk])
+      const totalSoFar = countSessionsInProjects(acc)
+      const trimmed =
+        totalSoFar > maxSessions ? trimProjectsByRecentSessionCount(acc, maxSessions) : acc
+      sseWrite(res, "projects", trimmed)
+      await yieldEventLoopTick()
+    }
+  }
+
+  const platformLoads = [
+    loadCodexSessions,
+    loadCursorSessions,
+    loadCursorAgentSessions,
+    loadOpenCodeSessions,
+    async () => loadAntigravitySessions(),
+    loadHermesSessions,
+  ]
+  for (const loadFn of platformLoads) {
+    const part = await loadFn()
+    if (!part.length) continue
+    acc = mergeProjectsInto(acc, part)
+    const totalSoFar = countSessionsInProjects(acc)
+    const trimmed =
+      totalSoFar > maxSessions ? trimProjectsByRecentSessionCount(acc, maxSessions) : acc
+    sseWrite(res, "projects", trimmed)
+    await yieldEventLoopTick()
+  }
+
+  const total = countSessionsInProjects(acc)
+  sseWrite(res, "projects_meta", { total })
+
+  const trimmed =
+    total > maxSessions ? trimProjectsByRecentSessionCount(acc, maxSessions) : sortProjectGroups(acc)
+  hydrateClaudeSessionsInProjects(trimmed, fileBySessKey, names)
+  trimmed.sort((a, b) => {
+    const aLast = a.sessions[0]?.lastActivity ?? ""
+    const bLast = b.sessions[0]?.lastActivity ?? ""
+    return String(bLast).localeCompare(String(aLast))
+  })
+  sseWrite(res, "projects", trimmed)
+  sseWrite(res, "bootstrap_done", {})
+}
+
+function hydrateClaudeSessionsInProjects(projects, fileBySessKey, names) {
+  for (const p of projects) {
+    for (let i = 0; i < p.sessions.length; i++) {
+      const s = p.sessions[i]
+      if (s.source !== "claude") continue
+      const rec = fileBySessKey.get(SESS_PATH_KEY(p.path, s.id))
+      if (!rec) continue
+      const msgs = parseJsonl(rec.fp)
+      p.sessions[i] = claudeSessionMetaFromMsgs(msgs, s.id, s.projectPath, names, rec.stat)
+    }
+    if (p.sessions.length) {
+      p.sessions.sort((a, b) => String(b.lastActivity).localeCompare(String(a.lastActivity)))
+    }
+  }
+}
+
+/** Sidebar “recent N” — trim using file mtime, then parse JSONL only for sessions kept. */
+async function loadProjectsBundleRecent(maxSessions) {
+  const names = loadConfig().names ?? {}
+  const { projects: claudeProjects, fileBySessKey } = scanClaudeProjectsCheap(names)
+  const allProjects = [
+    ...claudeProjects,
+    ...loadCodexSessions(),
+    ...loadCursorSessions(),
+    ...loadCursorAgentSessions(),
+    ...loadOpenCodeSessions(),
+    ...await loadAntigravitySessions(),
+    ...loadHermesSessions(),
+  ].sort((a, b) => {
+    const aLast = a.sessions[0]?.lastActivity ?? ""
+    const bLast = b.sessions[0]?.lastActivity ?? ""
+    return String(bLast).localeCompare(String(aLast))
+  })
+
+  const total = countSessionsInProjects(allProjects)
+  const trimmed =
+    total > maxSessions ? trimProjectsByRecentSessionCount(allProjects, maxSessions) : allProjects
+  hydrateClaudeSessionsInProjects(trimmed, fileBySessKey, names)
+  trimmed.sort((a, b) => {
+    const aLast = a.sessions[0]?.lastActivity ?? ""
+    const bLast = b.sessions[0]?.lastActivity ?? ""
+    return String(bLast).localeCompare(String(aLast))
+  })
+  return { projects: trimmed, total }
+}
+
 async function loadProjectsBundle(maxSessions) {
-  const full = await loadProjectsFull()
-  const total = countSessionsInProjects(full)
   const n = Number(maxSessions)
-  if (!Number.isFinite(n) || n <= 0 || total <= n) return { projects: full, total }
-  return { projects: trimProjectsByRecentSessionCount(full, n), total }
+  if (!Number.isFinite(n) || n <= 0) {
+    const full = await loadProjectsFull()
+    return { projects: full, total: countSessionsInProjects(full) }
+  }
+  return loadProjectsBundleRecent(n)
 }
 
 // ── In-memory message cache for non-JSONL platforms ───────────────────────────
 const msgCache = new Map() // `projectPath/sessionId` → SessionMessage[]
+
+/**
+ * If msgCache is cold (e.g. /api/session before /api/projects finished), load on demand.
+ */
+function loadSessionMessagesOndemand(projectPath, sessionId) {
+  if (projectPath.startsWith("cursor:")) {
+    try {
+      const msgs = readCursorSessionMsgs(sessionId)
+      return msgs.length ? msgs : null
+    } catch { return null }
+  }
+  if (projectPath.startsWith("cursor-agent:")) {
+    const slug = projectPath.slice("cursor-agent:".length)
+    for (const { filePath, slug: s, sessionId: sid } of listCursorAgentTranscriptFiles()) {
+      if (s === slug && sid === sessionId) {
+        const r = readCursorAgentSessionFile(filePath, s, sid, null, null)
+        return r?.msgs?.length ? r.msgs : null
+      }
+    }
+    return null
+  }
+  if (projectPath.startsWith("opencode:")) {
+    if (existsSync(OPENCODE_DB)) {
+      const r = readOpenCodeSessionFromSqlite(OPENCODE_DB, sessionId, null, null)
+      if (r && Array.isArray(r.msgs)) return r.msgs
+    }
+    if (!existsSync(join(OPENCODE_STORAGE, "session"))) return null
+    for (const h of readdirSync(join(OPENCODE_STORAGE, "session"))) {
+      const fp = join(OPENCODE_STORAGE, "session", h, `${sessionId}.json`)
+      if (existsSync(fp)) {
+        const r = readOpenCodeSession(fp, null, null)
+        if (r && Array.isArray(r.msgs)) return r.msgs
+        break
+      }
+    }
+    return null
+  }
+  if (projectPath.startsWith("codex:")) {
+    for (const { meta, msgs } of readCodexSessions(null, null)) {
+      if (meta.id === sessionId && meta.projectPath === projectPath) return msgs
+    }
+    return null
+  }
+  if (projectPath.startsWith("hermes:")) {
+    for (const { meta, msgs } of readHermesSessions(null, null)) {
+      if (meta.id === sessionId && meta.projectPath === projectPath) return msgs
+    }
+    return null
+  }
+  if (projectPath.startsWith("antigravity:")) {
+    const entry = parseAntigravitySessionIndex().find(s => s.id === sessionId)
+    if (!entry) return null
+    const r = readAntigravitySession(entry, null, null)
+    if (r && Array.isArray(r.msgs) && r.meta.id === sessionId) return r.msgs
+    return null
+  }
+  return null
+}
+
+/** Full message array for a session (no tail windowing). */
+function getSessionMessagesAll(projectPath, sessionId) {
+  if (projectPath.startsWith("cursor:")) {
+    return readCursorSessionMsgs(sessionId)
+  }
+  const cacheKey = `${projectPath}/${sessionId}`
+  if (msgCache.has(cacheKey)) return msgCache.get(cacheKey)
+  const ondemand = loadSessionMessagesOndemand(projectPath, sessionId)
+  if (ondemand != null) {
+    msgCache.set(cacheKey, ondemand)
+    return ondemand
+  }
+  if (
+    /^(opencode|codex|hermes|antigravity|cursor-agent):/.test(projectPath) &&
+    !/^[A-Za-z]:[\\/]/.test(projectPath)
+  ) {
+    return null
+  }
+  const fp = projectPath.startsWith("/")
+    ? join(projectPath, `${sessionId}.jsonl`)
+    : join(CLAUDE_DIR, projectPath, `${sessionId}.jsonl`)
+  if (!existsSync(fp)) return null
+  return parseJsonl(fp)
+}
 
 function resultsToProjects(results, platformPrefix) {
   const projects = new Map()
@@ -318,6 +605,16 @@ if (existsSync(CURSOR_PROJECTS_ROOT)) {
   } catch { /* ignore */ }
 }
 
+if (existsSync(OPENCODE_DIR)) {
+  try {
+    watch(OPENCODE_DIR, { recursive: true }, () => broadcastProjects())
+  } catch {
+    try {
+      watch(OPENCODE_DIR, () => broadcastProjects())
+    } catch { /* ignore */ }
+  }
+}
+
 // --- Static file serving ---
 
 const MIME = {
@@ -428,6 +725,35 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  // GET /api/search/sessions?q= — fuzzy search across all threads (titles, users, system, …)
+  if (url.pathname === "/api/search/sessions") {
+    const q = url.searchParams.get("q")?.trim() ?? ""
+    if (!q) {
+      json({ results: [] })
+      return
+    }
+    const projects = await loadProjectsFull()
+    const rows = []
+    for (const p of projects) {
+      for (const s of p.sessions) {
+        const msgs = getSessionMessagesAll(p.path, s.id)
+        if (!msgs || !msgs.length) continue
+        const corpus = buildSidebarSearchDoc(msgs, s)
+        const displayTitle = s.customName || s.firstName || s.id.slice(0, 8)
+        rows.push({
+          projectPath: p.path,
+          sessionId: s.id,
+          displayTitle,
+          meta: s,
+          corpus,
+        })
+      }
+    }
+    const results = runSidebarSessionSearch(q, rows)
+    json({ results })
+    return
+  }
+
   // GET /api/projects?maxSessions=30 — omit or maxSessions=0 for full list
   if (url.pathname === "/api/projects") {
     const maxRaw = url.searchParams.get("maxSessions")
@@ -446,16 +772,21 @@ const server = http.createServer(async (req, res) => {
     const maxRaw = url.searchParams.get("maxSessions")
     const maxParsed = maxRaw != null && maxRaw !== "" ? Number(maxRaw) : null
     const maxSessions = Number.isFinite(maxParsed) && maxParsed > 0 ? maxParsed : null
-    const { projects, total } = await loadProjectsBundle(maxSessions ?? 0)
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       "Connection": "keep-alive",
       "X-Accel-Buffering": "no",
-      "X-Total-Sessions": String(total),
     })
+    if (maxSessions != null) {
+      await streamRecentSidebarInitial(res, maxSessions)
+    } else {
+      const { projects, total } = await loadProjectsBundle(0)
+      res.write(`event: projects_meta\ndata: ${JSON.stringify({ total })}\n\n`)
+      res.write(`event: projects\ndata: ${JSON.stringify(projects)}\n\n`)
+      res.write(`event: bootstrap_done\ndata: {}\n\n`)
+    }
     const client = { res, maxSessions }
-    res.write(`event: projects\ndata: ${JSON.stringify(projects)}\n\n`)
     sseClients.add(client)
     req.on("close", () => sseClients.delete(client))
     return
@@ -492,11 +823,23 @@ const server = http.createServer(async (req, res) => {
       jsonPaged(readCursorSessionMsgs(sessionId))
       return
     }
-    // Other non-Claude platforms store messages in the msgCache (populated by loadProjects)
+    // Other non-Claude platforms: msgCache (filled by /api/projects) or on-demand read
     const cacheKey = `${projectPath}/${sessionId}`
     if (msgCache.has(cacheKey)) { jsonPaged(msgCache.get(cacheKey)); return }
-    // Claude: read JSONL file directly
-    // projectPath is a slug for main root, or absolute path for extra roots
+    const ondemand = loadSessionMessagesOndemand(projectPath, sessionId)
+    if (ondemand != null) {
+      msgCache.set(cacheKey, ondemand)
+      jsonPaged(ondemand)
+      return
+    }
+    // Claude Code: projectPath is a folder slug under ~/.claude/projects or an absolute project root.
+    // Never join ~/.claude/projects with platform keys (e.g. opencode:…); on-demand load failed above.
+    if (
+      /^(opencode|codex|hermes|antigravity|cursor-agent):/.test(projectPath) &&
+      !/^[A-Za-z]:[\\/]/.test(projectPath)
+    ) {
+      res.writeHead(404); res.end("Not Found"); return
+    }
     const fp = projectPath.startsWith("/")
       ? join(projectPath, `${sessionId}.jsonl`)
       : join(CLAUDE_DIR, projectPath, `${sessionId}.jsonl`)
@@ -664,7 +1007,7 @@ const server = http.createServer(async (req, res) => {
 })
 
 server.listen(PORT, () => {
-  console.log(`\n  Claude Session Viewer (local mode)`)
+  console.log(`\n  Agent Session Viewer (local mode)`)
   console.log(`  API:      http://localhost:${PORT}`)
   if (existsSync(DIST_DIR)) {
     console.log(`  App:      http://localhost:${PORT}`)

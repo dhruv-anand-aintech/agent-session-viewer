@@ -21,7 +21,15 @@ export function normProjectDir(absDir) {
 
 export function sqliteQuery(dbPath, sql, opts = {}) {
   try {
-    const out = execFileSync("sqlite3", ["-json", dbPath, sql], { encoding: "utf8", maxBuffer: opts.maxBuffer ?? 64 * 1024 * 1024 })
+    const b = opts.busyTimeoutMs
+    const ms = b === 0 ? 0 : Number.isFinite(b) && b > 0 ? Math.floor(b) : 8000
+    // `.timeout` via stdin: mixing PRAGMA + SELECT in one -json arg yields two JSON blobs and breaks parse.
+    const input = ms > 0 ? `.timeout ${ms}\n${sql}\n` : `${sql}\n`
+    const out = execFileSync("sqlite3", ["-json", dbPath], {
+      input,
+      encoding: "utf8",
+      maxBuffer: opts.maxBuffer ?? 64 * 1024 * 1024,
+    })
     return JSON.parse(out.trim() || "[]")
   } catch { return [] }
 }
@@ -608,12 +616,34 @@ export function readCursorAgentSessions(cacheGet, cacheSet) {
 
 // ── OpenCode ──────────────────────────────────────────────────────────────────
 //
-// OpenCode stores sessions in ~/.local/share/opencode/storage/
-//   session/{projectHash|global}/{sessionId}.json  — session metadata
-//   message/{sessionId}/{messageId}.json           — message header
-//   part/{messageId}/{partId}.json                 — actual text/tool content
+// OpenCode stores data under ~/.local/share/opencode/:
+//   - opencode.db (SQLite) — current sessions/messages/parts (newer releases write here)
+//   - storage/ — legacy and auxiliary files:
+//     session/{projectHash|global}/{sessionId}.json
+//     message/{sessionId}/{messageId}.json
+//     part/{messageId}/{partId}.json
 
-const OPENCODE_STORAGE = path.join(homedir(), ".local", "share", "opencode", "storage")
+const OPENCODE_DIR = path.join(homedir(), ".local", "share", "opencode")
+const OPENCODE_DB = path.join(OPENCODE_DIR, "opencode.db")
+const OPENCODE_STORAGE = path.join(OPENCODE_DIR, "storage")
+
+function ocPushPartObject(p, parts, fileFallbackId, orderHint) {
+  const order = p.time?.start ?? orderHint ?? 0
+  if (p.type === "text" && p.text) parts.push({ type: "text", text: p.text, order })
+  else if (p.type === "reasoning" && p.text) parts.push({ type: "thinking", thinking: p.text, order })
+  else if (p.type === "tool" && p.tool) {
+    const input = p.input ?? p.state?.input ?? {}
+    const id = p.callID ?? p.id ?? (typeof fileFallbackId === "string" ? fileFallbackId : "")
+    parts.push({ type: "tool_use", name: p.tool, input, id, order })
+  }
+}
+
+function ocMergePartsToContent(parts) {
+  if (!parts.length) return null
+  const textParts = parts.filter(p => p.type === "text")
+  if (parts.length === textParts.length && textParts.length === 1) return textParts[0].text
+  return parts.map(({ order: _o, ...rest }) => rest)
+}
 
 function readOCMessageContent(messageId) {
   const partDir = path.join(OPENCODE_STORAGE, "part", messageId)
@@ -622,16 +652,27 @@ function readOCMessageContent(messageId) {
   for (const pf of fs.readdirSync(partDir).filter(f => f.endsWith(".json"))) {
     try {
       const p = JSON.parse(fs.readFileSync(path.join(partDir, pf), "utf8"))
-      if (p.type === "text" && p.text) parts.push({ type: "text", text: p.text, order: p.time?.start ?? 0 })
-      else if (p.type === "reasoning" && p.text) parts.push({ type: "thinking", thinking: p.text, order: p.time?.start ?? 0 })
-      else if (p.type === "tool" && p.tool) parts.push({ type: "tool_use", name: p.tool, input: p.input ?? {}, id: p.id ?? pf, order: p.time?.start ?? 0 })
+      ocPushPartObject(p, parts, pf, 0)
     } catch { /* skip */ }
   }
   parts.sort((a, b) => a.order - b.order)
-  if (!parts.length) return null
-  const textParts = parts.filter(p => p.type === "text")
-  if (parts.length === textParts.length && textParts.length === 1) return textParts[0].text
-  return parts.map(({ order: _o, ...rest }) => rest)
+  return ocMergePartsToContent(parts)
+}
+
+function readOCMessageContentFromPartRows(dbPath, messageId) {
+  const rows = sqliteQuery(
+    dbPath,
+    `SELECT data, time_created FROM part WHERE message_id = ${JSON.stringify(messageId)} ORDER BY time_created, id`
+  )
+  if (!rows.length) return null
+  const parts = []
+  for (const row of rows) {
+    let p
+    try { p = JSON.parse(row.data) } catch { continue }
+    ocPushPartObject(p, parts, null, row.time_created)
+  }
+  parts.sort((a, b) => a.order - b.order)
+  return ocMergePartsToContent(parts)
 }
 
 /**
@@ -697,23 +738,120 @@ export function readOpenCodeSession(sessionFile, cacheGet, cacheSet) {
       isActive: false,
       firstName: sessionData.title ?? null,
       source: "opencode",
-      lastUsedModel: messages.find(m => m.model?.modelID)?.model?.modelID,
+      lastUsedModel: opencodeLastModelFromMessageRows(messages),
+    },
+    msgs: converted,
+  }
+}
+
+function opencodeLastModelFromMessageRows(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    const id = m.model?.modelID ?? m.modelID
+    if (id) return id
+  }
+  return undefined
+}
+
+/**
+ * OpenCode 1.x+ stores live sessions in opencode.db; storage/session JSON may lag.
+ * Returns the same shape as readOpenCodeSession, or null if unchanged/invalid.
+ */
+export function readOpenCodeSessionFromSqlite(dbPath, sessionId, cacheGet, cacheSet) {
+  if (!dbPath || !fs.existsSync(dbPath) || !sessionId) return null
+  const sessRows = sqliteQuery(
+    dbPath,
+    `SELECT id, directory, title, time_updated, time_created, version
+     FROM session WHERE id = ${JSON.stringify(sessionId)}`
+  )
+  if (!sessRows.length) return null
+  const s = sessRows[0]
+  const cnt = sqliteQuery(
+    dbPath,
+    `SELECT
+      (SELECT COUNT(*) FROM message WHERE session_id = ${JSON.stringify(sessionId)}) AS messages,
+     (SELECT COUNT(*) FROM part WHERE session_id = ${JSON.stringify(sessionId)}) AS parts`
+  )[0] ?? { messages: 0, parts: 0 }
+  const cacheVal = `db:${s.time_updated}:${cnt.messages}:${cnt.parts}`
+  if (cacheGet && cacheGet(sessionId) === cacheVal) return null
+  if (cacheSet) cacheSet(sessionId, cacheVal)
+
+  const msgRows = sqliteQuery(
+    dbPath,
+    `SELECT id, data, time_created FROM message WHERE session_id = ${JSON.stringify(sessionId)} ORDER BY time_created, id`
+  )
+  const messages = []
+  for (const row of msgRows) {
+    let m
+    try { m = JSON.parse(row.data) } catch { continue }
+    if (m.role === "user" || m.role === "assistant") {
+      m.id = m.id ?? row.id
+      m._timeCreated = m.time?.created ?? row.time_created
+      messages.push(m)
+    }
+  }
+  messages.sort((a, b) => (a._timeCreated ?? 0) - (b._timeCreated ?? 0))
+
+  const converted = messages.map((m, i) => {
+    const mid = m.id ?? `opencode-${sessionId}-${i}`
+    const content =
+      readOCMessageContentFromPartRows(dbPath, mid) ?? m.summary?.title ?? `[${m.role} message]`
+    return {
+      uuid: mid,
+      parentUuid: null,
+      type: m.role === "assistant" ? "assistant" : "human",
+      sessionId,
+      timestamp: m.time?.created
+        ? new Date(m.time.created).toISOString()
+        : m._timeCreated
+          ? new Date(m._timeCreated).toISOString()
+          : new Date().toISOString(),
+      isSidechain: false,
+      message: { role: m.role, content },
+    }
+  })
+
+  const projectDir = s.directory ? normProjectDir(s.directory) : "opencode-global"
+  return {
+    meta: {
+      id: sessionId,
+      projectPath: `opencode:${projectDir}`,
+      messageCount: converted.length,
+      userMessageCount: converted.filter(m => m.message.role === "user").length,
+      lastActivity: new Date(s.time_updated || s.time_created || Date.now()).toISOString(),
+      isActive: false,
+      firstName: s.title || null,
+      source: "opencode",
+      lastUsedModel: opencodeLastModelFromMessageRows(messages),
     },
     msgs: converted,
   }
 }
 
 /**
- * Iterates all OpenCode session files and returns {sessionFile, result}[].
- * cacheGet/cacheSet are optional; pass null to always read.
+ * Iterates all OpenCode sessions (SQLite first, then legacy JSON files not in DB).
+ * Yields { sessionFile, result }[]; cacheGet/cacheSet are optional; pass null to always read.
  */
 export function* iterOpenCodeSessions(cacheGet, cacheSet) {
+  const inDb = new Set()
+  if (fs.existsSync(OPENCODE_DB)) {
+    for (const { id } of sqliteQuery(OPENCODE_DB, "SELECT id FROM session")) {
+      if (!id) continue
+      const result = readOpenCodeSessionFromSqlite(OPENCODE_DB, id, cacheGet, cacheSet)
+      if (result) {
+        inDb.add(id)
+        yield { sessionFile: `sqlite:${id}`, result }
+      }
+    }
+  }
   const sessionBaseDir = path.join(OPENCODE_STORAGE, "session")
   if (!fs.existsSync(sessionBaseDir)) return
   for (const projectHash of fs.readdirSync(sessionBaseDir)) {
     const projectDir = path.join(sessionBaseDir, projectHash)
     try { if (!fs.statSync(projectDir).isDirectory()) continue } catch { continue }
     for (const sf of fs.readdirSync(projectDir).filter(f => f.endsWith(".json"))) {
+      const sessionId = sf.replace(/\.json$/, "")
+      if (inDb.has(sessionId)) continue
       const sessionFile = path.join(projectDir, sf)
       const result = readOpenCodeSession(sessionFile, cacheGet, cacheSet)
       if (result) yield { sessionFile, result }
@@ -721,7 +859,7 @@ export function* iterOpenCodeSessions(cacheGet, cacheSet) {
   }
 }
 
-export { OPENCODE_STORAGE }
+export { OPENCODE_DIR, OPENCODE_DB, OPENCODE_STORAGE }
 
 // ── Codex ─────────────────────────────────────────────────────────────────────
 //
