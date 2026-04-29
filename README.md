@@ -2,14 +2,17 @@
 
 ![Agent Session Viewer UI](public/screenshot.png)
 
-A live multi-platform session viewer — browse AI coding assistant conversations across Claude Code, Codex, Cursor, OpenCode, and Antigravity in a unified dark-mode UI with markdown rendering, tool call cards, and thinking blocks.
+A live multi-platform session viewer — browse AI coding assistant conversations across Claude Code, Codex, Cursor, OpenCode, Hermes, and Antigravity in a unified dark-mode UI with markdown rendering, tool call cards, fuzzy thread search, and thinking blocks.
 
 Sessions are streamed to a Cloudflare Worker (KV storage) by a local daemon that watches your session directories. Works on desktop and mobile.
+
+**Static UI mockup** — [`public/mockup.html`](public/mockup.html) is a standalone offline snapshot of the layout (sidebar thread search, per-platform pills and glyphs, Raw/Pretty toggle, thread-search chrome, Cursor-style Write batch hints, Bash/Read/Edit cards). After `npm run dev`, open **`http://localhost:5173/mockup.html`** (the file also lives beside [`public/favicon.svg`](public/favicon.svg) if you browse the repo on GitHub).
 
 ## Features
 
 - **Live updates** — sessions appear as you work; SSE streaming keeps the UI current
-- **Pretty mode** — markdown rendering, thinking pills, tool call cards (Bash, Read, Edit, Write, Search…)
+- **Static mockup** — [`public/mockup.html`](public/mockup.html) previews the chrome without backend data (`/mockup.html` under the Vite dev server)
+- **Pretty mode** — markdown rendering, thinking pills, tool call cards (Bash / Shell, Read, Edit, Write with multi-file hints, Search…)
 - **Multi-platform** — Claude Code, Codex, Cursor, OpenCode, and Antigravity sessions in one place
 - **Platform filter** — filter the sidebar by platform (All / Claude / Codex / Cursor / OpenCode / Antigravity)
 - **Sub-agent runs marked** — messages from Claude Code sub-agents (sidechain sessions) are visually distinguished with a `⤷ sub-agent` indicator and indented left border
@@ -29,6 +32,7 @@ The daemon auto-detects and syncs sessions from:
 | **Codex** | `~/.codex/sessions/**/*.jsonl` | JSONL event stream |
 | **Cursor** | `~/.cursor/chats/{hash}/{uuid}/store.db` | SQLite blob store |
 | **OpenCode** | `~/.local/share/opencode/storage/` | Flat JSON files |
+| **Hermes** | `~/.hermes/state.db` | SQLite (`readHermesSessions`) |
 | **Antigravity** | `~/.gemini/antigravity/brain/{uuid}/*.md` | Markdown artifacts |
 
 All platforms are detected automatically — no configuration needed if the directories exist.
