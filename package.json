@@ -16,12 +16,20 @@
     "shared-utils.mjs",
     "platform-readers.mjs"
   ],
-  "keywords": ["ai", "claude", "cursor", "codex", "opencode", "session-viewer", "devtools"],
+  "keywords": [
+    "ai",
+    "claude",
+    "cursor",
+    "codex",
+    "opencode",
+    "session-viewer",
+    "devtools"
+  ],
   "author": "Dhruv Anand",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/dhruv-anand-aintech/agent-session-viewer"
+    "url": "git+https://github.com/dhruv-anand-aintech/agent-session-viewer.git"
   },
   "scripts": {
     "prepare": "npm run build",
