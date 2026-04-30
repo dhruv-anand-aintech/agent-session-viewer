@@ -1,9 +1,30 @@
 {
   "name": "agent-session-viewer",
-  "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "Live multi-platform AI coding session viewer — Claude Code, Cursor, Codex, OpenCode, Hermes, Antigravity",
   "type": "module",
+  "bin": {
+    "agent-session-viewer": "bin/agent-session-viewer.mjs"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "lib/",
+    "local-server.mjs",
+    "build-cache.mjs",
+    "setup-local.mjs",
+    "shared-utils.mjs",
+    "platform-readers.mjs"
+  ],
+  "keywords": ["ai", "claude", "cursor", "codex", "opencode", "session-viewer", "devtools"],
+  "author": "Dhruv Anand",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dhruv-anand-aintech/agent-session-viewer"
+  },
   "scripts": {
+    "prepare": "npm run build",
     "dev": "vite",
     "dev:api": "node dev-server.mjs",
     "build": "tsc -b && vite build",

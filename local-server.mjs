@@ -153,8 +153,9 @@ function applySidebarCache(sessions) {
   for (const s of sessions) {
     const entry = _map.get(s.id)
     if (!entry) continue
-    if (!s.messageCount) s.messageCount = entry.messageCount ?? 0
-    if (s.userMessageCount == null) s.userMessageCount = entry.userMessageCount ?? null
+    // Use cached value whenever the live value is 0/null (cheap-scan placeholder)
+    if (!s.messageCount && entry.messageCount) s.messageCount = entry.messageCount
+    if (!s.userMessageCount && entry.userMessageCount) s.userMessageCount = entry.userMessageCount
     if (!s.firstName && entry.firstName) s.firstName = entry.firstName
   }
 }
@@ -405,7 +406,7 @@ function scanOneClaudeFolder(root, label, dir, names, fileBySessKey) {
       version: undefined,
       gitBranch: undefined,
       isActive: Date.now() - stat.mtimeMs < FIVE_MIN,
-      userMessageCount: 0,
+      userMessageCount: null,
       messageCount: 0,
       firstName: cheapReadFirstUserMsg(fp),
       customName: names[`${projectKey}/${sessionId}`] ?? null,
