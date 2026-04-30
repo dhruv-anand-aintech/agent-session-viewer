@@ -2,76 +2,75 @@
 
 ![Agent Session Viewer UI](public/screenshot.png)
 
-A live multi-platform session viewer — browse AI coding assistant conversations across Claude Code, Codex, Cursor, OpenCode, Hermes, and Antigravity in a unified dark-mode UI with markdown rendering, tool call cards, fuzzy thread search, and thinking blocks.
+A live multi-platform session viewer — browse AI coding assistant conversations across Claude Code, Codex, Cursor, OpenCode, Hermes, Antigravity, and messaging bots (nanoclaw, openclaw, picoclaw, and friends) in a unified dark-mode UI with markdown rendering, tool call cards, fuzzy thread search, and thinking blocks.
 
 Sessions are streamed to a Cloudflare Worker (KV storage) by a local daemon that watches your session directories. Works on desktop and mobile.
 
-**Static UI mockup** — [`public/mockup.html`](public/mockup.html) is a standalone offline snapshot of the layout (sidebar thread search, per-platform pills and glyphs, Raw/Pretty toggle, thread-search chrome, Cursor-style Write batch hints, Bash/Read/Edit cards). After `npm run dev`, open **`http://localhost:5173/mockup.html`** (the file also lives beside [`public/favicon.svg`](public/favicon.svg) if you browse the repo on GitHub).
+**Static UI mockup** — [`public/mockup.html`](public/mockup.html) is a standalone offline snapshot of the layout. After `npm run dev`, open **`http://localhost:5173/mockup.html`**.
 
 ## Features
 
 - **Live updates** — sessions appear as you work; SSE streaming keeps the UI current
-- **Static mockup** — [`public/mockup.html`](public/mockup.html) previews the chrome without backend data (`/mockup.html` under the Vite dev server)
-- **Pretty mode** — markdown rendering, thinking pills, tool call cards (Bash / Shell, Read, Edit, Write with multi-file hints, Search…)
-- **Multi-platform** — Claude Code, Codex, Cursor, OpenCode, and Antigravity sessions in one place
-- **Platform filter** — filter the sidebar by platform (All / Claude / Codex / Cursor / OpenCode / Antigravity)
-- **Sub-agent runs marked** — messages from Claude Code sub-agents (sidechain sessions) are visually distinguished with a `⤷ sub-agent` indicator and indented left border
+- **Pretty mode** — markdown rendering, thinking pills, tool call cards (Bash, Read, Edit, Write, Search…)
+- **Multi-platform** — Claude Code, Codex, Cursor, OpenCode, Hermes, and Antigravity sessions in one place
+- **Platform filter** — filter the sidebar by platform
+- **Sub-agent runs** — sub-agent sessions are visually distinguished with a `⤷ sub-agent` indicator and indented border
 - **Flat or grouped sidebar** — all sessions sorted by last activity, or grouped by project
 - **Session renaming** — give sessions memorable names via the pencil icon
-- **Mobile-friendly** — slide-in sidebar drawer, back button, responsive layout
-- **PIN-protected** — simple cookie auth so you can expose the viewer remotely
-- **Claw bot support** *(optional)* — syncs WhatsApp/Telegram Claude agent sessions from any supported claw tool installation
+- **Thread search** — fuzzy in-sidebar search across all sessions
+- **Mobile-friendly** — slide-in sidebar drawer, back button, safe-area aware
+- **PIN-protected** — simple cookie auth for remote access
 
 ## Platform support
 
-The daemon auto-detects and syncs sessions from:
+All platforms are auto-detected from their standard locations — no configuration needed if the directories exist.
 
-| Platform | Storage location | Format |
+| Platform | Default location | Format |
 |---|---|---|
-| **Claude Code** | `~/.claude/projects/**/*.jsonl` | JSONL (native) |
+| **Claude Code** | `~/.claude/projects/**/*.jsonl` | JSONL |
 | **Codex** | `~/.codex/sessions/**/*.jsonl` | JSONL event stream |
-| **Cursor** | `~/.cursor/chats/{hash}/{uuid}/store.db` | SQLite blob store |
-| **OpenCode** | `~/.local/share/opencode/storage/` | Flat JSON files |
-| **Hermes** | `~/.hermes/state.db` | SQLite (`readHermesSessions`) |
-| **Antigravity** | `~/.gemini/antigravity/brain/{uuid}/*.md` | Markdown artifacts |
-
-All platforms are detected automatically — no configuration needed if the directories exist.
+| **Cursor** | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | SQLite |
+| **OpenCode** | `~/.local/share/opencode/` | SQLite + JSON |
+| **Hermes** | `~/.hermes/state.db` | SQLite |
+| **Antigravity** | `~/.gemini/antigravity/brain/{uuid}/` | Markdown artifacts |
 
 ### Platform notes
 
-**Codex** — rollout transcripts are read from `~/.codex/sessions/`. Structured `function_call` / `function_call_output` entries are preserved as tool-use and tool-result blocks so pretty mode renders proper cards instead of flattening them to plain text.
+**Codex** — rollout transcripts are read from `~/.codex/sessions/`. Structured `function_call` / `function_call_output` entries render as proper tool-use cards in Pretty mode.
 
-**Cursor** — sessions are read from the content-addressed SQLite blob store. Workspace → folder mapping is resolved via `~/Library/Application Support/Cursor/User/workspaceStorage/`. Sessions are tagged `source: "cursor"`.
+**Cursor** — sessions are read from the SQLite blob store. Workspace → folder mapping is resolved via `workspaceStorage/`. macOS only (path is hardcoded to `~/Library/Application Support/Cursor/`).
 
-**OpenCode** — sessions and per-message JSON files are read from `~/.local/share/opencode/storage/`. Message content uses the summary title (full streamed text is not persisted locally by OpenCode).
+**OpenCode** — reads from `~/.local/share/opencode/opencode.db` (newer releases) with fallback to the flat `storage/` directory layout.
 
-**Antigravity (Jetski agent)** — Google's IDE stores structured artifacts per session: `task.md`, `implementation_plan.md`, `walkthrough.md`. Each artifact is shown as an assistant message. Full conversation logs (`.pb` protobuf files) use an undisclosed schema and are not read. Session titles and workspace paths come from `state.vscdb`.
+**Antigravity** — Google's coding agent stores structured artifacts per session (`task.md`, `implementation_plan.md`, `walkthrough.md`). Each artifact is shown as an assistant message. Full conversation logs use an undisclosed protobuf schema and are not read.
+
+**Hermes** — reads from `~/.hermes/state.db`. Sessions are grouped by source (Telegram channel, WhatsApp number, etc.).
 
 ## Claw bot integration
 
-Agent Session Viewer supports the full family of **claw-type messaging bots** — local AI agents that run Claude via WhatsApp or Telegram and store their session data in a standard directory layout.
+Agent Session Viewer supports **claw-type messaging bots** — AI agents that run via WhatsApp or Telegram and store session data locally.
 
-Supported tools (auto-detected from `~/toolname`):
+Two storage layouts are supported automatically:
 
-| Tool | Env var override |
-|---|---|
-| **nanoclaw** *(primary)* | `NANOCLAW_DIR` |
-| openclaw | `OPENCLAW_DIR` |
-| picoclaw | `PICOCLAW_DIR` |
-| femtoclaw | `FEMTOCLAW_DIR` |
-| attoclaw | `ATTOCLAW_DIR` |
-| kiloclaw | `KILOCLAW_DIR` |
-| megaclaw | `MEGACLAW_DIR` |
-| zeroclaw | `ZEROCLAW_DIR` |
-| microclaw | `MICROCLAW_DIR` |
-| rawclaw | `RAWCLAW_DIR` |
+- **nanoclaw-style** (default): `{dir}/store/messages.db` + `{dir}/data/sessions/`
+- **picoclaw-style**: `{dir}/workspace/sessions/` (JSONL directly, no SQLite DB)
 
-Each detected tool syncs two types of data:
+Auto-detected from standard install locations (first match wins):
 
-- **Chat sessions** — flat message history from the SQLite database (`store/messages.db`), surfaced as a `toolname-telegram` or `toolname-whatsapp` project
-- **Agent sessions** — rich Claude Code JSONL files from `data/sessions/`, including thinking blocks, tool calls, and full agent reasoning, surfaced as `toolname-agent-telegram` etc.
+| Tool | Auto-detected at | Layout |
+|---|---|---|
+| **nanoclaw** | `~/nanoclaw` or `~/.nanoclaw` | nanoclaw-style |
+| **openclaw** | `~/openclaw` or `~/.openclaw` | nanoclaw-style |
+| **picoclaw** | `~/picoclaw` or `~/.picoclaw` | picoclaw-style |
+| **femtoclaw** | `~/femtoclaw` or `~/.femtoclaw` | nanoclaw-style |
+| **attoclaw** | `~/attoclaw` or `~/.attoclaw` | nanoclaw-style |
+| **kiloclaw** | `~/kiloclaw` or `~/.kiloclaw` | nanoclaw-style |
+| **megaclaw** | `~/megaclaw` or `~/.megaclaw` | nanoclaw-style |
+| **zeroclaw** | `~/zeroclaw` or `~/.zeroclaw` | nanoclaw-style |
+| **microclaw** | `~/microclaw` or `~/.microclaw` | nanoclaw-style |
+| **rawclaw** | `~/rawclaw` or `~/.rawclaw` | nanoclaw-style |
 
-Path overrides can also be set via the **Settings** panel (⚙ in the top bar) without editing env vars.
+If your installation is in a non-standard location, set the env var override (e.g. `NANOCLAW_DIR=/path/to/nanoclaw`) or configure the path in the Settings panel (⚙).
 
 ## Requirements
 
@@ -82,7 +81,7 @@ Path overrides can also be set via the **Settings** panel (⚙ in the top bar) w
 ## One-command setup
 
 ```bash
-git clone https://github.com/your/agent-session-viewer
+git clone https://github.com/dhruv-anand-aintech/agent-session-viewer
 cd agent-session-viewer
 npm install
 node setup.mjs
@@ -92,7 +91,7 @@ The setup script will:
 
 1. Create a KV namespace in your Cloudflare account
 2. Patch `wrangler.toml` with the real namespace IDs
-3. Prompt you to choose a PIN (used to log in to the viewer)
+3. Prompt you to choose a PIN
 4. Build and deploy the Worker
 
 After setup, the script prints your Worker URL and the exact command to start the daemon.
@@ -105,95 +104,76 @@ AUTH_PIN=<your-pin> \
 npm run daemon
 ```
 
-Or pass flags directly:
+Or with flags:
 
 ```bash
 node daemon/watch.mjs --worker <url> --pin <pin>
 ```
 
-The daemon does an initial sync of all existing sessions, then watches all supported platform directories for live changes.
+The daemon does an initial sync of all existing sessions, then watches all supported platform directories for live changes. Claw tools are auto-detected — no flags needed if they're installed at standard locations.
 
-### With claw tool support
-
-```bash
-# Auto-detected if ~/nanoclaw exists — or specify explicitly:
-WORKER_URL=... AUTH_PIN=... NANOCLAW_DIR=/path/to/nanoclaw npm run daemon
-
-# Multiple tools at once:
-WORKER_URL=... AUTH_PIN=... \
-  NANOCLAW_DIR=/path/to/nanoclaw \
-  OPENCLAW_DIR=/path/to/openclaw \
-  npm run daemon
-```
-
-The daemon polls each tool's SQLite DB every 5 seconds and file-watches the agent JSONL sessions for instant updates.
-
-## Local development
+## Local development (no Cloudflare)
 
 ```bash
-npm run dev        # Vite dev server (frontend only)
-npm run dev:api    # Local API proxy (optional)
-npm run local      # Fully local mode — no Cloudflare needed
+npm run local         # local-server + Vite — reads all platform dirs directly
+npm run local -- --host  # also bind to 0.0.0.0 for LAN access (mobile testing)
+npm run dev           # Vite only (frontend only, no API)
 ```
 
-`npm run local` starts a standalone server that reads all platform session directories directly — no daemon, no Cloudflare account, no KV. All platform sources (Claude, Cursor, OpenCode, Antigravity) are supported identically to the daemon+worker stack.
-
-**Migrating local state:** Under `~/.claude/`, if you still have the previous config filenames, rename `session-viewer-local.json` → `agent-session-viewer-local.json` and `session-viewer-sync-cache.json` → `agent-session-viewer-sync-cache.json` to keep settings and the daemon upload cache. After redeploying the Worker, the default `*.workers.dev` hostname may change unless you use a custom route.
+`npm run local` reads all platform session directories directly — no daemon, no Cloudflare account, no KV needed.
 
 ## Deploying changes
 
 ```bash
-SESSIONS_KV_ID=<id> SESSIONS_KV_PREVIEW_ID=<preview_id> npm run deploy
+npm run deploy
 ```
 
-`deploy.mjs` patches `wrangler.toml` with your KV IDs, runs the build and deploy, then restores the placeholders — keeping the repo clean for sharing.
-
-Store these in your shell profile or a local env file:
+KV IDs are loaded from a `.env` file in the project root (created by `node setup.mjs`) or from environment variables:
 
 ```bash
-export SESSIONS_KV_ID=e61e79fc...
-export SESSIONS_KV_PREVIEW_ID=e5f103b9...
+# .env
+SESSIONS_KV_ID=e61e79fc...
+SESSIONS_KV_PREVIEW_ID=e5f103b9...
 ```
-
-Then just run `npm run deploy`.
 
 ## Architecture
 
 ```
-~/.claude/projects/**/*.jsonl           (Claude Code sessions + sub-agent sidechains)
-~/.cursor/chats/{hash}/{uuid}/store.db  (Cursor agent sessions — SQLite blobs)
-~/.local/share/opencode/storage/        (OpenCode sessions — flat JSON)
-~/.gemini/antigravity/brain/{uuid}/     (Antigravity artifacts — Markdown)
-~/nanoclaw/store/messages.db            (claw bot chat history — optional)
-~/nanoclaw/data/sessions/**/*.jsonl     (claw bot agent sessions — optional)
+~/.claude/projects/**/*.jsonl           Claude Code sessions
+~/.codex/sessions/**/*.jsonl            Codex sessions
+~/Library/.../Cursor/.../state.vscdb    Cursor sessions (macOS)
+~/.local/share/opencode/                OpenCode sessions
+~/.hermes/state.db                      Hermes sessions
+~/.gemini/antigravity/brain/            Antigravity sessions
+~/nanoclaw/store/messages.db            claw bot chat history (auto-detected)
+~/nanoclaw/data/sessions/**/*.jsonl     claw bot agent sessions (auto-detected)
          │
          ▼
-  daemon/watch.mjs          (local file watcher + SQLite poller)
-         │  PUT /api/sync (X-Auth-Pin header)
+  daemon/watch.mjs        (local file watcher + SQLite poller)
+         │  PUT /api/sync (X-Auth-Pin)
          ▼
-  Cloudflare Worker          (worker/index.ts)
-     KV: meta/* + msgs/*
-         │
-         ▼  SSE /api/stream
-  Browser (React + Vite)     (src/)
+  Cloudflare Worker       (worker/index.ts — KV storage)
+         │  SSE /api/stream
+         ▼
+  Browser (React + Vite)  (src/)
 
-  ── or (local mode) ──
+  ── or local mode ──
 
-  local-server.mjs           (reads all platform dirs directly — no Cloudflare)
-         │
-         ▼  SSE /api/stream
-  Browser (React + Vite)     (src/)
+  local-server.mjs        (reads platform dirs directly — no Cloudflare)
+         │  SSE /api/stream
+         ▼
+  Browser (React + Vite)  (src/)
 ```
 
-## Configuration
+## Configuration reference
 
-| Variable | Flag | Description |
-|---|---|---|
-| `WORKER_URL` | `--worker` | URL of your deployed Cloudflare Worker |
-| `AUTH_PIN` | `--pin` | PIN set during `node setup.mjs` |
-| `NANOCLAW_DIR` | `--nanoclaw` | Path to nanoclaw repo *(primary claw tool)* |
-| `OPENCLAW_DIR` | `--openclaw` | Path to openclaw repo |
-| `PICOCLAW_DIR` | `--picoclaw` | Path to picoclaw repo |
-| *(any `{NAME}_DIR`)* | `--{name}` | Any other supported claw tool |
+All platform directories are auto-detected. These variables are **overrides only** — only needed if your install is in a non-standard location.
 
-Platform directories (Cursor, OpenCode, Antigravity) are auto-detected from their standard locations and require no configuration.
+| Variable | Description |
+|---|---|
+| `WORKER_URL` | URL of your deployed Cloudflare Worker |
+| `AUTH_PIN` | PIN set during `node setup.mjs` |
+| `NANOCLAW_DIR` | Path to nanoclaw if not at `~/nanoclaw` |
+| `OPENCLAW_DIR` | Path to openclaw if not at `~/openclaw` |
+| `PICOCLAW_DIR` | Path to picoclaw if not at `~/picoclaw` |
+| `{NAME}_DIR` | Override for any other claw tool |
