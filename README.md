@@ -4,19 +4,42 @@
 
 A live multi-platform session viewer — browse AI coding assistant conversations across Claude Code, Codex, Cursor, OpenCode, Hermes, Antigravity, and messaging bots (nanoclaw, openclaw, picoclaw, and friends) in a unified dark-mode UI with markdown rendering, tool call cards, fuzzy thread search, and thinking blocks.
 
-## Quickstart (local, no account needed)
+## Install
+
+### npx (no install required)
+
+```bash
+npx agent-session-viewer
+```
+
+Downloads and runs directly. Builds the sidebar cache on first run, then opens at **http://localhost:3001**.
+
+```bash
+npx agent-session-viewer --host    # LAN access (phone, tablet)
+npx agent-session-viewer --open    # auto-open browser
+npx agent-session-viewer --port 4000
+npx agent-session-viewer --skip-cache  # skip cache build
+```
+
+### Homebrew (macOS)
+
+```bash
+brew tap dhruv-anand-aintech/tap
+brew install agent-session-viewer
+agent-session-viewer
+```
+
+### From source
 
 ```bash
 git clone https://github.com/dhruv-anand-aintech/agent-session-viewer
 cd agent-session-viewer
 npm install
-npm run setup
-npm run local
+npm run setup    # detects platforms, builds sidebar cache
+npm run local    # starts at http://localhost:5173
 ```
 
-`npm run setup` detects your session directories, builds a local sidebar cache (so message counts show immediately), and prints the start command. Then `npm run local` starts the viewer at **http://localhost:5173**.
-
-To access from other devices on your network (phone, tablet):
+To access from other devices on your network:
 
 ```bash
 npm run local -- --host
