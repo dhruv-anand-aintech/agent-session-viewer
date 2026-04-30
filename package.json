@@ -1,6 +1,6 @@
 {
   "name": "agent-session-viewer",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Live multi-platform AI coding session viewer — Claude Code, Cursor, Codex, OpenCode, Hermes, Antigravity",
   "type": "module",
   "bin": {
