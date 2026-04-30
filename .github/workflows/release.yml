@@ -11,7 +11,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write
     outputs:
       version: ${{ steps.version.outputs.version }}
       tarball_url: ${{ steps.version.outputs.tarball_url }}
@@ -46,7 +45,9 @@ jobs:
           fi
 
       - name: Publish to npm
-        run: npm publish --access public --provenance
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
