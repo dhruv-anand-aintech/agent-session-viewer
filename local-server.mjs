@@ -45,6 +45,21 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const CLAUDE_DIR = join(homedir(), ".claude", "projects")
 const CONFIG_FILE = join(homedir(), ".claude", "agent-session-viewer-local.json")
 
+/**
+ * Turn an encoded project dir (e.g. "-Users-dhruv-Code-my-cool-project") into a
+ * human-readable display name. Reconstructs the absolute path and checks if it
+ * exists on disk — if so, shows path relative to home. Falls back to stripping
+ * the common ~/Code prefix without replacing remaining dashes (avoids turning
+ * "my-cool-project" into "my/cool/project").
+ */
+function encodedDirToDisplayName(encodedDir) {
+  // Reconstruct absolute path and verify on disk — preserves actual dashes in folder names
+  const abs = "/" + encodedDir.replace(/-/g, "/")
+  if (existsSync(abs)) return abs.replace(homedir() + "/", "")
+  // Disk check failed (path has ambiguous dashes): strip the common ~/Code/ prefix and show remainder as-is
+  return encodedDir.replace(/^-?Users-[^-]+-Code-/, "")
+}
+
 const DIST_DIR = join(__dirname, "dist")
 const PORT = parseInt(process.env.PORT ?? "3001")
 const AUTH_PIN = process.env.AUTH_PIN ?? null
@@ -198,7 +213,7 @@ async function loadProjectsFull() {
       }
 
       if (sessions.length > 0) {
-        const baseName = dir.replace(/^-Users-[^-]+-Code-/, "").replace(/-/g, "/")
+        const baseName = encodedDirToDisplayName(dir)
         projects.push({
           path: `${root}/${dir}`,
           displayName: label ? `[${label}] ${baseName}` : baseName,
@@ -262,7 +277,7 @@ function scanOneClaudeFolder(root, label, dir, names, fileBySessKey) {
       source: "claude",
     })
   }
-  const baseName = dir.replace(/^-Users-[^-]+-Code-/, "").replace(/-/g, "/")
+  const baseName = encodedDirToDisplayName(dir)
   return {
     path: projectPath,
     displayName: label ? `[${label}] ${baseName}` : baseName,
@@ -576,7 +591,7 @@ function resultsToProjects(results, platformPrefix) {
       const dirPart = projectPath.replace(`${platformPrefix}:`, "")
       projects.set(projectPath, {
         path: projectPath,
-        displayName: `${platformPrefix}: ${dirPart.replace(/^-Users-[^-]+-Code-/, "").replace(/-/g, "/")}`,
+        displayName: `${platformPrefix}: ${encodedDirToDisplayName(dirPart)}`,
         sessions: [],
       })
     }
@@ -1112,9 +1127,11 @@ const server = http.createServer(async (req, res) => {
   res.writeHead(404); res.end("Not Found")
 })
 
-server.listen(PORT, () => {
+const BIND_HOST = process.env.HOST ?? "127.0.0.1"
+server.listen(PORT, BIND_HOST, () => {
+  const displayHost = BIND_HOST === "0.0.0.0" ? "0.0.0.0 (all interfaces)" : "localhost"
   console.log(`\n  Agent Session Viewer (local mode)`)
-  console.log(`  API:      http://localhost:${PORT}`)
+  console.log(`  API:      http://localhost:${PORT} (bound to ${displayHost})`)
   if (existsSync(DIST_DIR)) {
     console.log(`  App:      http://localhost:${PORT}`)
   } else {

@@ -15,6 +15,7 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..")
 const SERVER = path.join(ROOT, "local-server.mjs")
 
 const preferred = Number.parseInt(process.env.PORT ?? "3001", 10)
+const host = process.argv.includes("--host")
 
 function tryBindPort(port) {
   return new Promise((resolve) => {
@@ -53,10 +54,11 @@ if (!existsSync(viteJs)) {
 const api = spawn(process.execPath, ["--watch", SERVER], {
   cwd: ROOT,
   stdio: "inherit",
-  env: { ...process.env, PORT: String(apiPort) },
+  env: { ...process.env, PORT: String(apiPort), HOST: host ? "0.0.0.0" : "127.0.0.1" },
 })
 
-const ui = spawn(process.execPath, [viteJs], {
+const viteArgs = [viteJs, ...(host ? ["--host"] : [])]
+const ui = spawn(process.execPath, viteArgs, {
   cwd: ROOT,
   stdio: "inherit",
   env: { ...process.env, VITE_API_PROXY_TARGET: proxyTarget },

@@ -1132,7 +1132,7 @@ const activeTools = KNOWN_CLAW_TOOLS.map(name => {
 if (activeTools.length > 0) {
   log(`Detected claw tools: ${activeTools.map(t => t.name).join(", ")}`)
 } else {
-  log("No claw tools detected (set NANOCLAW_DIR etc. to enable)")
+  log("No claw tools detected (install to ~/nanoclaw, ~/openclaw, etc. or set {NAME}_DIR to override)")
 }
 
 await initialSync()
