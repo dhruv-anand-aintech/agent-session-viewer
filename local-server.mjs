@@ -44,6 +44,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 
 const CLAUDE_DIR = join(homedir(), ".claude", "projects")
 const CONFIG_FILE = join(homedir(), ".claude", "agent-session-viewer-local.json")
+const SIDEBAR_CACHE_FILE = join(homedir(), ".claude", "agent-session-viewer-sidebar-cache.json")
 
 /**
  * Turn an encoded project dir (e.g. "-Users-dhruv-Code-my-cool-project") into a
@@ -77,6 +78,140 @@ function loadConfig() {
 
 function saveConfig(data) {
   writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2))
+}
+
+// --- Sidebar cache (persists messageCount/userMessageCount/firstName keyed by sessionId + mtime) ---
+// Shape: { [sessionId]: { messageCount, userMessageCount, firstName, mtime } }
+
+let _sidebarCache = null
+
+// Cache shape v2: { v: 2, sessions: CacheEntry[] } sorted by lastActivity desc.
+// CacheEntry: { id, projectPath, projectDisplayName, source, messageCount, userMessageCount,
+//               firstName, lastActivity, mtime, customName? }
+// Loaded once into memory; a Map index is built for O(1) lookup by sessionId.
+
+function loadSidebarCache() {
+  if (_sidebarCache) return _sidebarCache
+  try {
+    const raw = JSON.parse(readFileSync(SIDEBAR_CACHE_FILE, "utf8"))
+    // Migrate v1 (plain object keyed by sessionId) to v2
+    if (!raw.v || raw.v < 2) {
+      _sidebarCache = { v: 2, sessions: [], _map: new Map() }
+    } else {
+      _sidebarCache = raw
+      _sidebarCache._map = new Map(_sidebarCache.sessions.map(e => [e.id, e]))
+    }
+  } catch {
+    _sidebarCache = { v: 2, sessions: [], _map: new Map() }
+  }
+  return _sidebarCache
+}
+
+function saveSidebarCache() {
+  if (!_sidebarCache) return
+  // Sort by lastActivity desc before writing; omit _map (non-serialisable)
+  _sidebarCache.sessions.sort((a, b) => String(b.lastActivity).localeCompare(String(a.lastActivity)))
+  const { _map, ...toWrite } = _sidebarCache
+  try { writeFileSync(SIDEBAR_CACHE_FILE, JSON.stringify(toWrite)) } catch { /* ignore */ }
+}
+
+/**
+ * Convert the cache into ProjectData[] groups, applying stored customNames.
+ * Returns null if cache is empty.
+ */
+function loadCachedSidebarState() {
+  const cache = loadSidebarCache()
+  if (!cache.sessions.length) return null
+  const names = loadConfig().names ?? {}
+  const projectMap = new Map()
+  for (const e of cache.sessions) {
+    if (!projectMap.has(e.projectPath)) {
+      projectMap.set(e.projectPath, {
+        path: e.projectPath,
+        displayName: e.projectDisplayName,
+        sessions: [],
+      })
+    }
+    projectMap.get(e.projectPath).sessions.push({
+      id: e.id,
+      projectPath: e.projectPath,
+      lastActivity: e.lastActivity,
+      messageCount: e.messageCount ?? 0,
+      userMessageCount: e.userMessageCount ?? null,
+      firstName: e.firstName ?? null,
+      customName: names[`${e.projectPath}/${e.id}`] ?? e.customName ?? null,
+      source: e.source ?? "claude",
+      isActive: false,
+    })
+  }
+  return Array.from(projectMap.values())
+}
+
+/** Apply cached counts/names to sessions that are missing them (cheap-scan results). */
+function applySidebarCache(sessions) {
+  const { _map } = loadSidebarCache()
+  for (const s of sessions) {
+    const entry = _map.get(s.id)
+    if (!entry) continue
+    if (!s.messageCount) s.messageCount = entry.messageCount ?? 0
+    if (s.userMessageCount == null) s.userMessageCount = entry.userMessageCount ?? null
+    if (!s.firstName && entry.firstName) s.firstName = entry.firstName
+  }
+}
+
+/** Upsert a cache entry. Returns true if anything changed. */
+function updateSidebarCacheEntry(sessionId, { projectPath, projectDisplayName, source, messageCount, userMessageCount, firstName, lastActivity, mtime, customName }) {
+  const cache = loadSidebarCache()
+  const mtimeStr = typeof mtime === "number" ? String(mtime) : String(mtime)
+  const existing = cache._map.get(sessionId)
+  if (existing &&
+      existing.mtime === mtimeStr &&
+      existing.messageCount === messageCount &&
+      existing.userMessageCount === userMessageCount &&
+      existing.firstName === firstName) return false
+  const entry = {
+    id: sessionId,
+    projectPath: projectPath ?? existing?.projectPath ?? "",
+    projectDisplayName: projectDisplayName ?? existing?.projectDisplayName ?? "",
+    source: source ?? existing?.source ?? "claude",
+    messageCount: messageCount ?? 0,
+    userMessageCount: userMessageCount ?? null,
+    firstName: firstName ?? null,
+    lastActivity: lastActivity ?? existing?.lastActivity ?? new Date(Number(mtimeStr)).toISOString(),
+    mtime: mtimeStr,
+    customName: customName ?? existing?.customName ?? null,
+  }
+  if (existing) {
+    Object.assign(existing, entry)
+  } else {
+    cache.sessions.push(entry)
+    cache._map.set(sessionId, entry)
+  }
+  return true
+}
+
+/** Flush updated cache entries from a hydrated projects array. */
+function flushSidebarCacheFromProjects(projects, fileBySessKey) {
+  let dirty = false
+  for (const p of projects) {
+    for (const s of p.sessions) {
+      const mtimeMs = fileBySessKey
+        ? fileBySessKey.get(SESS_PATH_KEY(p.path, s.id))?.stat?.mtimeMs
+        : null
+      if (updateSidebarCacheEntry(s.id, {
+        projectPath: p.path,
+        projectDisplayName: p.displayName,
+        source: s.source ?? "claude",
+        messageCount: s.messageCount ?? 0,
+        userMessageCount: s.userMessageCount ?? null,
+        firstName: s.firstName ?? null,
+        lastActivity: s.lastActivity,
+        mtime: mtimeMs ?? s.lastActivity,
+        customName: s.customName ?? null,
+      })) dirty = true
+    }
+  }
+  if (dirty) saveSidebarCache()
 }
 
 // --- Session reading ---
@@ -277,6 +412,7 @@ function scanOneClaudeFolder(root, label, dir, names, fileBySessKey) {
       source: "claude",
     })
   }
+  applySidebarCache(sessions)
   const baseName = encodedDirToDisplayName(dir)
   return {
     path: projectPath,
@@ -340,6 +476,8 @@ function yieldEventLoopTick() {
 /** Parse and index every Claude JSONL under `fileBySessKey` (yields so the event loop stays responsive). */
 async function backgroundIndexAllClaudeJsonl(fileBySessKey, names) {
   let i = 0
+  let cacheDirty = false
+  const cache = loadSidebarCache()
   for (const [sessKey, { fp, stat }] of fileBySessKey) {
     const sep = sessKey.indexOf("\x1f")
     if (sep === -1) continue
@@ -351,9 +489,19 @@ async function backgroundIndexAllClaudeJsonl(fileBySessKey, names) {
         projectPath.startsWith(CLAUDE_DIR) ? projectPath.slice(CLAUDE_DIR.length + 1) : projectPath
       const meta = claudeSessionMetaFromMsgs(msgs, sessionId, projKey, names, stat)
       indexSession(projectPath, sessionId, msgs, meta)
+      if (updateSidebarCacheEntry(sessionId, {
+        messageCount: meta.messageCount,
+        userMessageCount: meta.userMessageCount,
+        firstName: meta.firstName ?? null,
+        mtime: stat.mtimeMs,
+      })) cacheDirty = true
     } catch { /* ignore bad files */ }
-    if (++i % 20 === 0) await yieldEventLoopTick()
+    if (++i % 20 === 0) {
+      if (cacheDirty) { saveSidebarCache(); cacheDirty = false }
+      await yieldEventLoopTick()
+    }
   }
+  if (cacheDirty) saveSidebarCache()
 }
 
 function scheduleClaudeJsonlIndexing(fileBySessKey, names) {
@@ -364,6 +512,10 @@ function scheduleClaudeJsonlIndexing(fileBySessKey, names) {
 
 /** Progressive recent sidebar: emit trimmed running snapshot after each Claude folder / platform, then hydrate. */
 async function streamRecentSidebarInitial(res, maxSessions) {
+  // Emit cached sidebar state immediately so the UI shows real data before any scanning
+  const cachedState = loadCachedSidebarState()
+  if (cachedState?.length) sseWrite(res, "projects", sortProjectGroups(cachedState))
+
   const names = loadConfig().names ?? {}
   /** @type {Map<string, { fp: string, stat: import('fs').Stats }>} */
   const fileBySessKey = new Map()
@@ -404,6 +556,7 @@ async function streamRecentSidebarInitial(res, maxSessions) {
     ? trimProjectsByRecentSessionCount(acc, hydrateN)
     : sortProjectGroups(acc)
   hydrateClaudeSessionsInProjects(forHydration, fileBySessKey, names)
+  flushSidebarCacheFromProjects(forHydration, fileBySessKey)
   // Copy hydrated firstName values back to acc so all SSE events carry correct titles
   for (const p of forHydration) {
     const ap = acc.find(a => a.path === p.path)
@@ -431,6 +584,7 @@ async function streamRecentSidebarInitial(res, maxSessions) {
       if (res.destroyed) return
       const part = await loadFn()
       if (!part.length) continue
+      flushSidebarCacheFromProjects(part, null)
       acc = mergeProjectsInto(acc, part)
       const nextTotal = countSessionsInProjects(acc)
       sseWrite(res, "projects_meta", { total: nextTotal })
@@ -478,6 +632,7 @@ async function loadProjectsBundleRecent(maxSessions) {
   const trimmed =
     total > maxSessions ? trimProjectsByRecentSessionCount(allProjects, maxSessions) : allProjects
   hydrateClaudeSessionsInProjects(trimmed, fileBySessKey, names)
+  flushSidebarCacheFromProjects(trimmed, fileBySessKey)
   trimmed.sort((a, b) => {
     const aLast = a.sessions[0]?.lastActivity ?? ""
     const bLast = b.sessions[0]?.lastActivity ?? ""
@@ -598,6 +753,7 @@ function resultsToProjects(results, platformPrefix) {
     projects.get(projectPath).sessions.push({ ...meta })
   }
   for (const proj of projects.values()) {
+    applySidebarCache(proj.sessions)
     proj.sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity))
   }
   return Array.from(projects.values())
