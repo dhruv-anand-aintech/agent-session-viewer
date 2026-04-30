@@ -4,15 +4,29 @@
 
 A live multi-platform session viewer — browse AI coding assistant conversations across Claude Code, Codex, Cursor, OpenCode, Hermes, Antigravity, and messaging bots (nanoclaw, openclaw, picoclaw, and friends) in a unified dark-mode UI with markdown rendering, tool call cards, fuzzy thread search, and thinking blocks.
 
-Sessions are streamed to a Cloudflare Worker (KV storage) by a local daemon that watches your session directories. Works on desktop and mobile.
+## Quickstart (local, no account needed)
 
-**Static UI mockup** — [`public/mockup.html`](public/mockup.html) is a standalone offline snapshot of the layout. After `npm run dev`, open **`http://localhost:5173/mockup.html`**.
+```bash
+git clone https://github.com/dhruv-anand-aintech/agent-session-viewer
+cd agent-session-viewer
+npm install
+npm run setup
+npm run local
+```
+
+`npm run setup` detects your session directories, builds a local sidebar cache (so message counts show immediately), and prints the start command. Then `npm run local` starts the viewer at **http://localhost:5173**.
+
+To access from other devices on your network (phone, tablet):
+
+```bash
+npm run local -- --host
+```
 
 ## Features
 
+- **Multi-platform** — Claude Code, Codex, Cursor, OpenCode, Hermes, Antigravity, and claw bots in one place, all auto-detected
 - **Live updates** — sessions appear as you work; SSE streaming keeps the UI current
 - **Pretty mode** — markdown rendering, thinking pills, tool call cards (Bash, Read, Edit, Write, Search…)
-- **Multi-platform** — Claude Code, Codex, Cursor, OpenCode, Hermes, and Antigravity sessions in one place
 - **Platform filter** — filter the sidebar by platform
 - **Sub-agent runs** — sub-agent sessions are visually distinguished with a `⤷ sub-agent` indicator and indented border
 - **Flat or grouped sidebar** — all sessions sorted by last activity, or grouped by project
@@ -55,48 +69,21 @@ Two storage layouts are supported automatically:
 - **nanoclaw-style** (default): `{dir}/store/messages.db` + `{dir}/data/sessions/`
 - **picoclaw-style**: `{dir}/workspace/sessions/` (JSONL directly, no SQLite DB)
 
-Auto-detected from standard install locations (first match wins):
+Auto-detected from `~/toolname` or `~/.toolname` for each of: nanoclaw, openclaw, picoclaw, femtoclaw, attoclaw, kiloclaw, megaclaw, zeroclaw, microclaw, rawclaw.
 
-| Tool | Auto-detected at | Layout |
-|---|---|---|
-| **nanoclaw** | `~/nanoclaw` or `~/.nanoclaw` | nanoclaw-style |
-| **openclaw** | `~/openclaw` or `~/.openclaw` | nanoclaw-style |
-| **picoclaw** | `~/picoclaw` or `~/.picoclaw` | picoclaw-style |
-| **femtoclaw** | `~/femtoclaw` or `~/.femtoclaw` | nanoclaw-style |
-| **attoclaw** | `~/attoclaw` or `~/.attoclaw` | nanoclaw-style |
-| **kiloclaw** | `~/kiloclaw` or `~/.kiloclaw` | nanoclaw-style |
-| **megaclaw** | `~/megaclaw` or `~/.megaclaw` | nanoclaw-style |
-| **zeroclaw** | `~/zeroclaw` or `~/.zeroclaw` | nanoclaw-style |
-| **microclaw** | `~/microclaw` or `~/.microclaw` | nanoclaw-style |
-| **rawclaw** | `~/rawclaw` or `~/.rawclaw` | nanoclaw-style |
+If your installation is in a non-standard location, configure the path in the Settings panel (⚙) or set `{NAME}_DIR` as an env var override.
 
-If your installation is in a non-standard location, set the env var override (e.g. `NANOCLAW_DIR=/path/to/nanoclaw`) or configure the path in the Settings panel (⚙).
+## Cloudflare Worker deployment (optional)
 
-## Requirements
-
-- Node.js ≥ 18
-- A [Cloudflare account](https://dash.cloudflare.com/sign-up) (free tier is fine)
-- `wrangler` CLI — installed automatically as a dev dependency
-
-## One-command setup
+For remote access and multi-device sync via a deployed URL:
 
 ```bash
-git clone https://github.com/dhruv-anand-aintech/agent-session-viewer
-cd agent-session-viewer
-npm install
-node setup.mjs
+npm run setup:cloudflare
 ```
 
-The setup script will:
+Requires a [Cloudflare account](https://dash.cloudflare.com/sign-up) (free tier). The script creates a KV namespace, sets an auth PIN, builds and deploys the Worker.
 
-1. Create a KV namespace in your Cloudflare account
-2. Patch `wrangler.toml` with the real namespace IDs
-3. Prompt you to choose a PIN
-4. Build and deploy the Worker
-
-After setup, the script prints your Worker URL and the exact command to start the daemon.
-
-## Running the daemon
+Run the daemon to keep the Worker in sync with your local sessions:
 
 ```bash
 WORKER_URL=https://agent-session-viewer.<subdomain>.workers.dev \
@@ -104,36 +91,19 @@ AUTH_PIN=<your-pin> \
 npm run daemon
 ```
 
-Or with flags:
-
-```bash
-node daemon/watch.mjs --worker <url> --pin <pin>
-```
-
-The daemon does an initial sync of all existing sessions, then watches all supported platform directories for live changes. Claw tools are auto-detected — no flags needed if they're installed at standard locations.
-
-## Local development (no Cloudflare)
-
-```bash
-npm run local         # local-server + Vite — reads all platform dirs directly
-npm run local -- --host  # also bind to 0.0.0.0 for LAN access (mobile testing)
-npm run dev           # Vite only (frontend only, no API)
-```
-
-`npm run local` reads all platform session directories directly — no daemon, no Cloudflare account, no KV needed.
-
-## Deploying changes
+To deploy code changes after modifying the Worker:
 
 ```bash
 npm run deploy
 ```
 
-KV IDs are loaded from a `.env` file in the project root (created by `node setup.mjs`) or from environment variables:
+## Other commands
 
 ```bash
-# .env
-SESSIONS_KV_ID=e61e79fc...
-SESSIONS_KV_PREVIEW_ID=e5f103b9...
+npm run build-cache   # rebuild sidebar cache manually (runs automatically during setup)
+npm run dev           # Vite frontend only, no API
+npm run build         # production build
+npm run lint          # eslint
 ```
 
 ## Architecture
@@ -157,23 +127,10 @@ SESSIONS_KV_PREVIEW_ID=e5f103b9...
          ▼
   Browser (React + Vite)  (src/)
 
-  ── or local mode ──
+  ── or local mode (default) ──
 
   local-server.mjs        (reads platform dirs directly — no Cloudflare)
          │  SSE /api/stream
          ▼
   Browser (React + Vite)  (src/)
 ```
-
-## Configuration reference
-
-All platform directories are auto-detected. These variables are **overrides only** — only needed if your install is in a non-standard location.
-
-| Variable | Description |
-|---|---|
-| `WORKER_URL` | URL of your deployed Cloudflare Worker |
-| `AUTH_PIN` | PIN set during `node setup.mjs` |
-| `NANOCLAW_DIR` | Path to nanoclaw if not at `~/nanoclaw` |
-| `OPENCLAW_DIR` | Path to openclaw if not at `~/openclaw` |
-| `PICOCLAW_DIR` | Path to picoclaw if not at `~/picoclaw` |
-| `{NAME}_DIR` | Override for any other claw tool |
