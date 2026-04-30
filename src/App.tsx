@@ -859,6 +859,10 @@ function platformIconSrc(source?: string): string | null {
       return "https://www.google.com/s2/favicons?sz=64&domain=opencode.ai"
     case "codex":
       return "https://www.google.com/s2/favicons?sz=64&domain=openai.com"
+    case "antigravity":
+      return "https://www.google.com/s2/favicons?sz=64&domain=idx.google.com"
+    case "hermes":
+      return "https://www.google.com/s2/favicons?sz=64&domain=nousresearch.com"
     default:
       return null
   }
