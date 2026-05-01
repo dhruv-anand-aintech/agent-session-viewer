@@ -6,7 +6,7 @@
  * Config persisted to: ~/.claude/agent-session-viewer-local.json
  */
 
-import { createReadStream, existsSync, openSync, readSync, closeSync, readdirSync, readFileSync, realpathSync, statSync, watch, writeFileSync } from "fs"
+import { createReadStream, existsSync, mkdirSync, openSync, readSync, closeSync, readdirSync, readFileSync, realpathSync, statSync, watch, writeFileSync } from "fs"
 import { homedir } from "os"
 import { dirname, extname, join, sep } from "path"
 import http from "http"
@@ -43,8 +43,9 @@ import { indexSession, removeSession, getSearchRows } from "./lib/search-index.m
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 const CLAUDE_DIR = join(homedir(), ".claude", "projects")
-const CONFIG_FILE = join(homedir(), ".claude", "agent-session-viewer-local.json")
-const SIDEBAR_CACHE_FILE = join(homedir(), ".claude", "agent-session-viewer-sidebar-cache.json")
+const APP_CONFIG_DIR = join(homedir(), ".config", "agent-session-viewer")
+const CONFIG_FILE = join(APP_CONFIG_DIR, "config.json")
+const SIDEBAR_CACHE_FILE = join(APP_CONFIG_DIR, "sidebar-cache.json")
 
 /**
  * Turn an encoded project dir (e.g. "-Users-dhruv-Code-my-cool-project") into a
@@ -77,6 +78,7 @@ function loadConfig() {
 }
 
 function saveConfig(data) {
+  mkdirSync(APP_CONFIG_DIR, { recursive: true })
   writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2))
 }
 

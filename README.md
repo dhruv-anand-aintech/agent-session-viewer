@@ -9,16 +9,16 @@ A live multi-platform session viewer — browse AI coding assistant conversation
 ### npx (no install required)
 
 ```bash
-npx agent-session-viewer
+npx agent-session-viewer@latest
 ```
 
 Downloads and runs directly. Builds the sidebar cache on first run, then opens at **http://localhost:3001**.
 
 ```bash
-npx agent-session-viewer --host    # LAN access (phone, tablet)
-npx agent-session-viewer --open    # auto-open browser
-npx agent-session-viewer --port 4000
-npx agent-session-viewer --skip-cache  # skip cache build
+npx agent-session-viewer@latest --host    # LAN access (phone, tablet)
+npx agent-session-viewer@latest --open    # auto-open browser
+npx agent-session-viewer@latest --port 4000
+npx agent-session-viewer@latest --skip-cache  # skip cache build
 ```
 
 ### Homebrew (macOS)

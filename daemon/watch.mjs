@@ -22,6 +22,7 @@ import path from "node:path"
 import { watch } from "node:fs"
 import { homedir } from "node:os"
 import { execFileSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import { stripXml } from "../shared-utils.mjs"
 import {
   normProjectDir as _normProjectDir,
@@ -47,11 +48,12 @@ import {
 } from "../platform-readers.mjs"
 
 // ── Persistent sync cache ─────────────────────────────────────────────────────
-// Survives daemon restarts so already-uploaded sessions are not re-sent.
-// Stored at ~/.claude/agent-session-viewer-sync-cache.json
+// Survives daemon restarts and reinstalls so already-uploaded sessions are not re-sent.
+// Stored at ~/.config/agent-session-viewer/sync-cache.json
 // Keys: `platform:sessionIdOrFilePath` → cacheVal string
 
-const SYNC_CACHE_FILE = path.join(homedir(), ".claude", "agent-session-viewer-sync-cache.json")
+const SYNC_CACHE_DIR  = path.join(homedir(), ".config", "agent-session-viewer")
+const SYNC_CACHE_FILE = path.join(SYNC_CACHE_DIR, "sync-cache.json")
 let _syncCache = null
 let _syncCacheTimer = null
 
@@ -63,8 +65,10 @@ function loadSyncCache() {
 function flushSyncCache() {
   if (_syncCacheTimer) clearTimeout(_syncCacheTimer)
   _syncCacheTimer = setTimeout(() => {
-    try { fs.writeFileSync(SYNC_CACHE_FILE, JSON.stringify(_syncCache)) }
-    catch { /* ignore write errors */ }
+    try {
+      fs.mkdirSync(SYNC_CACHE_DIR, { recursive: true })
+      fs.writeFileSync(SYNC_CACHE_FILE, JSON.stringify(_syncCache))
+    } catch { /* ignore write errors */ }
   }, 1500)
 }
 
@@ -226,9 +230,9 @@ async function syncSession(filePath) {
     projectDir = normProjectDir(projectAbsDir)
   }
 
-  // Skip if file unchanged since last successful upload
-  const fileMtime = String(fs.statSync(filePath).mtimeMs)
-  if (sc.claude.get(filePath) === fileMtime) return
+  const fileContent = fs.readFileSync(filePath)
+  const fileHash = createHash("sha1").update(fileContent).digest("hex")
+  if (sc.claude.get(filePath) === fileHash) return
 
   const messages = parseJsonl(filePath)
   if (!messages) { log(`⚠  Failed to parse ${filePath}`); return }
@@ -305,7 +309,7 @@ async function syncSession(filePath) {
       body: JSON.stringify(payload),
     })
     if (resp.ok) {
-      sc.claude.set(filePath, fileMtime)
+      sc.claude.set(filePath, fileHash)
       log(`✓ synced ${isSubagent ? "⤷ " : ""}${projectDir}/${sessionId.slice(0, 8)} (${messages.length} msgs)`)
     } else {
       log(`✗ sync failed ${resp.status}: ${await resp.text()}`)

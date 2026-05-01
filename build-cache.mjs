@@ -11,7 +11,7 @@
  * Usage: node build-cache.mjs   (or: npm run build-cache)
  */
 
-import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from "node:fs"
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -30,8 +30,9 @@ import {
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const CLAUDE_DIR = join(homedir(), ".claude", "projects")
-const CONFIG_FILE = join(homedir(), ".claude", "agent-session-viewer-local.json")
-const SIDEBAR_CACHE_FILE = join(homedir(), ".claude", "agent-session-viewer-sidebar-cache.json")
+const APP_CONFIG_DIR = join(homedir(), ".config", "agent-session-viewer")
+const CONFIG_FILE = join(APP_CONFIG_DIR, "config.json")
+const SIDEBAR_CACHE_FILE = join(APP_CONFIG_DIR, "sidebar-cache.json")
 
 function loadConfig() {
   try { return JSON.parse(readFileSync(CONFIG_FILE, "utf8")) } catch { return {} }
@@ -167,5 +168,6 @@ try { if (existsSync(HERMES_DB)) ingestResults(readHermesSessions(null, null), "
 const sessions = Array.from(byId.values())
   .sort((a, b) => String(b.lastActivity).localeCompare(String(a.lastActivity)))
 
+mkdirSync(APP_CONFIG_DIR, { recursive: true })
 writeFileSync(SIDEBAR_CACHE_FILE, JSON.stringify({ v: 2, sessions }))
 console.log(`\n✓ Sidebar cache written: ${sessions.length} sessions → ${SIDEBAR_CACHE_FILE}`)
