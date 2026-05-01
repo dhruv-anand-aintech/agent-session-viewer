@@ -182,10 +182,27 @@ function ingestResults(results, platformPrefix, label) {
   if (n > 0) console.log(`  ${label}: ${n} sessions`)
 }
 
+// Persistent reader cache for OpenCode — stored separately so the reader's internal
+// cacheVal format (db:time_updated:msgCount:partCount) survives across runs
+const OC_READER_CACHE_FILE = join(APP_CONFIG_DIR, "opencode-reader-cache.json")
+let _ocReaderCache = {}
+try { _ocReaderCache = JSON.parse(readFileSync(OC_READER_CACHE_FILE, "utf8")) } catch { /* none yet */ }
+const ocCacheGet = id => _ocReaderCache[id] ?? null
+const ocCacheSet = (id, val) => { _ocReaderCache[id] = val }
+
 try { ingestResults(readCursorSessions(), "cursor", "Cursor") } catch { /* db not present */ }
 try { if (existsSync(CODEX_SESSIONS_ROOT)) ingestResults(readCodexSessions(null, null), "codex", "Codex") } catch { /* ignore */ }
 try { if (existsSync(CURSOR_PROJECTS_ROOT)) ingestResults(readCursorAgentSessions(null, null), "cursor-agent", "Cursor agent") } catch { /* ignore */ }
-try { ingestResults([...iterOpenCodeSessions(null, null)].map(x => x.result), "opencode", "OpenCode") } catch { /* ignore */ }
+try {
+  const ocResults = [...iterOpenCodeSessions(ocCacheGet, ocCacheSet)].map(x => {
+    if (x.result) return x.result
+    // reader returned null = cache hit; re-use existing sidebar entry if present
+    const sessionId = x.sessionFile?.replace(/^sqlite:/, "").replace(/\.json$/, "").split("/").pop()
+    const e = sessionId && existingCache.get(sessionId)
+    return e ? { meta: e, msgs: [] } : null
+  }).filter(Boolean)
+  ingestResults(ocResults, "opencode", "OpenCode")
+} catch { /* ignore */ }
 try { if (existsSync(HERMES_DB)) ingestResults(readHermesSessions(null, null), "hermes", "Hermes") } catch { /* ignore */ }
 
 // ── Write sorted cache ─────────────────────────────────────────────────────────
@@ -194,4 +211,5 @@ const sessions = Array.from(byId.values())
 
 mkdirSync(APP_CONFIG_DIR, { recursive: true })
 writeFileSync(SIDEBAR_CACHE_FILE, JSON.stringify({ v: 2, sessions }))
+writeFileSync(OC_READER_CACHE_FILE, JSON.stringify(_ocReaderCache))
 console.log(`\n✓ Sidebar cache written: ${sessions.length} sessions → ${SIDEBAR_CACHE_FILE}`)
