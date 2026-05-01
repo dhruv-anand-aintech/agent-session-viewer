@@ -38,6 +38,18 @@ function loadConfig() {
   try { return JSON.parse(readFileSync(CONFIG_FILE, "utf8")) } catch { return {} }
 }
 
+// Load existing cache for incremental updates — skip sessions whose mtime hasn't changed
+function loadExistingCache() {
+  try {
+    const raw = JSON.parse(readFileSync(SIDEBAR_CACHE_FILE, "utf8"))
+    if (raw.v === 2 && Array.isArray(raw.sessions))
+      return new Map(raw.sessions.map(e => [e.id, e]))
+  } catch { /* no cache yet */ }
+  return new Map()
+}
+
+const existingCache = loadExistingCache()
+
 function parseJsonl(fp) {
   try {
     return readFileSync(fp, "utf8").split("\n").filter(Boolean).flatMap(line => {
@@ -112,20 +124,26 @@ for (const { path: root, label } of getClaudeScanRoots()) {
       let stat
       try { stat = statSync(fp) } catch { continue }
       const sessionId = f.replace(".jsonl", "")
-      const msgs = parseJsonl(fp)
-      const { messageCount, userMessageCount, firstName } = sessionMetaFromMsgs(msgs, stat)
-      upsert({
-        id: sessionId,
-        projectPath,
-        projectDisplayName,
-        source: "claude",
-        messageCount,
-        userMessageCount,
-        firstName: firstName ?? null,
-        lastActivity: stat.mtime.toISOString(),
-        mtime: String(stat.mtimeMs),
-        customName: names[`${projectPath}/${sessionId}`] ?? null,
-      })
+      const mtime = String(stat.mtimeMs)
+      const cached = existingCache.get(sessionId)
+      if (cached && cached.mtime === mtime) {
+        upsert({ ...cached, customName: names[`${projectPath}/${sessionId}`] ?? cached.customName ?? null })
+      } else {
+        const msgs = parseJsonl(fp)
+        const { messageCount, userMessageCount, firstName } = sessionMetaFromMsgs(msgs, stat)
+        upsert({
+          id: sessionId,
+          projectPath,
+          projectDisplayName,
+          source: "claude",
+          messageCount,
+          userMessageCount,
+          firstName: firstName ?? null,
+          lastActivity: stat.mtime.toISOString(),
+          mtime,
+          customName: names[`${projectPath}/${sessionId}`] ?? null,
+        })
+      }
       claudeCount++
       if (claudeCount % 50 === 0) process.stdout.write(`\r  Claude: ${claudeCount} sessions…`)
     }
@@ -138,21 +156,27 @@ function ingestResults(results, platformPrefix, label) {
   let n = 0
   for (const { meta } of results) {
     if (!meta?.id || !meta.projectPath) continue
-    const dirPart = meta.projectPath.replace(`${platformPrefix}:`, "")
-    const baseName = encodedDirToDisplayName(dirPart)
-    const projectDisplayName = `${platformPrefix}: ${baseName}`
-    upsert({
-      id: meta.id,
-      projectPath: meta.projectPath,
-      projectDisplayName,
-      source: meta.source ?? platformPrefix,
-      messageCount: meta.messageCount ?? 0,
-      userMessageCount: meta.userMessageCount ?? null,
-      firstName: meta.firstName ?? null,
-      lastActivity: meta.lastActivity ?? new Date().toISOString(),
-      mtime: String(meta.lastActivity ?? Date.now()),
-      customName: null,
-    })
+    const mtime = String(meta.lastActivity ?? Date.now())
+    const cached = existingCache.get(meta.id)
+    if (cached && cached.mtime === mtime) {
+      upsert(cached)
+    } else {
+      const dirPart = meta.projectPath.replace(`${platformPrefix}:`, "")
+      const baseName = encodedDirToDisplayName(dirPart)
+      const projectDisplayName = `${platformPrefix}: ${baseName}`
+      upsert({
+        id: meta.id,
+        projectPath: meta.projectPath,
+        projectDisplayName,
+        source: meta.source ?? platformPrefix,
+        messageCount: meta.messageCount ?? 0,
+        userMessageCount: meta.userMessageCount ?? null,
+        firstName: meta.firstName ?? null,
+        lastActivity: meta.lastActivity ?? new Date().toISOString(),
+        mtime,
+        customName: null,
+      })
+    }
     n++
   }
   if (n > 0) console.log(`  ${label}: ${n} sessions`)
