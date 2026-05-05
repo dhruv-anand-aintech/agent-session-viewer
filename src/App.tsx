@@ -1216,7 +1216,6 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
     const q = sidebarSearchQuery.trim()
     if (!q) return
     let cancelled = false
-    const timer = setTimeout(() => {
     setSidebarSearchLoading(true)
     fetch(`/api/search/sessions?q=${encodeURIComponent(q)}`, { credentials: "include" })
       .then(r => (r.ok ? r.json() : { results: [] }))
@@ -1238,8 +1237,7 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
       .finally(() => {
         if (!cancelled) setSidebarSearchLoading(false)
       })
-    }, 300)
-    return () => { cancelled = true; clearTimeout(timer) }
+    return () => { cancelled = true }
   }, [sidebarSearchQuery])
 
   const searchBrowseActive = sidebarSearchQuery.trim().length > 0
