@@ -1214,13 +1214,15 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
 
   useEffect(() => {
     const q = sidebarSearchQuery.trim()
-    if (!q) return
+    if (!q) { setSidebarSearchHits(null); return }
     let cancelled = false
     setSidebarSearchLoading(true)
+    console.log("[sidebar-search] fetching q=", q)
     fetch(`/api/search/sessions?q=${encodeURIComponent(q)}`, { credentials: "include" })
       .then(r => (r.ok ? r.json() : { results: [] }))
-      .then((data: { results?: Record<string, unknown>[] }) => {
-        if (cancelled) return
+      .then((data: { results?: Record<string, unknown>[], source?: string }) => {
+        if (cancelled) { console.log("[sidebar-search] cancelled q=", q); return }
+        console.log("[sidebar-search] got", data.results?.length, "results source=", data.source, "q=", q)
         const mapped: SidebarSearchHit[] = (data.results ?? []).map(raw => ({
           projectPath: String(raw.projectPath ?? ""),
           sessionId: String(raw.sessionId ?? ""),
@@ -1231,8 +1233,8 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
         }))
         setSidebarSearchHits(mapped)
       })
-      .catch(() => {
-        if (!cancelled) setSidebarSearchHits([])
+      .catch((e) => {
+        if (!cancelled) { console.warn("[sidebar-search] error:", e); setSidebarSearchHits([]) }
       })
       .finally(() => {
         if (!cancelled) setSidebarSearchLoading(false)

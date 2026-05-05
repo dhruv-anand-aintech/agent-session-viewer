@@ -928,9 +928,9 @@ function serveStatic(req, res) {
 // --- LanceDB background indexer ---
 // Kick off after a short delay so the server is accepting requests first
 setTimeout(() => {
-  // Use sidebar cache as the session list — it has all 261+ sessions from all platforms,
-  // whereas getSearchRows() only contains sessions loaded into the in-memory Fuse index so far.
+  console.log("[lancedb-indexer] startup timer fired")
   const getCacheRows = () => loadSidebarCache().sessions.map(e => ({ projectPath: e.projectPath, sessionId: e.id }))
+  console.log("[lancedb-indexer] cache rows:", getCacheRows().length)
   startBackgroundIndexer(
     getCacheRows,
     (projectPath, sessionId) => getSessionMessagesAll(projectPath, sessionId)
@@ -1024,9 +1024,9 @@ const server = http.createServer(async (req, res) => {
     const q = url.searchParams.get("q")?.trim() ?? ""
     if (!q) { json({ results: [] }); return }
 
-    // Skip vector embedding while background indexer is running (avoids ONNX CPU contention)
     const skipVector = getIndexerStatus().running
-    const lanceResults = await searchSessions(q, 60, { skipVector }).catch(() => null)
+    console.log(`[search] q="${q}" skipVector=${skipVector}`)
+    const lanceResults = await searchSessions(q, 60, { skipVector }).catch(e => { console.warn("[search] lancedb error:", e.message); return null })
     if (lanceResults && lanceResults.length) {
       // Enrich with meta from the in-memory Fuse index
       const rowMap = new Map(getSearchRows().map(r => [`${r.projectPath}\x1f${r.sessionId}`, r]))
@@ -1042,6 +1042,7 @@ const server = http.createServer(async (req, res) => {
           meta: row?.meta ?? {},
         }
       })
+      console.log(`[search] lancedb returned ${results.length} results`)
       json({ results, source: "lancedb" })
       return
     }
@@ -1049,6 +1050,7 @@ const server = http.createServer(async (req, res) => {
     // Fall back to Fuse.js
     const rows = getSearchRows()
     const results = runSidebarSessionSearch(q, rows)
+    console.log(`[search] fuse returned ${results.length} results (lanceResults=${lanceResults?.length ?? "null"})`)
     json({ results, source: "fuse" })
     return
   }
