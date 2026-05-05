@@ -39,6 +39,8 @@ import {
 } from "./platform-readers.mjs"
 import { buildSidebarSearchDoc, runSidebarSessionSearch } from "./lib/session-search-core.mjs"
 import { indexSession, removeSession, getSearchRows } from "./lib/search-index.mjs"
+import { searchSessions, searchThread, getIndexStats } from "./lib/lancedb-search.mjs"
+import { startBackgroundIndexer, indexOneSession as lanceIndexOne, removeOne as lanceRemoveOne, getIndexerStatus } from "./lib/lancedb-indexer.mjs"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -859,7 +861,7 @@ function handleClaudeFileChange(filename) {
   const projectDir = parts.slice(0, -1).join("/")
   const projectPath = join(CLAUDE_DIR, projectDir)
   const fp = join(projectPath, `${sessionId}.jsonl`)
-  if (!existsSync(fp)) { removeSession(projectPath, sessionId); broadcastProjects(); return }
+  if (!existsSync(fp)) { removeSession(projectPath, sessionId); lanceRemoveOne(projectPath, sessionId).catch(() => {}); broadcastProjects(); return }
   try {
     const stat = statSync(fp)
     const names = loadConfig().names ?? {}
@@ -867,6 +869,7 @@ function handleClaudeFileChange(filename) {
     const msgs = parseJsonl(fp)
     const meta = claudeSessionMetaFromMsgs(msgs, sessionId, projectKey, names, stat)
     indexSession(projectPath, sessionId, msgs, meta)
+    lanceIndexOne(projectPath, sessionId, msgs).catch(() => {})
   } catch { /* ignore */ }
   broadcastProjects()
 }
@@ -921,6 +924,18 @@ function serveStatic(req, res) {
   res.writeHead(200, { "Content-Type": MIME[extname(filePath)] ?? "application/octet-stream" })
   createReadStream(filePath).pipe(res)
 }
+
+// --- LanceDB background indexer ---
+// Kick off after a short delay so the server is accepting requests first
+setTimeout(() => {
+  // Use sidebar cache as the session list — it has all 261+ sessions from all platforms,
+  // whereas getSearchRows() only contains sessions loaded into the in-memory Fuse index so far.
+  const getCacheRows = () => loadSidebarCache().sessions.map(e => ({ projectPath: e.projectPath, sessionId: e.id }))
+  startBackgroundIndexer(
+    getCacheRows,
+    (projectPath, sessionId) => getSessionMessagesAll(projectPath, sessionId)
+  ).catch(err => console.warn("[lancedb-indexer] startup error:", err.message))
+}, 3000)
 
 // --- HTTP server ---
 
@@ -1004,13 +1019,54 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  // GET /api/search/sessions?q= — fuzzy search across all threads (titles, users, system, …)
+  // GET /api/search/sessions?q= — hybrid LanceDB search, fallback to Fuse.js
   if (url.pathname === "/api/search/sessions") {
     const q = url.searchParams.get("q")?.trim() ?? ""
     if (!q) { json({ results: [] }); return }
+
+    // Try LanceDB hybrid search first
+    const lanceResults = await searchSessions(q).catch(() => null)
+    if (lanceResults && lanceResults.length) {
+      // Enrich with meta from the in-memory Fuse index
+      const rowMap = new Map(getSearchRows().map(r => [`${r.projectPath}\x1f${r.sessionId}`, r]))
+      const results = lanceResults.map(r => {
+        const row = rowMap.get(`${r.projectPath}\x1f${r.sessionId}`)
+        return {
+          projectPath: r.projectPath,
+          sessionId: r.sessionId,
+          displayTitle: row?.displayTitle ?? r.sessionId.slice(0, 8),
+          score: r.score,
+          bestKey: "content",
+          snippet: r.snippet,
+          meta: row?.meta ?? {},
+        }
+      })
+      json({ results, source: "lancedb" })
+      return
+    }
+
+    // Fall back to Fuse.js
     const rows = getSearchRows()
     const results = runSidebarSessionSearch(q, rows)
-    json({ results })
+    json({ results, source: "fuse" })
+    return
+  }
+
+  // GET /api/search/thread?project=...&session=...&q= — in-thread LanceDB search
+  if (url.pathname === "/api/search/thread") {
+    const project = decodeURIComponent(url.searchParams.get("project") ?? "")
+    const session = url.searchParams.get("session") ?? ""
+    const q = url.searchParams.get("q")?.trim() ?? ""
+    if (!q || !project || !session) { json({ hits: null }); return }
+    const hits = await searchThread(project, session, q).catch(() => null)
+    json({ hits })
+    return
+  }
+
+  // GET /api/search/status — index health
+  if (url.pathname === "/api/search/status") {
+    const [stats, indexer] = await Promise.all([getIndexStats().catch(() => ({})), Promise.resolve(getIndexerStatus())])
+    json({ ...stats, indexer })
     return
   }
 
