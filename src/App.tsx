@@ -497,12 +497,38 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
       setThreadHitPos(0)
       return
     }
-    // Sort by message index descending so first hit is the newest (bottom → top navigation)
-    const raw = runThreadSearch(q, threadSearchMsgs)
-    raw.sort((a, b) => b.idx - a.idx)
-    setThreadHits(raw)
-    setThreadHitPos(0)
-  }, [threadSearchOpen, threadSearchQuery, threadSearchMsgs])
+
+    let cancelled = false
+    const runSearch = async () => {
+      // Try server-side LanceDB search first (fast, semantic + BM25)
+      try {
+        const r = await fetch(
+          `/api/search/thread?project=${encodeURIComponent(projectDir)}&session=${encodeURIComponent(sessionMeta.id)}&q=${encodeURIComponent(q)}`,
+          { credentials: "include" }
+        )
+        if (!cancelled && r.ok) {
+          const data = await r.json()
+          if (data.hits && Array.isArray(data.hits) && data.hits.length) {
+            const hits = [...data.hits].sort((a, b) => b.idx - a.idx)
+            setThreadHits(hits)
+            setThreadHitPos(0)
+            return
+          }
+        }
+      } catch { /* fall through */ }
+
+      // Fall back to client-side Fuse.js
+      if (!cancelled) {
+        const raw = runThreadSearch(q, threadSearchMsgs)
+        raw.sort((a, b) => b.idx - a.idx)
+        setThreadHits(raw)
+        setThreadHitPos(0)
+      }
+    }
+
+    runSearch()
+    return () => { cancelled = true }
+  }, [threadSearchOpen, threadSearchQuery, threadSearchMsgs, projectDir, sessionMeta?.id])
 
   const [suggestions, setSuggestions] = useState<Record<string, Suggestion>>({})
   useEffect(() => {
@@ -1135,6 +1161,8 @@ function searchFieldLabel(key: string): string {
       return "System"
     case "assistant":
       return "Assistant"
+    case "content":
+      return "Match"
     default:
       return key
   }
@@ -1188,6 +1216,7 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
     const q = sidebarSearchQuery.trim()
     if (!q) return
     let cancelled = false
+    const timer = setTimeout(() => {
     setSidebarSearchLoading(true)
     fetch(`/api/search/sessions?q=${encodeURIComponent(q)}`, { credentials: "include" })
       .then(r => (r.ok ? r.json() : { results: [] }))
@@ -1209,7 +1238,8 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
       .finally(() => {
         if (!cancelled) setSidebarSearchLoading(false)
       })
-    return () => { cancelled = true }
+    }, 300)
+    return () => { cancelled = true; clearTimeout(timer) }
   }, [sidebarSearchQuery])
 
   const searchBrowseActive = sidebarSearchQuery.trim().length > 0

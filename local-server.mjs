@@ -1024,8 +1024,9 @@ const server = http.createServer(async (req, res) => {
     const q = url.searchParams.get("q")?.trim() ?? ""
     if (!q) { json({ results: [] }); return }
 
-    // Try LanceDB hybrid search first
-    const lanceResults = await searchSessions(q).catch(() => null)
+    // Skip vector embedding while background indexer is running (avoids ONNX CPU contention)
+    const skipVector = getIndexerStatus().running
+    const lanceResults = await searchSessions(q, 60, { skipVector }).catch(() => null)
     if (lanceResults && lanceResults.length) {
       // Enrich with meta from the in-memory Fuse index
       const rowMap = new Map(getSearchRows().map(r => [`${r.projectPath}\x1f${r.sessionId}`, r]))
@@ -1058,7 +1059,7 @@ const server = http.createServer(async (req, res) => {
     const session = url.searchParams.get("session") ?? ""
     const q = url.searchParams.get("q")?.trim() ?? ""
     if (!q || !project || !session) { json({ hits: null }); return }
-    const hits = await searchThread(project, session, q).catch(() => null)
+    const hits = await searchThread(project, session, q, 40, { skipVector: getIndexerStatus().running }).catch(() => null)
     json({ hits })
     return
   }
