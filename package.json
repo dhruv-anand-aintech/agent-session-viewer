@@ -40,6 +40,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "local": "node scripts/run-local-dev.mjs",
+    "build-search-index": "node scripts/build-search-index.mjs",
     "build-cache": "node build-cache.mjs",
     "setup": "node setup-local.mjs",
     "setup:cloudflare": "node setup.mjs",

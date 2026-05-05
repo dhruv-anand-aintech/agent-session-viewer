@@ -13,6 +13,7 @@ import http from "http"
 import { fileURLToPath } from "url"
 import { exec } from "child_process"
 import { stripXml, trimProjectsByRecentSessionCount, countSessionsInProjects } from "./shared-utils.mjs"
+import { loadSessionMessages } from "./lib/session-message-loader.mjs"
 import {
   readCodexSessions,
   CODEX_SESSIONS_ROOT,
@@ -37,9 +38,9 @@ import {
   readCodexSessionById,
   normProjectDir,
 } from "./platform-readers.mjs"
-import { buildSidebarSearchDoc, runSidebarSessionSearch } from "./lib/session-search-core.mjs"
+import { buildSidebarSearchDoc, runSidebarSessionSearch, runThreadKeywordSearch } from "./lib/session-search-core.mjs"
 import { indexSession, removeSession, getSearchRows } from "./lib/search-index.mjs"
-import { searchSessions, searchThread, getIndexStats } from "./lib/lancedb-search.mjs"
+import { searchSessions } from "./lib/lancedb-search.mjs"
 import { startBackgroundIndexer, indexOneSession as lanceIndexOne, removeOne as lanceRemoveOne, getIndexerStatus } from "./lib/lancedb-indexer.mjs"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -67,6 +68,8 @@ function encodedDirToDisplayName(encodedDir) {
 const DIST_DIR = join(__dirname, "dist")
 const PORT = parseInt(process.env.PORT ?? "3001")
 const AUTH_PIN = process.env.AUTH_PIN ?? null
+const ts = () => new Date().toISOString().replace("T", " ").slice(0, 23)
+const ENABLE_BACKGROUND_INDEXER = process.env.ENABLE_LANCEDB_BACKGROUND_INDEXER === "1"
 
 /** Max lines sent on initial debug load / SSE init (full file still tracked for append). */
 const DEBUG_TAIL_LINES = 500
@@ -927,15 +930,19 @@ function serveStatic(req, res) {
 
 // --- LanceDB background indexer ---
 // Kick off after a short delay so the server is accepting requests first
-setTimeout(() => {
-  console.log("[lancedb-indexer] startup timer fired")
-  const getCacheRows = () => loadSidebarCache().sessions.map(e => ({ projectPath: e.projectPath, sessionId: e.id }))
-  console.log("[lancedb-indexer] cache rows:", getCacheRows().length)
-  startBackgroundIndexer(
-    getCacheRows,
-    (projectPath, sessionId) => getSessionMessagesAll(projectPath, sessionId)
-  ).catch(err => console.warn("[lancedb-indexer] startup error:", err.message))
-}, 3000)
+if (ENABLE_BACKGROUND_INDEXER) {
+  setTimeout(() => {
+    console.log(`${ts()} [lancedb-indexer] startup timer fired`)
+    const getCacheRows = () => loadSidebarCache().sessions.map(e => ({ projectPath: e.projectPath, sessionId: e.id }))
+    console.log(`${ts()} [lancedb-indexer] cache rows:`, getCacheRows().length)
+    startBackgroundIndexer(
+      getCacheRows,
+      (projectPath, sessionId) => getSessionMessagesAll(projectPath, sessionId)
+    ).catch(err => console.warn(`${ts()} [lancedb-indexer] startup error:`, err.message))
+  }, 3000)
+} else {
+  console.log(`${ts()} [lancedb-indexer] background indexing disabled; run 'npm run build-search-index' in a separate terminal`)
+}
 
 // --- HTTP server ---
 
@@ -1024,9 +1031,8 @@ const server = http.createServer(async (req, res) => {
     const q = url.searchParams.get("q")?.trim() ?? ""
     if (!q) { json({ results: [] }); return }
 
-    const skipVector = getIndexerStatus().running
-    console.log(`[search] q="${q}" skipVector=${skipVector}`)
-    const lanceResults = await searchSessions(q, 60, { skipVector }).catch(e => { console.warn("[search] lancedb error:", e.message); return null })
+    console.log(`${ts()} [search] q="${q}"`)
+    const lanceResults = await searchSessions(q, 60).catch(e => { console.warn(`${ts()} [search] lancedb error:`, e.message); return null })
     if (lanceResults && lanceResults.length) {
       // Enrich with meta from the in-memory Fuse index
       const rowMap = new Map(getSearchRows().map(r => [`${r.projectPath}\x1f${r.sessionId}`, r]))
@@ -1042,7 +1048,7 @@ const server = http.createServer(async (req, res) => {
           meta: row?.meta ?? {},
         }
       })
-      console.log(`[search] lancedb returned ${results.length} results`)
+      console.log(`${ts()} [search] lancedb returned ${results.length} results`)
       json({ results, source: "lancedb" })
       return
     }
@@ -1050,7 +1056,7 @@ const server = http.createServer(async (req, res) => {
     // Fall back to Fuse.js
     const rows = getSearchRows()
     const results = runSidebarSessionSearch(q, rows)
-    console.log(`[search] fuse returned ${results.length} results (lanceResults=${lanceResults?.length ?? "null"})`)
+    console.log(`${ts()} [search] fuse returned ${results.length} results (lanceResults=${lanceResults?.length ?? "null"})`)
     json({ results, source: "fuse" })
     return
   }
@@ -1061,15 +1067,16 @@ const server = http.createServer(async (req, res) => {
     const session = url.searchParams.get("session") ?? ""
     const q = url.searchParams.get("q")?.trim() ?? ""
     if (!q || !project || !session) { json({ hits: null }); return }
-    const hits = await searchThread(project, session, q, 40, { skipVector: getIndexerStatus().running }).catch(() => null)
+    const msgs = loadSessionMessages(project, session)
+    if (!Array.isArray(msgs) || !msgs.length) { json({ hits: [] }); return }
+    const hits = runThreadKeywordSearch(q, msgs, 60)
     json({ hits })
     return
   }
 
   // GET /api/search/status — index health
   if (url.pathname === "/api/search/status") {
-    const [stats, indexer] = await Promise.all([getIndexStats().catch(() => ({})), Promise.resolve(getIndexerStatus())])
-    json({ ...stats, indexer })
+    json({ indexer: getIndexerStatus(), backgroundIndexerEnabled: ENABLE_BACKGROUND_INDEXER })
     return
   }
 
@@ -1348,16 +1355,16 @@ const server = http.createServer(async (req, res) => {
 const BIND_HOST = process.env.HOST ?? "127.0.0.1"
 server.listen(PORT, BIND_HOST, () => {
   const displayHost = BIND_HOST === "0.0.0.0" ? "0.0.0.0 (all interfaces)" : "localhost"
-  console.log(`\n  Agent Session Viewer (local mode)`)
-  console.log(`  API:      http://localhost:${PORT} (bound to ${displayHost})`)
+  console.log(`${ts()} \n  Agent Session Viewer (local mode)`)
+  console.log(`${ts()}   API:      http://localhost:${PORT} (bound to ${displayHost})`)
   if (existsSync(DIST_DIR)) {
-    console.log(`  App:      http://localhost:${PORT}`)
+    console.log(`${ts()}   App:      http://localhost:${PORT}`)
   } else {
-    console.log(`  Frontend: run 'npm run dev' in another terminal (Vite proxies to this port)`)
+    console.log(`${ts()}   Frontend: run 'npm run dev' in another terminal (Vite proxies to this port)`)
   }
   if (!AUTH_PIN) {
-    console.log(`  Auth:     disabled (set AUTH_PIN=1234 to enable)\n`)
+    console.log(`${ts()}   Auth:     disabled (set AUTH_PIN=1234 to enable)\n`)
   } else {
-    console.log(`  Auth:     PIN protected\n`)
+    console.log(`${ts()}   Auth:     PIN protected\n`)
   }
 })
