@@ -250,9 +250,10 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
       const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || 0
       const msgs: SessionMessage[] = await r.json()
       const parseMs = performance.now() - t0 - fetchMs
-      markRemoteFetch(sessionId, fetchMs, parseMs, msgs.length, serverTotal || msgs.length)
-      await idbPut(idbKey, msgs)
-      initWindow(msgs, serverTotal || msgs.length)
+      const total = serverTotal || msgs.length
+      markRemoteFetch(sessionId, fetchMs, parseMs, msgs.length, total)
+      await idbPut(idbKey, { msgs, total })
+      initWindow(msgs, total)
     } catch {
       /* network or parse */
     } finally {
@@ -268,11 +269,14 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
     fullRef.current = []
     ;(async () => {
       const idbT0 = performance.now()
-      const cached = await idbGet<SessionMessage[]>(idbKey)
+      const idbRaw = await idbGet<{ msgs: SessionMessage[]; total: number } | SessionMessage[]>(idbKey)
       const idbMs = performance.now() - idbT0
-      markIDBResult(sessionId, !!(cached && cached.length > 0), cached?.length ?? 0, idbMs)
-      if (cached && cached.length > 0) {
-        initWindow(cached, cached.length)
+      // Handle both new format { msgs, total } and old format (plain array)
+      const cachedMsgs = Array.isArray(idbRaw) ? idbRaw : idbRaw?.msgs
+      const cachedTotal = Array.isArray(idbRaw) ? (idbRaw.length) : (idbRaw?.total ?? idbRaw?.msgs?.length ?? 0)
+      markIDBResult(sessionId, !!(cachedMsgs && cachedMsgs.length > 0), cachedMsgs?.length ?? 0, idbMs)
+      if (cachedMsgs && cachedMsgs.length > 0) {
+        initWindow(cachedMsgs, cachedTotal)
         setLoading(false)
       }
       await fetchRemote()
@@ -288,7 +292,8 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
         if (!r.ok) return
         const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || 0
         const msgs: SessionMessage[] = await r.json()
-        await idbPut(idbKey, msgs)
+        const total = serverTotal || msgs.length
+        await idbPut(idbKey, { msgs, total })
         const filtered = msgs.filter(m => m.type !== "file-history-snapshot")
         // Merge new tail: keep any earlier-loaded messages, append new ones
         setWin(prev => {
@@ -396,7 +401,7 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
         total,
         serverFetchedFrom: 0,
       })
-      if (idbKey) await idbPut(idbKey, filtered)
+      if (idbKey) await idbPut(idbKey, { msgs: filtered, total: filtered.length })
     },
     [idbKey, updateChatDir]
   )

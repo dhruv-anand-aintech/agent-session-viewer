@@ -407,6 +407,7 @@ function scanOneClaudeFolder(root, label, dir, names, fileBySessKey) {
   if (!files.length) return null
   const projectPath = `${root}/${dir}`
   const projectKey = root === CLAUDE_DIR ? dir : `${root}/${dir}`
+  const cacheMap = loadSidebarCache()._map
   const sessions = []
   for (const f of files) {
     const fp = join(dp, f)
@@ -414,6 +415,9 @@ function scanOneClaudeFolder(root, label, dir, names, fileBySessKey) {
     try { stat = statSync(fp) } catch { continue }
     const sessionId = f.replace(".jsonl", "")
     fileBySessKey.set(SESS_PATH_KEY(projectPath, sessionId), { fp, stat })
+    // Use cached firstName if available — avoids 64KB file read per session during scan
+    const cachedEntry = cacheMap.get(sessionId)
+    const firstName = cachedEntry?.firstName ?? cheapReadFirstUserMsg(fp)
     sessions.push({
       id: sessionId,
       projectPath: projectKey,
@@ -421,9 +425,9 @@ function scanOneClaudeFolder(root, label, dir, names, fileBySessKey) {
       version: undefined,
       gitBranch: undefined,
       isActive: Date.now() - stat.mtimeMs < FIVE_MIN,
-      userMessageCount: null,
-      messageCount: 0,
-      firstName: cheapReadFirstUserMsg(fp),
+      userMessageCount: cachedEntry?.userMessageCount ?? null,
+      messageCount: cachedEntry?.messageCount ?? 0,
+      firstName,
       customName: names[`${projectKey}/${sessionId}`] ?? null,
       source: "claude",
     })
@@ -526,92 +530,98 @@ function scheduleClaudeJsonlIndexing(fileBySessKey, names) {
   })
 }
 
-/** Progressive recent sidebar: emit trimmed running snapshot after each Claude folder / platform, then hydrate. */
+/** Progressive recent sidebar: emit cached state + bootstrap_done immediately, then fill in background. */
 async function streamRecentSidebarInitial(res, maxSessions) {
-  // Emit cached sidebar state immediately so the UI shows real data before any scanning
+  // Emit cached sidebar state and signal bootstrap done immediately — UI is interactive from the start.
   const cachedState = loadCachedSidebarState()
-  if (cachedState?.length) sseWrite(res, "projects", sortProjectGroups(cachedState))
-
-  const names = loadConfig().names ?? {}
-  /** @type {Map<string, { fp: string, stat: import('fs').Stats }>} */
-  const fileBySessKey = new Map()
-  let acc = []
-
-  for (const { path: root, label } of getClaudeScanRoots()) {
-    let dirs
-    try { dirs = readdirSync(root) } catch { continue }
-    for (const dir of dirs) {
-      const chunk = scanOneClaudeFolder(root, label, dir, names, fileBySessKey)
-      if (!chunk) continue
-      acc = mergeProjectsInto(acc, [chunk])
-      sseWrite(res, "projects", sortProjectGroups(acc))
-      await yieldEventLoopTick()
-    }
+  if (cachedState?.length) {
+    sseWrite(res, "projects", sortProjectGroups(cachedState))
+    const cachedTotal = cachedState.reduce((s, p) => s + p.sessions.length, 0)
+    sseWrite(res, "projects_meta", { total: cachedTotal })
   }
-
-  const fastPlatformLoads = [
-    loadCodexSessions,
-    loadOpenCodeSessions,
-    loadHermesSessions,
-  ]
-  for (const loadFn of fastPlatformLoads) {
-    const part = await loadFn()
-    if (!part.length) continue
-    acc = mergeProjectsInto(acc, part)
-    sseWrite(res, "projects", sortProjectGroups(acc))
-    await yieldEventLoopTick()
-  }
-
-  const total = countSessionsInProjects(acc)
-  sseWrite(res, "projects_meta", { total })
-
-  // Emit ALL sessions immediately and signal bootstrap done — UI is now interactive.
-  // Hydration (accurate message counts) runs afterward in the background.
-  const allSorted = sortProjectGroups(acc)
-  sseWrite(res, "projects", allSorted)
   sseWrite(res, "bootstrap_done", {})
 
-  // Hydrate full metadata (message counts, accurate firstName) for the most recent sessions
-  // AFTER bootstrap_done so the UI is responsive during the expensive JSONL parses.
-  const hydrateN = maxSessions ?? 50
-  const forHydration = hydrateN > 0
-    ? trimProjectsByRecentSessionCount(acc, hydrateN)
-    : allSorted
-  await hydrateClaudeSessionsInProjects(forHydration, fileBySessKey, names)
-  flushSidebarCacheFromProjects(forHydration, fileBySessKey)
-  // Push corrected message counts + firstName back via SSE
-  for (const p of forHydration) {
-    const ap = acc.find(a => a.path === p.path)
-    if (!ap) continue
-    const byId = new Map(ap.sessions.map(s => [s.id, s]))
-    for (const s of p.sessions) {
-      const as = byId.get(s.id)
-      if (as && s.firstName) as.firstName = s.firstName
-      if (as && s.messageCount != null) as.messageCount = s.messageCount
+  // Everything after this runs in background — doesn't block HTTP request processing.
+  setImmediate(async () => {
+    const names = loadConfig().names ?? {}
+    /** @type {Map<string, { fp: string, stat: import('fs').Stats }>} */
+    const fileBySessKey = new Map()
+    let acc = []
+
+    for (const { path: root, label } of getClaudeScanRoots()) {
+      if (res.destroyed) return
+      let dirs
+      try { dirs = readdirSync(root) } catch { continue }
+      for (const dir of dirs) {
+        if (res.destroyed) return
+        const chunk = scanOneClaudeFolder(root, label, dir, names, fileBySessKey)
+        if (!chunk) continue
+        acc = mergeProjectsInto(acc, [chunk])
+        sseWrite(res, "projects", sortProjectGroups(acc))
+        await yieldEventLoopTick()
+      }
     }
-  }
-  sseWrite(res, "projects", sortProjectGroups(acc))
 
-  scheduleClaudeJsonlIndexing(fileBySessKey, names)
-
-  setTimeout(async () => {
-    const slowPlatformLoads = [
-      loadCursorSessions,
-      loadCursorAgentSessions,
-      async () => loadAntigravitySessions(),
+    const fastPlatformLoads = [
+      loadCodexSessions,
+      loadOpenCodeSessions,
+      loadHermesSessions,
     ]
-    for (const loadFn of slowPlatformLoads) {
+    for (const loadFn of fastPlatformLoads) {
       if (res.destroyed) return
       const part = await loadFn()
       if (!part.length) continue
-      flushSidebarCacheFromProjects(part, null)
       acc = mergeProjectsInto(acc, part)
-      const nextTotal = countSessionsInProjects(acc)
-      sseWrite(res, "projects_meta", { total: nextTotal })
       sseWrite(res, "projects", sortProjectGroups(acc))
       await yieldEventLoopTick()
     }
-  }, 1500)
+
+    const total = countSessionsInProjects(acc)
+    sseWrite(res, "projects_meta", { total })
+    sseWrite(res, "projects", sortProjectGroups(acc))
+
+    // Hydrate full metadata (message counts, accurate firstName) for the most recent sessions.
+    const hydrateN = maxSessions ?? 50
+    const allSorted = sortProjectGroups(acc)
+    const forHydration = hydrateN > 0
+      ? trimProjectsByRecentSessionCount(acc, hydrateN)
+      : allSorted
+    await hydrateClaudeSessionsInProjects(forHydration, fileBySessKey, names)
+    flushSidebarCacheFromProjects(forHydration, fileBySessKey)
+    // Push corrected message counts + firstName back via SSE
+    for (const p of forHydration) {
+      const ap = acc.find(a => a.path === p.path)
+      if (!ap) continue
+      const byId = new Map(ap.sessions.map(s => [s.id, s]))
+      for (const s of p.sessions) {
+        const as = byId.get(s.id)
+        if (as && s.firstName) as.firstName = s.firstName
+        if (as && s.messageCount != null) as.messageCount = s.messageCount
+      }
+    }
+    if (!res.destroyed) sseWrite(res, "projects", sortProjectGroups(acc))
+
+    scheduleClaudeJsonlIndexing(fileBySessKey, names)
+
+    setTimeout(async () => {
+      const slowPlatformLoads = [
+        loadCursorSessions,
+        loadCursorAgentSessions,
+        async () => loadAntigravitySessions(),
+      ]
+      for (const loadFn of slowPlatformLoads) {
+        if (res.destroyed) return
+        const part = await loadFn()
+        if (!part.length) continue
+        flushSidebarCacheFromProjects(part, null)
+        acc = mergeProjectsInto(acc, part)
+        const nextTotal = countSessionsInProjects(acc)
+        sseWrite(res, "projects_meta", { total: nextTotal })
+        sseWrite(res, "projects", sortProjectGroups(acc))
+        await yieldEventLoopTick()
+      }
+    }, 1500)
+  }) // end setImmediate
 }
 
 async function hydrateClaudeSessionsInProjects(projects, fileBySessKey, names) {
@@ -855,20 +865,27 @@ function checkHeaderAuth(req) {
 /** @type {Set<{ res: import('http').ServerResponse, maxSessions: number | null }>} */
 const sseClients = new Set()
 
-async function broadcastProjects() {
+/** Fast broadcast from sidebar cache — avoids full JSONL scan on every file change. */
+function broadcastProjectsFromCache() {
   if (sseClients.size === 0) return
-  const full = await loadProjectsFull()
+  const projects = loadCachedSidebarState()
+  if (!projects) return
+  const sorted = sortProjectGroups(projects)
   for (const c of sseClients) {
     const payload =
       c.maxSessions != null && c.maxSessions > 0
-        ? trimProjectsByRecentSessionCount(full, c.maxSessions)
-        : full
+        ? trimProjectsByRecentSessionCount(sorted, c.maxSessions)
+        : sorted
     try {
       c.res.write(`event: projects\ndata: ${JSON.stringify(payload)}\n\n`)
     } catch {
       sseClients.delete(c)
     }
   }
+}
+
+async function broadcastProjects() {
+  broadcastProjectsFromCache()
 }
 
 // Watch ~/.claude/projects for file changes; update search index for changed JSONL files.
@@ -881,23 +898,42 @@ function handleClaudeFileChange(filename) {
   const projectDir = parts.slice(0, -1).join("/")
   const projectPath = join(CLAUDE_DIR, projectDir)
   const fp = join(projectPath, `${sessionId}.jsonl`)
-  if (!existsSync(fp)) { removeSession(projectPath, sessionId); lanceRemoveOne(projectPath, sessionId).catch(() => {}); broadcastProjects(); return }
+  if (!existsSync(fp)) {
+    removeSession(projectPath, sessionId)
+    lanceRemoveOne(projectPath, sessionId).catch(() => {})
+    broadcastProjectsFromCache()
+    return
+  }
   try {
     const stat = statSync(fp)
     const names = loadConfig().names ?? {}
     const projectKey = projectDir
     const msgs = parseJsonl(fp)
+    msgCache.set(`${projectPath}/${sessionId}`, msgs)
     const meta = claudeSessionMetaFromMsgs(msgs, sessionId, projectKey, names, stat)
     indexSession(projectPath, sessionId, msgs, meta)
     lanceIndexOne(projectPath, sessionId, msgs).catch(() => {})
+    // Update sidebar cache so the next broadcast reflects new mtime + message count
+    const projectDisplayName = encodedDirToDisplayName(projectDir)
+    updateSidebarCacheEntry(sessionId, {
+      projectPath: projectKey,
+      projectDisplayName,
+      source: "claude",
+      messageCount: meta.messageCount,
+      userMessageCount: meta.userMessageCount ?? null,
+      firstName: meta.firstName ?? null,
+      lastActivity: stat.mtime.toISOString(),
+      mtime: stat.mtimeMs,
+    })
+    saveSidebarCache()
   } catch { /* ignore */ }
-  broadcastProjects()
+  broadcastProjectsFromCache()
 }
 
 try {
   watch(CLAUDE_DIR, { recursive: true }, (_evt, filename) => handleClaudeFileChange(filename))
 } catch {
-  setInterval(broadcastProjects, 3000)
+  setInterval(broadcastProjectsFromCache, 3000)
 }
 
 if (existsSync(CURSOR_PROJECTS_ROOT)) {
@@ -991,7 +1027,7 @@ const server = http.createServer(async (req, res) => {
       const cookieVal = AUTH_PIN ?? "local"
       res.writeHead(200, {
         "Content-Type": "application/json",
-        "Set-Cookie": `auth_pin=${cookieVal}; Path=/; HttpOnly; SameSite=Strict; Max-Age=86400`,
+        "Set-Cookie": `auth_pin=${cookieVal}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000`,
       })
       res.end(JSON.stringify({ ok: true }))
     } else {
@@ -1124,6 +1160,7 @@ const server = http.createServer(async (req, res) => {
       "Connection": "keep-alive",
       "X-Accel-Buffering": "no",
     })
+    res.write(": connected\n\n")  // flush headers immediately so EventSource.onopen fires now
     if (maxSessions != null) {
       await streamRecentSidebarInitial(res, maxSessions)
     } else {
