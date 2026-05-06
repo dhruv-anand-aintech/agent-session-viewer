@@ -5,7 +5,13 @@ import PrettyMessageBlock, { charCountMsg } from "./pretty/PrettyMessageBlock"
 import { idbPut, idbGet } from "./idb"
 import { runThreadSearch } from "./threadSearch"
 import { highlightTermsInPlainText } from "./searchHighlight"
+import {
+  markAppInit, markSSEOpen, markProjectsFirst, markBootstrapDone,
+  markSessionClick, markIDBResult, markFirstPaint, markRemoteFetch, markChunkLoad,
+} from "./perf"
 import "./App.css"
+
+markAppInit()
 
 interface SessionMeta {
   id: string
@@ -123,7 +129,8 @@ function useProjects() {
       setTotalSessions(null)
     })
     const es = new EventSource(`/api/stream${qs}`)
-    es.onopen = () => setConnected(true)
+    let firstProjectsBatch = true
+    es.onopen = () => { setConnected(true); markSSEOpen() }
     es.onerror = () => {
       setConnected(false)
       setProjectsLoading(false)
@@ -139,12 +146,17 @@ function useProjects() {
     es.addEventListener("projects", e => {
       try {
         const incoming = JSON.parse((e as MessageEvent).data) as ProjectData[]
+        if (firstProjectsBatch) { markProjectsFirst(); firstProjectsBatch = false }
         setProjects(prev => mergeProjectData(prev, incoming))
       } catch {
         /* ignore */
       }
     })
-    es.addEventListener("bootstrap_done", () => setProjectsLoading(false))
+    es.addEventListener("bootstrap_done", () => {
+      setProjectsLoading(false)
+      // count sessions after state settles
+      requestAnimationFrame(() => markBootstrapDone(projectsRef.current.reduce((n, p) => n + p.sessions.length, 0)))
+    })
     return () => {
       es.close()
       setProjectsLoading(false)
@@ -231,10 +243,14 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
   const fetchRemote = useCallback(async () => {
     try {
       if (!projectDir || !sessionId || !idbKey) return
+      const t0 = performance.now()
       const r = await fetch(sessionUrl(projectDir, sessionId, INITIAL_TAIL), { credentials: "include" })
+      const fetchMs = performance.now() - t0
       if (!r.ok) return
       const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || 0
       const msgs: SessionMessage[] = await r.json()
+      const parseMs = performance.now() - t0 - fetchMs
+      markRemoteFetch(sessionId, fetchMs, parseMs, msgs.length, serverTotal || msgs.length)
       await idbPut(idbKey, msgs)
       initWindow(msgs, serverTotal || msgs.length)
     } catch {
@@ -251,9 +267,11 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
     setLoading(true)
     fullRef.current = []
     ;(async () => {
+      const idbT0 = performance.now()
       const cached = await idbGet<SessionMessage[]>(idbKey)
+      const idbMs = performance.now() - idbT0
+      markIDBResult(sessionId, !!(cached && cached.length > 0), cached?.length ?? 0, idbMs)
       if (cached && cached.length > 0) {
-        // Show cached without knowing serverTotal — will be corrected by fetchRemote
         initWindow(cached, cached.length)
         setLoading(false)
       }
@@ -324,10 +342,12 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
     setLoadingMore(true)
     try {
       const skip = win.total - win.serverFetchedFrom  // messages already held from tail
+      const t0 = performance.now()
       const r = await fetch(sessionUrl(projectDir, sessionId, CHUNK, skip), { credentials: "include" })
       if (!r.ok) return
       const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || win.total
       const newMsgs: SessionMessage[] = await r.json()
+      markChunkLoad(sessionId!, newMsgs.length, skip, performance.now() - t0)
       const newFiltered = newMsgs.filter(m => m.type !== "file-history-snapshot")
       // Prepend to held messages
       const merged = [...newFiltered, ...full]
@@ -425,6 +445,8 @@ function wordOverlap(a: string, b: string): number {
 }
 
 function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projectDir: string; sessionMeta: SessionMeta; onBack?: () => void; capabilities: Capabilities }) {
+  const paintLogged = useRef(false)
+
   const {
     win,
     loading,
@@ -561,6 +583,13 @@ const bottomRef = useRef<HTMLDivElement>(null)
 
   // After initial load, smooth-follow new messages only if already at bottom.
   // We skip the very first win update (handled by the instant-scroll above).
+  // Measure time from session click to first painted messages
+  useEffect(() => {
+    if (!win || win.msgs.length === 0 || paintLogged.current) return
+    paintLogged.current = true
+    requestAnimationFrame(() => markFirstPaint(sessionMeta.id, win.msgs.length))
+  }, [win, sessionMeta.id])
+
   const prevWinLenRef = useRef(0)
   useEffect(() => {
     if (!win || !initialScrollDone.current) return
@@ -824,7 +853,7 @@ const bottomRef = useRef<HTMLDivElement>(null)
           const isThreadSearchHit = activeSearchIdx === startIdx + i
           return (
             <div
-              key={msg.uuid ?? i}
+              key={msg.uuid ? `${msg.uuid}:${startIdx + i}` : startIdx + i}
               className={[sugg ? "msg-with-suggestion" : "", isThreadSearchHit ? "msg-search-hit-wrap" : ""].filter(Boolean).join(" ") || undefined}
               data-msg-index={startIdx + i}
             >
@@ -1305,6 +1334,7 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
   const orphans = allFlat.filter(({ s }) => s.isSidechain && (!s.parentSessionId || !subagentsByParent.has(s.parentSessionId) || !topLevel.find(t => t.s.id === s.parentSessionId)))
 
   function handleSelect(p: string, s: string) {
+    markSessionClick(s)
     onSelect(p, s)
     onMobileClose()
   }
@@ -1569,7 +1599,11 @@ export default function App() {
     loadAllSessions,
   } = useProjects()
   const capabilities = useCapabilities()
-  const [selected, setSelected] = useState<{ project: string; session: string } | null>(parseUrlSession)
+  const [selected, setSelected] = useState<{ project: string; session: string } | null>(() => {
+    const s = parseUrlSession()
+    if (s) markSessionClick(s.session)  // URL pre-select counts as a "click" for paint timing
+    return s
+  })
   const [showSettings, setShowSettings] = useState(false)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(() => {

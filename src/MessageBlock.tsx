@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useState, memo } from "react"
 import type { SessionMessage, ContentBlock } from "./types"
 
 /** Session platform (e.g. from SessionMeta.source) — drives assistant label in raw mode. */
@@ -124,7 +124,7 @@ function ProgressBlock({ msg }: { msg: SessionMessage }) {
   )
 }
 
-export default function MessageBlock({ msg, source }: Props) {
+export default memo(function MessageBlock({ msg, source }: Props) {
   if (msg.type === "file-history-snapshot") return null
   if (msg.type === "progress") return <ProgressBlock msg={msg} />
 
@@ -150,4 +150,4 @@ export default function MessageBlock({ msg, source }: Props) {
       </div>
     </div>
   )
-}
+})

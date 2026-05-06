@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react"
+import { useState, useMemo, memo } from "react"
 import { marked } from "marked"
 import type { SessionMessage, ContentBlock } from "../types"
 import { stripXml, linkifyPaths, classifyTool, TOOL_META, charCount } from "./utils"
@@ -374,7 +374,7 @@ function SystemRow({ label, summary, timestamp }: { label: string; summary: stri
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-export default function PrettyMessageBlock({ msg, index, nextMsg }: { msg: SessionMessage; index?: number; nextMsg?: SessionMessage; source?: string }) {
+export default memo(function PrettyMessageBlock({ msg, index, nextMsg }: { msg: SessionMessage; index?: number; nextMsg?: SessionMessage; source?: string }) {
   if (msg.type === "file-history-snapshot") return null
   if (msg.type === "progress") return null  // hide progress events in pretty mode
   const role = msg.message?.role
@@ -408,7 +408,7 @@ export default function PrettyMessageBlock({ msg, index, nextMsg }: { msg: Sessi
 
   if (role === "user") return <UserMessage content={msg.message.content} timestamp={tsTitle} />
   return <AssistantMessage content={msg.message.content} nextMsg={nextMsg} timestamp={tsTitle} />
-}
+})
 
 export function charCountMsg(msg: SessionMessage): number {
   return charCount(msg.message?.content ?? "")
