@@ -225,10 +225,16 @@ function flushSidebarCacheFromProjects(projects, fileBySessKey) {
 // --- Session reading ---
 
 function parseJsonl(fp) {
+  const t0 = performance.now()
   try {
-    return readFileSync(fp, "utf8").split("\n").filter(Boolean).flatMap(line => {
+    const raw = readFileSync(fp, "utf8")
+    const lines = raw.split("\n").filter(Boolean)
+    const result = lines.flatMap(line => {
       try { return [JSON.parse(line)] } catch { return [] }
     })
+    const ms = (performance.now() - t0).toFixed(1)
+    if (parseFloat(ms) > 50) console.warn(`[perf] parseJsonl ${ms}ms — ${result.length} msgs — ${fp.split("/").pop()}`)
+    return result
   } catch { return [] }
 }
 
@@ -351,7 +357,9 @@ async function loadProjectsFull() {
         try { stat = statSync(fp) } catch { continue }
         const sessionId = f.replace(".jsonl", "")
         const projectKey = root === CLAUDE_DIR ? dir : `${root}/${dir}`
-        const msgs = parseJsonl(fp)
+        const ck = `${root}/${dir}/${sessionId}`
+        const msgs = msgCache.has(ck) ? msgCache.get(ck) : parseJsonl(fp)
+        if (!msgCache.has(ck)) msgCache.set(ck, msgs)
         sessions.push(claudeSessionMetaFromMsgs(msgs, sessionId, projectKey, names, stat))
       }
 
@@ -557,15 +565,21 @@ async function streamRecentSidebarInitial(res, maxSessions) {
   const total = countSessionsInProjects(acc)
   sseWrite(res, "projects_meta", { total })
 
-  // Hydrate full metadata (message counts, accurate firstName) for the most recent sessions only.
-  // firstName is already set cheaply for all sessions via cheapReadFirstUserMsg in scanOneClaudeFolder.
+  // Emit ALL sessions immediately and signal bootstrap done — UI is now interactive.
+  // Hydration (accurate message counts) runs afterward in the background.
+  const allSorted = sortProjectGroups(acc)
+  sseWrite(res, "projects", allSorted)
+  sseWrite(res, "bootstrap_done", {})
+
+  // Hydrate full metadata (message counts, accurate firstName) for the most recent sessions
+  // AFTER bootstrap_done so the UI is responsive during the expensive JSONL parses.
   const hydrateN = maxSessions ?? 50
   const forHydration = hydrateN > 0
     ? trimProjectsByRecentSessionCount(acc, hydrateN)
-    : sortProjectGroups(acc)
-  hydrateClaudeSessionsInProjects(forHydration, fileBySessKey, names)
+    : allSorted
+  await hydrateClaudeSessionsInProjects(forHydration, fileBySessKey, names)
   flushSidebarCacheFromProjects(forHydration, fileBySessKey)
-  // Copy hydrated firstName values back to acc so all SSE events carry correct titles
+  // Push corrected message counts + firstName back via SSE
   for (const p of forHydration) {
     const ap = acc.find(a => a.path === p.path)
     if (!ap) continue
@@ -573,12 +587,10 @@ async function streamRecentSidebarInitial(res, maxSessions) {
     for (const s of p.sessions) {
       const as = byId.get(s.id)
       if (as && s.firstName) as.firstName = s.firstName
+      if (as && s.messageCount != null) as.messageCount = s.messageCount
     }
   }
-  // Emit ALL sessions (no trim) — older sessions visible immediately; firstName set for all via cheap scan
-  const allSorted = sortProjectGroups(acc)
-  sseWrite(res, "projects", allSorted)
-  sseWrite(res, "bootstrap_done", {})
+  sseWrite(res, "projects", sortProjectGroups(acc))
 
   scheduleClaudeJsonlIndexing(fileBySessKey, names)
 
@@ -602,15 +614,20 @@ async function streamRecentSidebarInitial(res, maxSessions) {
   }, 1500)
 }
 
-function hydrateClaudeSessionsInProjects(projects, fileBySessKey, names) {
+async function hydrateClaudeSessionsInProjects(projects, fileBySessKey, names) {
   for (const p of projects) {
     for (let i = 0; i < p.sessions.length; i++) {
       const s = p.sessions[i]
       if (s.source !== "claude") continue
       const rec = fileBySessKey.get(SESS_PATH_KEY(p.path, s.id))
       if (!rec) continue
-      const msgs = parseJsonl(rec.fp)
+      // Use msgCache if already populated (e.g. by a concurrent /api/session request)
+      const cacheKey = `${p.path}/${s.id}`
+      const msgs = msgCache.has(cacheKey) ? msgCache.get(cacheKey) : parseJsonl(rec.fp)
+      // Populate msgCache so concurrent/future /api/session requests are served instantly
+      if (!msgCache.has(cacheKey)) msgCache.set(cacheKey, msgs)
       p.sessions[i] = claudeSessionMetaFromMsgs(msgs, s.id, s.projectPath, names, rec.stat)
+      await yieldEventLoopTick()
     }
     if (p.sessions.length) {
       p.sessions.sort((a, b) => String(b.lastActivity).localeCompare(String(a.lastActivity)))
@@ -639,7 +656,7 @@ async function loadProjectsBundleRecent(maxSessions) {
   const total = countSessionsInProjects(allProjects)
   const trimmed =
     total > maxSessions ? trimProjectsByRecentSessionCount(allProjects, maxSessions) : allProjects
-  hydrateClaudeSessionsInProjects(trimmed, fileBySessKey, names)
+  await hydrateClaudeSessionsInProjects(trimmed, fileBySessKey, names)
   flushSidebarCacheFromProjects(trimmed, fileBySessKey)
   trimmed.sort((a, b) => {
     const aLast = a.sessions[0]?.lastActivity ?? ""
@@ -985,10 +1002,13 @@ const server = http.createServer(async (req, res) => {
 
   // GET /api/capabilities — public bootstrap for SPA (must stay before cookie gate)
   if (url.pathname === "/api/capabilities") {
+    const pinRequired = Boolean(AUTH_PIN)
     json({
       openPath: true,
       debugStream: true,
-      pinRequired: Boolean(AUTH_PIN),
+      pinRequired,
+      // Include auth result so SPA can skip the /api/projects probe round-trip
+      authed: pinRequired ? checkCookieAuth(req) : true,
       homeDir: homedir(),
     })
     return
@@ -1118,17 +1138,24 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  // GET /api/suggestions/:project/:id — KV-only feature; return empty list in local mode
+  const suggestionsMatch = url.pathname.match(/^\/api\/suggestions\/([^/]+)\/([^/]+)$/)
+  if (suggestionsMatch) { json([]); return }
+
   // GET /api/session/:project/:id[?tail=N&skip=M]
   // tail=N  → return last N messages (default: all)
   // skip=M  → skip M messages from the end before taking tail (for pagination)
   const sessionMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/([^/]+)$/)
   if (sessionMatch) {
+    const reqT0 = performance.now()
     const projectPath = decodeURIComponent(sessionMatch[1])
     const sessionId = sessionMatch[2]
     const tailParam = url.searchParams.get("tail")
     const skipParam = url.searchParams.get("skip")
     const tail = tailParam ? Math.max(1, parseInt(tailParam) || 0) : 0
     const skip = skipParam ? Math.max(0, parseInt(skipParam) || 0) : 0
+    const shortId = sessionId.slice(0, 8)
+    const source = projectPath.split(":")[0] || "claude"
 
     function sliceMsgs(all) {
       const total = all.length
@@ -1138,41 +1165,54 @@ const server = http.createServer(async (req, res) => {
       return { msgs: all.slice(start, end > 0 ? end : 0), total }
     }
 
-    function jsonPaged(all) {
+    function jsonPaged(all, loadLabel) {
       const { msgs, total } = sliceMsgs(all)
+      const jsonStr = JSON.stringify(msgs)
+      const totalMs = (performance.now() - reqT0).toFixed(1)
+      console.log(`[perf] /api/session ${source}:${shortId} tail=${tail} skip=${skip} → ${msgs.length}/${total} msgs | load:${loadLabel} | total:${totalMs}ms | resp:${(jsonStr.length/1024).toFixed(1)}KB`)
       res.writeHead(200, { "Content-Type": "application/json", "X-Message-Total": String(total) })
-      res.end(JSON.stringify(msgs))
+      res.end(jsonStr)
     }
 
     // Cursor: push tail/skip into SQLite — avoids reading all bubbles for a tail fetch
     if (projectPath.startsWith("cursor:")) {
+      const t0 = performance.now()
       const { msgs, total } = readCursorSessionMsgs(sessionId, { tail, skip })
+      const ms = (performance.now() - t0).toFixed(1)
+      const jsonStr = JSON.stringify(msgs)
+      const totalMs = (performance.now() - reqT0).toFixed(1)
+      console.log(`[perf] /api/session cursor:${shortId} tail=${tail} skip=${skip} → ${msgs.length}/${total} msgs | load:sqlite ${ms}ms | total:${totalMs}ms | resp:${(jsonStr.length/1024).toFixed(1)}KB`)
       res.writeHead(200, { "Content-Type": "application/json", "X-Message-Total": String(total) })
-      res.end(JSON.stringify(msgs))
+      res.end(jsonStr)
       return
     }
-    // Other non-Claude platforms: msgCache (filled by /api/projects) or on-demand read
+    // All platforms: check msgCache first (includes Claude sessions cached after first parse)
     const cacheKey = `${projectPath}/${sessionId}`
-    if (msgCache.has(cacheKey)) { jsonPaged(msgCache.get(cacheKey)); return }
-    const ondemand = loadSessionMessagesOndemand(projectPath, sessionId)
-    if (ondemand != null) {
-      msgCache.set(cacheKey, ondemand)
-      jsonPaged(ondemand)
-      return
-    }
-    // Claude Code: projectPath is a folder slug under ~/.claude/projects or an absolute project root.
-    // Never join ~/.claude/projects with platform keys (e.g. opencode:…); on-demand load failed above.
-    if (
-      /^(opencode|codex|hermes|antigravity|cursor-agent):/.test(projectPath) &&
-      !/^[A-Za-z]:[\\/]/.test(projectPath)
-    ) {
+    if (msgCache.has(cacheKey)) { jsonPaged(msgCache.get(cacheKey), "mem-cache"); return }
+
+    // Non-Claude platforms: on-demand read via platform-readers
+    const isNonClaude = /^(opencode|codex|hermes|antigravity|cursor-agent):/.test(projectPath)
+    if (isNonClaude) {
+      const t0ondemand = performance.now()
+      const ondemand = loadSessionMessagesOndemand(projectPath, sessionId)
+      const ondemandMs = (performance.now() - t0ondemand).toFixed(1)
+      if (ondemand != null) {
+        msgCache.set(cacheKey, ondemand)
+        jsonPaged(ondemand, `ondemand ${ondemandMs}ms`)
+        return
+      }
       res.writeHead(404); res.end("Not Found"); return
     }
+
+    // Claude Code: parse JSONL and cache result so subsequent loads are instant
     const fp = projectPath.startsWith("/")
       ? join(projectPath, `${sessionId}.jsonl`)
       : join(CLAUDE_DIR, projectPath, `${sessionId}.jsonl`)
     if (!existsSync(fp)) { res.writeHead(404); res.end("Not Found"); return }
-    jsonPaged(parseJsonl(fp))
+    console.log(`[perf] /api/session claude:${shortId} — parsing JSONL (cold cache)…`)
+    const parsed = parseJsonl(fp)
+    msgCache.set(cacheKey, parsed)
+    jsonPaged(parsed, "jsonl-parse")
     return
   }
 
