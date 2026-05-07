@@ -261,6 +261,14 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
     }
   }, [projectDir, sessionId, idbKey, initWindow])
 
+  // Persist once when the user leaves this thread, not on every active refresh.
+  useEffect(() => {
+    return () => {
+      if (!idbKey || fullRef.current.length === 0) return
+      void idbPut(idbKey, { msgs: fullRef.current, total: fullRef.current.length })
+    }
+  }, [idbKey])
+
   // Initial load: try IDB first for instant display, then refresh from remote
   useEffect(() => {
     if (!projectDir || !sessionId || !idbKey) return
@@ -292,8 +300,6 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
         if (!r.ok) return
         const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || 0
         const msgs: SessionMessage[] = await r.json()
-        const total = serverTotal || msgs.length
-        await idbPut(idbKey, { msgs, total })
         const filtered = msgs.filter(m => m.type !== "file-history-snapshot")
         // Merge new tail: keep any earlier-loaded messages, append new ones
         setWin(prev => {
@@ -1248,9 +1254,8 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
 
   useEffect(() => {
     const q = sidebarSearchQuery.trim()
-    if (!q) { setSidebarSearchHits(null); return }
+    if (!q) return
     let cancelled = false
-    setSidebarSearchLoading(true)
     console.log("[sidebar-search] fetching q=", q)
     fetch(`/api/search/sessions?q=${encodeURIComponent(q)}`, { credentials: "include" })
       .then(r => (r.ok ? r.json() : { results: [] }))
@@ -1317,6 +1322,28 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
   const allSessions = projects.flatMap(p => p.sessions)
   const presentPlatforms = Array.from(new Set(allSessions.map(s => s.source ?? "claude")))
   const showPlatformFilter = presentPlatforms.length > 1
+  const loadedSessionCount = projects.reduce((n, p) => n + p.sessions.length, 0)
+  const recentTargetCount =
+    listMode === "recent" && totalSessions != null
+      ? Math.min(totalSessions, RECENT_SIDEBAR_SESSIONS)
+      : null
+  const loadingLabel = projectsLoading
+    ? listMode === "recent"
+      ? recentTargetCount != null
+        ? loadedSessionCount > 0
+          ? `Loading recent sessions… ${loadedSessionCount}/${recentTargetCount}`
+          : `Loading recent sessions…`
+        : loadedSessionCount > 0
+          ? `Loading recent sessions… ${loadedSessionCount}`
+          : `Loading recent sessions…`
+      : totalSessions != null
+        ? loadedSessionCount > 0
+          ? `Loading ${totalSessions} sessions… ${loadedSessionCount} loaded`
+          : `Loading ${totalSessions} sessions…`
+        : loadedSessionCount > 0
+          ? `Loading sessions… ${loadedSessionCount} loaded`
+          : `Loading…`
+    : null
 
   const allFlat: { s: SessionMeta; projectPath: string }[] = projects
     .flatMap(p => p.sessions.map(s => ({ s, projectPath: p.path })))
@@ -1383,6 +1410,7 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
             value={sidebarSearchQuery}
             onChange={e => {
               const v = e.target.value
+              if (v.trim()) setSidebarSearchLoading(true)
               setSidebarSearchQuery(v)
               if (!v.trim()) {
                 setSidebarSearchHits(null)
@@ -1408,6 +1436,12 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
         </div>
       </div>
       <div className="sidebar-body">
+        {projectsLoading && !searchBrowseActive && loadingLabel && (
+          <div className="sidebar-loading-banner">
+            <span className="sidebar-spinner" />
+            <span>{loadingLabel}</span>
+          </div>
+        )}
         <div className="sidebar-sessions-scroll">
         {searchBrowseActive ? (
           <>
@@ -1532,16 +1566,6 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
               />
             ))}
           </>
-        )}
-        {projectsLoading && projects.length === 0 && !searchBrowseActive && (
-          <div className="sidebar-empty">
-            <span className="sidebar-spinner" />
-            {sessionsTruncated || listMode === "recent"
-              ? "Loading recent sessions…"
-              : totalSessions != null
-                ? `Loading ${totalSessions} sessions…`
-                : "Loading…"}
-          </div>
         )}
         {!projectsLoading && projects.length === 0 && !searchBrowseActive && <div className="sidebar-empty">No sessions found</div>}
         </div>

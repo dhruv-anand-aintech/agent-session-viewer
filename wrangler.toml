@@ -1,10 +1,5 @@
+# Remote access is now handled by ngrok via `npx agent-session-viewer --remote`.
+# This wrangler config is kept for reference only — no deployment needed.
 name = "agent-session-viewer"
 main = "worker/index.ts"
 compatibility_date = "2024-01-01"
-
-assets = { directory = "./dist" }
-
-[[kv_namespaces]]
-binding = "SESSIONS_KV"
-id = "e61e79fc93f24b448c8300c0a03e3a8a"
-preview_id = "e5f103b9d7804a469ddbb1571ca8f5b0"
