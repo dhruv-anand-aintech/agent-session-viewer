@@ -1707,6 +1707,16 @@ const server = http.createServer(async (req, res) => {
   res.writeHead(404); res.end("Not Found")
 })
 
+function shutdown() {
+  for (const client of sseClients) { try { client.res.destroy() } catch { /* ignore */ } }
+  sseClients.clear()
+  server.close(() => process.exit(0))
+  // Force exit if graceful close stalls (open keep-alive connections)
+  setTimeout(() => process.exit(0), 1000).unref()
+}
+process.once("SIGINT", shutdown)
+process.once("SIGTERM", shutdown)
+
 const BIND_HOST = process.env.HOST ?? "127.0.0.1"
 server.listen(PORT, BIND_HOST, () => {
   const displayHost = BIND_HOST === "0.0.0.0" ? "0.0.0.0 (all interfaces)" : "localhost"
