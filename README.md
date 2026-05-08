@@ -15,8 +15,10 @@ npx agent-session-viewer@latest
 Downloads and runs directly. Builds the sidebar cache on first run, then opens at **http://localhost:3001**.
 
 ```bash
-npx agent-session-viewer@latest --host    # LAN access (phone, tablet)
-npx agent-session-viewer@latest --open    # auto-open browser
+npx agent-session-viewer@latest --lan         # LAN access (phone, tablet)
+npx agent-session-viewer@latest --tunnel      # internet URL via localtunnel
+npx agent-session-viewer@latest --ngrok       # permanent internet URL via ngrok
+npx agent-session-viewer@latest --open        # auto-open browser
 npx agent-session-viewer@latest --port 4000
 npx agent-session-viewer@latest --skip-cache  # skip cache build
 ```
@@ -42,7 +44,7 @@ npm run local    # starts at http://localhost:5173
 To access from other devices on your network:
 
 ```bash
-npm run local -- --host
+npm run local -- --lan
 ```
 
 ## Features
@@ -96,29 +98,17 @@ Auto-detected from `~/toolname` or `~/.toolname` for each of: nanoclaw, openclaw
 
 If your installation is in a non-standard location, configure the path in the Settings panel (⚙) or set `{NAME}_DIR` as an env var override.
 
-## Cloudflare Worker deployment (optional)
+## Remote access
 
-For remote access and multi-device sync via a deployed URL:
-
-```bash
-npm run setup:cloudflare
-```
-
-Requires a [Cloudflare account](https://dash.cloudflare.com/sign-up) (free tier). The script creates a KV namespace, sets an auth PIN, builds and deploys the Worker.
-
-Run the daemon to keep the Worker in sync with your local sessions:
+The CLI includes built-in sharing options — no cloud account needed:
 
 ```bash
-WORKER_URL=https://agent-session-viewer.<subdomain>.workers.dev \
-AUTH_PIN=<your-pin> \
-npm run daemon
+npx agent-session-viewer@latest --tunnel   # internet URL via localtunnel (changes on restart)
+npx agent-session-viewer@latest --ngrok    # permanent URL via ngrok (free account required)
+npx agent-session-viewer@latest --lan      # local network only (same WiFi)
 ```
 
-To deploy code changes after modifying the Worker:
-
-```bash
-npm run deploy
-```
+Or omit flags to get an interactive menu at startup.
 
 ## Other commands
 
@@ -142,18 +132,10 @@ npm run lint          # eslint
 ~/nanoclaw/data/sessions/**/*.jsonl     claw bot agent sessions (auto-detected)
          │
          ▼
-  daemon/watch.mjs        (local file watcher + SQLite poller)
-         │  PUT /api/sync (X-Auth-Pin)
-         ▼
-  Cloudflare Worker       (worker/index.ts — KV storage)
+  local-server.mjs        (reads platform dirs directly)
          │  SSE /api/stream
          ▼
   Browser (React + Vite)  (src/)
-
-  ── or local mode (default) ──
-
-  local-server.mjs        (reads platform dirs directly — no Cloudflare)
-         │  SSE /api/stream
-         ▼
-  Browser (React + Vite)  (src/)
+         │
+  bin/agent-session-viewer.mjs  (CLI: TUI menu, LAN/tunnel/ngrok sharing)
 ```
