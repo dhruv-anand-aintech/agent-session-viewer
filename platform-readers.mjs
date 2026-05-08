@@ -1821,6 +1821,29 @@ function readOpenclawSession(filePath, cacheGet, cacheSet) {
     } else if (msg.role === "assistant") {
       const content = Array.isArray(msg.content) ? msg.content : (typeof msg.content === "string" ? msg.content : "")
       if (!content || (Array.isArray(content) && !content.length)) continue
+      // Split thinking blocks into a separate preceding message so they render
+      // as independently collapsible items rather than buried inside the response
+      if (Array.isArray(content)) {
+        const thinkingBlocks = content.filter(b => b?.type === "thinking")
+        const responseBlocks = content.filter(b => b?.type !== "thinking")
+        if (thinkingBlocks.length && responseBlocks.length) {
+          out.push({
+            uuid: `openclaw-${sessionId}-${seq}`,
+            parentUuid: seq > 0 ? `openclaw-${sessionId}-${seq - 1}` : null,
+            type: "assistant", sessionId, timestamp: ts, isSidechain: false,
+            message: { role: "assistant", content: thinkingBlocks },
+          })
+          seq++
+          out.push({
+            uuid: `openclaw-${sessionId}-${seq}`,
+            parentUuid: `openclaw-${sessionId}-${seq - 1}`,
+            type: "assistant", sessionId, timestamp: ts, isSidechain: false,
+            message: { role: "assistant", content: responseBlocks },
+          })
+          seq++
+          continue
+        }
+      }
       out.push({
         uuid: `openclaw-${sessionId}-${seq}`,
         parentUuid: seq > 0 ? `openclaw-${sessionId}-${seq - 1}` : null,
