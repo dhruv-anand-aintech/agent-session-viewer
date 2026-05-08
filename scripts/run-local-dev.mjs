@@ -54,6 +54,7 @@ if (!existsSync(viteJs)) {
 const api = spawn(process.execPath, ["--watch", SERVER], {
   cwd: ROOT,
   stdio: "inherit",
+  detached: true,
   env: { ...process.env, PORT: String(apiPort), HOST: host ? "0.0.0.0" : "127.0.0.1" },
 })
 
@@ -61,15 +62,17 @@ const viteArgs = [viteJs, ...(host ? ["--host"] : [])]
 const ui = spawn(process.execPath, viteArgs, {
   cwd: ROOT,
   stdio: "inherit",
+  detached: true,
   env: { ...process.env, VITE_API_PROXY_TARGET: proxyTarget },
 })
 
-function safeKill(proc, sig = "SIGTERM") {
+function safeKill(proc) {
   if (proc.pid == null) return
   try {
-    proc.kill(sig)
+    // Kill the process group so node --watch doesn't orphan its child
+    process.kill(-proc.pid, "SIGKILL")
   } catch {
-    /* already gone */
+    try { proc.kill("SIGKILL") } catch { /* already gone */ }
   }
 }
 
