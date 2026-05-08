@@ -36,6 +36,19 @@ if (!kvId || !kvPreviewId) {
   process.exit(1)
 }
 
+const checks = [
+  "node test/test-resolve-project-dir.mjs",
+  "node test/test-codex-session-file-cache.mjs",
+  "npx tsx test/test-session-pane-state.ts",
+  "npx tsx test/test-sidebar-search-state.ts",
+  "npm run build",
+]
+
+for (const cmd of checks) {
+  console.log(`\nRunning predeploy check: ${cmd}`)
+  execSync(cmd, { stdio: "inherit", cwd: root })
+}
+
 const tomlPath = new URL("wrangler.toml", import.meta.url).pathname
 const original = readFileSync(tomlPath, "utf8")
 
@@ -46,7 +59,7 @@ const patched = original
 writeFileSync(tomlPath, patched)
 
 try {
-  execSync("npm run build && npx wrangler deploy", { stdio: "inherit" })
+  execSync("npx wrangler deploy", { stdio: "inherit", cwd: root })
 } finally {
   writeFileSync(tomlPath, original)
 }

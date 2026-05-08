@@ -1,0 +1,582 @@
+import { useState, useEffect, useRef, useCallback } from "react"
+import type { SessionMessage, SessionMeta, Capabilities } from "./types"
+import MessageBlock from "./MessageBlock"
+import PrettyMessageBlock from "./pretty/PrettyMessageBlock"
+import { runThreadSearch } from "./threadSearch"
+import { highlightTermsInPlainText } from "./searchHighlight"
+import { createPinnedProjectPath, getLoadEarlierControlState } from "./sessionPaneState"
+import { markFirstPaint, markSessionClick } from "./perf"
+import { isRecentlyActive, wallClock } from "./utils"
+import { useWindowedMessages } from "./useWindowedMessages"
+
+type Suggestion = { parentUuid: string; text: string; id: string }
+type ThreadSearchHit = { idx: number; text: string; uuid?: string; score?: number }
+
+function ThreadSearchResultCard({
+  hit,
+  active,
+  query,
+  prettyMode,
+  projectDir,
+  sessionId,
+  source,
+  onSelect,
+}: {
+  hit: ThreadSearchHit
+  active: boolean
+  query: string
+  prettyMode: boolean
+  projectDir: string
+  sessionId: string
+  source?: string
+  onSelect: () => void
+}) {
+  const [payload, setPayload] = useState<{ msg: SessionMessage; nextMsg?: SessionMessage | null; index: number } | null>(null)
+  const summary = hit.text.slice(0, 220)
+
+  useEffect(() => {
+    if (!hit.uuid) {
+      setPayload(null)
+      return
+    }
+    const controller = new AbortController()
+    setPayload(null)
+    fetch(
+      `/api/session-message?project=${encodeURIComponent(projectDir)}&session=${encodeURIComponent(sessionId)}&uuid=${encodeURIComponent(hit.uuid)}`,
+      { credentials: "include", signal: controller.signal },
+    )
+      .then(r => (r.ok ? r.json() : null))
+      .then((data: { msg?: SessionMessage; nextMsg?: SessionMessage | null; index?: number } | null) => {
+        if (controller.signal.aborted || !data?.msg) return
+        setPayload({
+          msg: data.msg,
+          nextMsg: data.nextMsg ?? null,
+          index: typeof data.index === "number" ? data.index : hit.idx,
+        })
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setPayload(null)
+      })
+    return () => controller.abort()
+  }, [hit.uuid, hit.idx, projectDir, sessionId])
+
+  return (
+    <div className={`thread-search-result-card ${prettyMode ? "thread-search-result-card--pretty" : "thread-search-result-card--raw"} ${active ? "active" : ""}`}>
+      <button type="button" className="thread-search-result-card-head" onClick={onSelect}>
+        <div className="thread-search-result-card-meta">
+          <span>Msg {hit.idx + 1}</span>
+          {hit.uuid ? <span className="thread-search-result-card-id">{hit.uuid.slice(0, 8)}</span> : null}
+        </div>
+        <div className="thread-search-result-card-snippet">
+          {highlightTermsInPlainText(summary, query)}
+        </div>
+      </button>
+      <div className="thread-search-result-card-body">
+        {payload ? (
+          prettyMode ? (
+            <PrettyMessageBlock msg={payload.msg} index={payload.index} nextMsg={payload.nextMsg ?? undefined} source={source} />
+          ) : (
+            <MessageBlock msg={payload.msg} index={payload.index} nextMsg={payload.nextMsg ?? undefined} source={source} />
+          )
+        ) : (
+          <div className="thread-search-result-loading">Loading exact message…</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function wordOverlap(a: string, b: string): number {
+  const words = (s: string) => new Set(s.toLowerCase().match(/\b\w{4,}\b/g) ?? [])
+  const wa = words(a), wb = words(b)
+  let hits = 0
+  wa.forEach(w => { if (wb.has(w)) hits++ })
+  return wa.size ? hits / wa.size : 0
+}
+
+export function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projectDir: string; sessionMeta: SessionMeta; onBack?: () => void; capabilities: Capabilities }) {
+  const paintLogged = useRef(false)
+  const stableProjectDirRef = useRef(createPinnedProjectPath(projectDir))
+  const stableProjectDir = stableProjectDirRef.current.current
+
+  useEffect(() => {
+    if (stableProjectDirRef.current.diverges(projectDir)) {
+      console.log(`[session-state ${wallClock()}] ${sessionMeta.id.slice(0, 8)} project-path-diverged mounted=${stableProjectDirRef.current.current} prop=${projectDir}`)
+    }
+  }, [projectDir, sessionMeta.id])
+
+  const {
+    win,
+    loading,
+    loadingMore,
+    initialRemotePending,
+    hasEarlier,
+    hasLater,
+    loadEarlier,
+    loadLater,
+    loadingEarlierRef,
+    loadingLaterRef,
+    chatDir,
+    fullRef,
+    bringMessageIndexIntoView,
+    jumpToUuid,
+    newMsgUuids,
+  } = useWindowedMessages(stableProjectDir, sessionMeta.id, isRecentlyActive(sessionMeta.lastActivity))
+  const winRef = useRef(win)
+  useEffect(() => { winRef.current = win }, [win])
+
+  const [threadSearchOpen, setThreadSearchOpen] = useState(false)
+  const [threadSearchQuery, setThreadSearchQuery] = useState("")
+  const [threadSearchLoading, setThreadSearchLoading] = useState(false)
+  const [threadSearchMsgs, setThreadSearchMsgs] = useState<SessionMessage[] | null>(null)
+  const [threadHits, setThreadHits] = useState<ThreadSearchHit[]>([])
+  const [threadHitPos, setThreadHitPos] = useState(0)
+  const threadSearchInputRef = useRef<HTMLInputElement>(null)
+
+  async function prepareThreadSearch() {
+    setThreadSearchOpen(true)
+    setThreadSearchLoading(false)
+    setThreadSearchMsgs(fullRef.current.filter(m => m.type !== "file-history-snapshot"))
+    setThreadSearchQuery("")
+    setThreadHits([])
+    setThreadHitPos(0)
+    console.log(`[thread-search] panel open project=${stableProjectDir} session=${sessionMeta.id} loaded=${fullRef.current.length}`)
+    setTimeout(() => threadSearchInputRef.current?.focus(), 0)
+  }
+
+  function closeThreadSearch() {
+    setThreadSearchOpen(false)
+    setThreadSearchQuery("")
+    setThreadHits([])
+    setThreadHitPos(0)
+    setThreadSearchMsgs(null)
+  }
+
+  useEffect(() => {
+    if (!threadSearchOpen) {
+      setThreadHits([])
+      return
+    }
+    const q = threadSearchQuery.trim()
+    if (!q) {
+      setThreadHits([])
+      setThreadHitPos(0)
+      setThreadSearchLoading(false)
+      return
+    }
+
+    let cancelled = false
+    const runSearch = async () => {
+      const requestStartedAt = performance.now()
+      console.log(`[thread-search] start q="${q}" loaded=${winRef.current?.msgs.length ?? 0}`)
+      setThreadSearchLoading(true)
+      try {
+        const r = await fetch(
+          `/api/search/thread?project=${encodeURIComponent(stableProjectDir)}&session=${encodeURIComponent(sessionMeta.id)}&q=${encodeURIComponent(q)}`,
+          { credentials: "include" }
+        )
+        if (!cancelled && r.ok) {
+          const data = await r.json()
+          if (data.hits && Array.isArray(data.hits) && data.hits.length) {
+            const hits = [...data.hits].sort((a, b) => b.idx - a.idx)
+            setThreadHits(hits)
+            setThreadHitPos(0)
+            console.log(`[thread-search] results=${hits.length} source=server ms=${(performance.now() - requestStartedAt).toFixed(1)} q="${q}"`)
+            if (!cancelled) setThreadSearchLoading(false)
+            return
+          }
+        }
+      } catch (e) {
+        console.warn(`[thread-search] server search error q="${q}":`, e)
+      }
+
+      if (!cancelled) {
+        const raw = runThreadSearch(q, threadSearchMsgs ?? [])
+        raw.sort((a, b) => b.idx - a.idx)
+        setThreadHits(raw)
+        setThreadHitPos(0)
+        console.log(`[thread-search] results=${raw.length} source=local ms=${(performance.now() - requestStartedAt).toFixed(1)} q="${q}"`)
+      }
+      if (!cancelled) setThreadSearchLoading(false)
+    }
+
+    runSearch()
+    return () => { cancelled = true }
+  }, [threadSearchOpen, threadSearchQuery, threadSearchMsgs, stableProjectDir, sessionMeta?.id])
+
+  const visible = win?.msgs ?? []
+  const total = win?.total ?? 0
+  const startIdx = win?.startIdx ?? 0
+  const globalOffset = win?.globalOffset ?? 0
+
+  useEffect(() => {
+    if (!threadSearchOpen || threadHits.length === 0) return
+    const hit = threadHits[threadHitPos]
+    if (!hit) return
+    if (hit.uuid) {
+      void jumpToUuid(hit.uuid, scrollRef.current)
+    } else {
+      bringMessageIndexIntoView(hit.idx)
+      requestAnimationFrame(() => {
+        scrollRef.current?.querySelector(`[data-msg-index="${globalOffset + hit.idx}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" })
+      })
+    }
+  }, [threadHitPos, threadHits, threadSearchOpen, bringMessageIndexIntoView, jumpToUuid, globalOffset])
+
+  async function focusThreadHit(hit: { idx: number; text: string; uuid?: string }) {
+    console.log(`[thread-search] focus idx=${hit.idx} uuid=${hit.uuid ?? "n/a"}`)
+    if (hit.uuid) {
+      await jumpToUuid(hit.uuid, scrollRef.current)
+    }
+  }
+
+  const [suggestions, setSuggestions] = useState<Record<string, Suggestion>>({})
+  useEffect(() => {
+    fetch(`/api/suggestions/${encodeURIComponent(stableProjectDir)}/${sessionMeta.id}`)
+      .then(r => r.ok ? r.json() : [])
+      .then((list: Suggestion[]) => {
+        const map: Record<string, Suggestion> = {}
+        list.forEach(s => { if (s.parentUuid) map[s.parentUuid] = s })
+        setSuggestions(map)
+      }).catch(() => {})
+  }, [stableProjectDir, sessionMeta.id])
+
+  const bottomRef = useRef<HTMLDivElement>(null)
+  const topSentinelRef = useRef<HTMLDivElement>(null)
+  const bottomSentinelRef = useRef<HTMLDivElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const [autoScroll, setAutoScroll] = useState(true)
+  const [prettyMode, setPrettyMode] = useState(true)
+  const pendingPrevNav = useRef(false)
+  const initialScrollDone = useRef(false)
+
+  useEffect(() => {
+    if (win && !initialScrollDone.current) {
+      initialScrollDone.current = true
+      const el = scrollRef.current
+      if (el) el.scrollTop = el.scrollHeight
+    }
+  }, [win])
+
+  useEffect(() => {
+    if (!win || win.msgs.length === 0 || paintLogged.current) return
+    paintLogged.current = true
+    requestAnimationFrame(() => markFirstPaint(sessionMeta.id, win.msgs.length))
+  }, [win, sessionMeta.id])
+
+  const prevWinLenRef = useRef(0)
+  useEffect(() => {
+    if (!win || !initialScrollDone.current) return
+    const newLen = win.msgs.length
+    if (autoScroll && newLen > prevWinLenRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" })
+    }
+    prevWinLenRef.current = newLen
+  }, [win, autoScroll])
+
+  useEffect(() => {
+    if (!win) return
+    console.log(`[session-state ${wallClock()}] ${sessionMeta.id.slice(0, 8)} project=${stableProjectDir} hasEarlier=${hasEarlier} hasLater=${hasLater} loading=${loading} loadingMore=${loadingMore} initialRemotePending=${initialRemotePending} win=${win.msgs.length}/${win.total} serverFetchedFrom=${win.serverFetchedFrom}`)
+  }, [win, hasEarlier, hasLater, loading, loadingMore, initialRemotePending, stableProjectDir, sessionMeta.id])
+
+  const loadEarlierControl = getLoadEarlierControlState(win, loadingMore, initialRemotePending)
+
+  const lastScrollRef = useRef<{ dir: "up" | "down"; time: number; scrollTop: number } | null>(null)
+
+  const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget
+    const now = Date.now()
+    const prev = lastScrollRef.current
+    const dir = prev && el.scrollTop < prev.scrollTop ? "up" : "down"
+    lastScrollRef.current = { dir, time: now, scrollTop: el.scrollTop }
+    setAutoScroll(el.scrollHeight - el.scrollTop - el.clientHeight < 40)
+  }, [])
+
+  function jumpToBottom() {
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+    setAutoScroll(true)
+  }
+
+  function loadEarlierPreserveScroll() {
+    const el = scrollRef.current
+    const prevHeight = el?.scrollHeight ?? 0
+    loadEarlier()
+    requestAnimationFrame(() => {
+      if (el) el.scrollTop += el.scrollHeight - prevHeight
+    })
+  }
+
+  useEffect(() => {
+    if (!hasEarlier) return
+    const sentinel = topSentinelRef.current
+    if (!sentinel) return
+    const obs = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry.isIntersecting || loadingEarlierRef.current) return
+        const scroll = lastScrollRef.current
+        const hasUpPressure = scroll && scroll.dir === "up" && Date.now() - scroll.time < 2000
+        if (!hasUpPressure) return
+        loadingEarlierRef.current = true
+        loadEarlierPreserveScroll()
+        setTimeout(() => { loadingEarlierRef.current = false }, 400)
+      },
+      { root: scrollRef.current, threshold: 0.1 }
+    )
+    obs.observe(sentinel)
+    return () => obs.disconnect()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasEarlier, win?.startIdx, win?.serverFetchedFrom])
+
+  useEffect(() => {
+    if (!hasLater) return
+    const sentinel = bottomSentinelRef.current
+    if (!sentinel) return
+    const obs = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry.isIntersecting || loadingLaterRef.current) return
+        const scroll = lastScrollRef.current
+        const hasDownPressure = scroll && scroll.dir === "down" && Date.now() - scroll.time < 2000
+        if (!hasDownPressure) return
+        loadingLaterRef.current = true
+        loadLater()
+        setTimeout(() => { loadingLaterRef.current = false }, 400)
+      },
+      { root: scrollRef.current, threshold: 0.1 }
+    )
+    obs.observe(sentinel)
+    return () => obs.disconnect()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasLater, win?.startIdx, win?.msgs.length])
+
+  const Block = prettyMode ? PrettyMessageBlock : MessageBlock
+
+  function getUserTurns(): HTMLElement[] {
+    return Array.from(scrollRef.current?.querySelectorAll<HTMLElement>("[data-user-turn]") ?? [])
+  }
+
+  useEffect(() => {
+    if (!pendingPrevNav.current) return
+    const scrollEl = scrollRef.current
+    if (!scrollEl) return
+    const containerTop = scrollEl.getBoundingClientRect().top
+    const turns = getUserTurns()
+    const above = turns.filter(el => el.getBoundingClientRect().top - containerTop < -10)
+    if (above.length > 0) {
+      pendingPrevNav.current = false
+      above[above.length - 1].scrollIntoView({ behavior: "smooth", block: "start" })
+    } else if (hasEarlier) {
+      loadEarlierPreserveScroll()
+    } else {
+      pendingPrevNav.current = false
+      turns[0]?.scrollIntoView({ behavior: "smooth", block: "start" })
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [win?.msgs.length, win?.startIdx])
+
+  function navUserMsg(dir: "prev" | "next") {
+    const turns = getUserTurns()
+    if (!turns.length && !hasEarlier) return
+    const scrollEl = scrollRef.current!
+    const containerTop = scrollEl.getBoundingClientRect().top
+
+    if (dir === "next") {
+      const target = turns.find(el => el.getBoundingClientRect().top - containerTop > 10)
+      target?.scrollIntoView({ behavior: "smooth", block: "start" })
+    } else {
+      const above = turns.filter(el => el.getBoundingClientRect().top - containerTop < -10)
+      if (above.length > 0) {
+        above[above.length - 1].scrollIntoView({ behavior: "smooth", block: "start" })
+      } else if (hasEarlier) {
+        pendingPrevNav.current = true
+        loadEarlierPreserveScroll()
+      } else {
+        turns[0]?.scrollIntoView({ behavior: "smooth", block: "start" })
+      }
+    }
+  }
+
+  function jumpToFirst() {
+    if (win && win.startIdx === 0) {
+      scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" })
+    } else {
+      pendingPrevNav.current = true
+      loadEarlierPreserveScroll()
+      const check = setInterval(() => {
+        if (!pendingPrevNav.current) {
+          clearInterval(check)
+          scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" })
+        }
+      }, 200)
+    }
+  }
+
+  const chatDirLabel = chatDir ?? stableProjectDir
+
+  return (
+    <div className="session-pane">
+      <div className="session-header" data-tooltip={`${stableProjectDir}/${sessionMeta.id}`}>
+        {onBack && <button className="back-btn" onClick={onBack} title="Back to sessions">←</button>}
+        <span className="session-id">{sessionMeta.id.slice(0, 8)}</span>
+        {chatDirLabel && <span className="session-cwd hide-mobile" title={chatDirLabel}>{chatDirLabel}</span>}
+        {capabilities.openPath && (
+          <a
+            className="session-path-btn hide-mobile"
+            href={`/api/raw-jsonl?project=${encodeURIComponent(stableProjectDir)}&session=${sessionMeta.id}`}
+            title={capabilities.homeDir ? `${capabilities.homeDir}/.claude/projects/${stableProjectDir}/${sessionMeta.id}.jsonl` : `${sessionMeta.id}.jsonl`}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {sessionMeta.id.slice(0, 8)}.jsonl
+          </a>
+        )}
+        {loading && win && <span className="session-refreshing" title="Refreshing…" />}
+        {sessionMeta.gitBranch && <span className="git-branch hide-mobile">⎇ {sessionMeta.gitBranch}</span>}
+        {isRecentlyActive(sessionMeta.lastActivity) && <span className="active-badge">● Live</span>}
+        <span className="msg-count hide-mobile">{sessionMeta.messageCount} messages</span>
+        <button
+          type="button"
+          className={`user-nav-btn thread-search-toggle ${threadSearchOpen ? "active" : ""}`}
+          onClick={() => (threadSearchOpen ? closeThreadSearch() : void prepareThreadSearch())}
+          title={threadSearchOpen ? "Close thread search" : "Search messages in this thread"}
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><circle cx="6" cy="6" r="4.25" stroke="currentColor" strokeWidth="1.5"/><line x1="9.3" y1="9.3" x2="13" y2="13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+        </button>
+        <div className="user-nav">
+          <button className="user-nav-btn" onClick={jumpToFirst} title="Jump to first message">⤒</button>
+          <button className="user-nav-btn" onClick={() => navUserMsg("prev")} title="Previous user message">↑</button>
+          <button className="user-nav-btn" onClick={() => navUserMsg("next")} title="Next user message">↓</button>
+          {!autoScroll && (
+            <button className="user-nav-btn jump-bottom-btn" onClick={jumpToBottom} title="Jump to bottom">⤓</button>
+          )}
+        </div>
+        <div className="mode-toggle">
+          <button className={`mode-toggle-btn ${prettyMode ? "" : "active"}`} onClick={() => setPrettyMode(false)}>Raw</button>
+          <button className={`mode-toggle-btn ${prettyMode ? "active" : ""}`} onClick={() => setPrettyMode(true)}>Pretty</button>
+        </div>
+      </div>
+      {threadSearchOpen && (
+        <>
+          <div className="thread-search-panel">
+            <input
+              ref={threadSearchInputRef}
+              className="thread-search-input"
+              placeholder="Search this thread…"
+              value={threadSearchQuery}
+              onChange={e => setThreadSearchQuery(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === "Enter" && threadHits.length > 0) {
+                  e.preventDefault()
+                  setThreadHitPos(p => (p + 1) % threadHits.length)
+                } else if (e.key === "Escape") {
+                  closeThreadSearch()
+                }
+              }}
+              aria-label="Search messages in this thread"
+            />
+            {threadSearchLoading ? (
+              <span className="thread-search-meta">Searching thread…</span>
+            ) : threadHits.length > 0 ? (
+              <>
+                <span className="thread-search-meta">
+                  Match {Math.min(threadHitPos + 1, threadHits.length)} of {threadHits.length}
+                </span>
+                <button type="button" className="thread-search-step" onClick={() => setThreadHitPos(p => (p - 1 + threadHits.length) % threadHits.length)} title="Newer match (more recent in thread)">
+                  ◀
+                </button>
+                <button type="button" className="thread-search-step" onClick={() => setThreadHitPos(p => (p + 1) % threadHits.length)} title="Older match (earlier in thread) — same as Enter">
+                  ▶
+                </button>
+              </>
+            ) : threadSearchQuery.trim() ? (
+              <span className="thread-search-meta muted">No matches</span>
+            ) : (
+              <span className="thread-search-meta muted">Type to search.</span>
+            )}
+            <button type="button" className="thread-search-close" onClick={closeThreadSearch} title="Close">
+              ✕
+            </button>
+          </div>
+          {threadHits.length > 0 && (
+            <div className={`thread-search-results ${prettyMode ? "thread-search-results--pretty" : "thread-search-results--raw"}`}>
+              {threadHits.slice(0, 12).map((hit, i) => (
+                <ThreadSearchResultCard
+                  key={`${hit.uuid ?? hit.idx}-${i}`}
+                  hit={hit}
+                  active={i === threadHitPos}
+                  query={threadSearchQuery}
+                  prettyMode={prettyMode}
+                  projectDir={stableProjectDir}
+                  sessionId={sessionMeta.id}
+                  source={sessionMeta.source}
+                  onSelect={() => {
+                    setThreadHitPos(i)
+                    void focusThreadHit(hit)
+                  }}
+                />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+      <div className="messages-scroll" ref={scrollRef} onScroll={handleScroll}>
+        {loading && !win && <div className="loading-state">Loading messages…</div>}
+        {loadEarlierControl.show && !loading && (
+          <div>
+            <div ref={topSentinelRef} style={{ height: 1 }} />
+            <div className="load-more-wrap">
+              <button className="load-more-pill" onClick={loadEarlierControl.disabled ? undefined : loadEarlierPreserveScroll} disabled={loadEarlierControl.disabled}>
+                {loadEarlierControl.label}
+                {!loadEarlierControl.disabled && hasEarlier && <span className="load-more-count">{(win?.serverFetchedFrom ?? 0) + startIdx} remaining</span>}
+              </button>
+            </div>
+          </div>
+        )}
+        {visible.map((msg, i) => {
+          const sugg = msg.uuid ? suggestions[msg.uuid] : undefined
+          const nextUserMsg = sugg ? visible.slice(i + 1).find(m => m.type === "user") : undefined
+          const nextText = nextUserMsg ? (typeof nextUserMsg.message?.content === "string" ? nextUserMsg.message.content : (nextUserMsg.message?.content as {type:string;text?:string}[])?.filter(b => b.type === "text").map(b => b.text).join("") ?? "") : ""
+          const chosen = sugg && nextText ? wordOverlap(sugg.text, nextText) > 0.4 : false
+          const activeHit = threadSearchOpen && threadHits.length > 0 ? threadHits[threadHitPos] : undefined
+          const isThreadSearchHit = activeHit
+            ? (activeHit.uuid ? activeHit.uuid === msg.uuid : activeHit.idx === globalOffset + startIdx + i)
+            : false
+          const isNew = !!(msg.uuid && newMsgUuids.has(msg.uuid) && (msg.type === "user" || msg.type === "assistant" || msg.type === "human"))
+          return (
+            <div
+              key={msg.uuid ? `${msg.uuid}:${globalOffset + startIdx + i}` : globalOffset + startIdx + i}
+              className={[sugg ? "msg-with-suggestion" : "", isThreadSearchHit ? "msg-search-hit-wrap" : "", isNew ? "msg-new" : ""].filter(Boolean).join(" ") || undefined}
+              data-msg-index={globalOffset + startIdx + i}
+            >
+              {isNew && <span className="new-msg-dot" title="New since load" />}
+              <Block msg={msg} index={globalOffset + startIdx + i} nextMsg={visible[i + 1]} source={sessionMeta.source} />
+              {sugg && (
+                <div className="suggestion-pill" title={sugg.text}>
+                  <span className="suggestion-icon">{chosen ? "✓" : "💡"}</span>
+                  <span className="suggestion-text">{sugg.text.slice(0, 80)}{sugg.text.length > 80 ? "…" : ""}</span>
+                  {chosen && <span className="suggestion-chosen">chosen</span>}
+                </div>
+              )}
+            </div>
+          )
+        })}
+        {!loading && hasLater && (
+          <div>
+            <div ref={bottomSentinelRef} style={{ height: 1 }} />
+            <div className="load-more-wrap">
+              <button className="load-more-pill load-more-pill--later" onClick={loadLater}>
+                ↓ Load later messages
+                <span className="load-more-count">{total - startIdx - visible.length} remaining</span>
+              </button>
+            </div>
+          </div>
+        )}
+        <div ref={bottomRef} />
+      </div>
+    </div>
+  )
+}
+
+// Re-export for App.tsx convenience
+export { markSessionClick }
+export type { SessionMeta, Capabilities }

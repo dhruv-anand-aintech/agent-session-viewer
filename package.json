@@ -1,6 +1,6 @@
 {
   "name": "agent-session-viewer",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "description": "Live multi-platform AI coding session viewer — Claude Code, Cursor, Codex, OpenCode, Hermes, Antigravity",
   "type": "module",
   "bin": {
@@ -54,6 +54,7 @@
     "@huggingface/transformers": "^4.2.0",
     "@lancedb/lancedb": "^0.27.2",
     "@ngrok/ngrok": "^1.7.0",
+    "better-sqlite3": "^12.9.0",
     "fuse.js": "^7.3.0",
     "localtunnel": "^2.0.2",
     "marked": "^17.0.5",

@@ -49,3 +49,41 @@ export interface Project {
   displayName: string
   sessions: Session[]
 }
+
+export interface SessionMeta {
+  id: string
+  projectPath: string
+  messageCount: number
+  userMessageCount?: number
+  lastActivity: string
+  version?: string
+  gitBranch?: string
+  isActive: boolean
+  isSidechain?: boolean
+  agentType?: string
+  firstName?: string
+  customName?: string
+  parentSessionId?: string
+  source?: "claude" | "cursor" | "opencode" | "antigravity" | "hermes" | "codex" | "openclaw" | string
+}
+
+export interface ProjectData {
+  path: string
+  displayName: string
+  groupPath?: string
+  sessions: SessionMeta[]
+}
+
+export interface Capabilities {
+  openPath: boolean
+  homeDir?: string
+}
+
+export interface MsgWindow {
+  msgs: SessionMessage[]
+  startIdx: number
+  total: number
+  filteredTotal: number
+  serverFetchedFrom: number
+  globalOffset: number
+}

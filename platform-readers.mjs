@@ -12,6 +12,34 @@ import fs from "node:fs"
 import path from "node:path"
 import { homedir } from "node:os"
 import { execFileSync } from "node:child_process"
+import { createRequire } from "node:module"
+
+// ── better-sqlite3 (optional native driver, avoids sqlite3 subprocess overhead) ─
+let _BetterSqlite
+try {
+  const req = createRequire(import.meta.url)
+  _BetterSqlite = req("better-sqlite3")
+} catch { /* not installed — fall back to subprocess */ }
+
+const _bsqliteCache = new Map()
+function bsqliteDb(dbPath) {
+  if (!_BetterSqlite) return null
+  if (!_bsqliteCache.has(dbPath)) {
+    try {
+      _bsqliteCache.set(dbPath, _BetterSqlite(dbPath, { readonly: true, fileMustExist: true }))
+    } catch { return null }
+  }
+  return _bsqliteCache.get(dbPath)
+}
+
+/** Like sqliteQuery but uses better-sqlite3 when available (zero subprocess overhead). */
+function bsqliteQuery(dbPath, sql, params = []) {
+  const db = bsqliteDb(dbPath)
+  if (!db) return sqliteQuery(dbPath, sql)
+  try {
+    return db.prepare(sql).all(...params)
+  } catch { return [] }
+}
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -24,7 +52,7 @@ export function normProjectDir(absDir) {
 export function sqliteQuery(dbPath, sql, opts = {}) {
   try {
     const b = opts.busyTimeoutMs
-    const ms = b === 0 ? 0 : Number.isFinite(b) && b > 0 ? Math.floor(b) : 8000
+    const ms = Number.isFinite(b) && b >= 0 ? Math.floor(b) : 0
     // `.timeout` via stdin: mixing PRAGMA + SELECT in one -json arg yields two JSON blobs and breaks parse.
     const input = ms > 0 ? `.timeout ${ms}\n${sql}\n` : `${sql}\n`
     const out = execFileSync("sqlite3", ["-json", dbPath], {
@@ -927,7 +955,7 @@ export function readOpenCodeSession(sessionFile, cacheGet, cacheSet) {
 function opencodeLastModelFromMessageRows(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
-    const id = m.model?.modelID ?? m.modelID
+    const id = m.model_id ?? m.model?.modelID ?? m.modelID
     if (id) return id
   }
   return undefined
@@ -939,53 +967,74 @@ function opencodeLastModelFromMessageRows(messages) {
  */
 export function readOpenCodeSessionFromSqlite(dbPath, sessionId, cacheGet, cacheSet) {
   if (!dbPath || !fs.existsSync(dbPath) || !sessionId) return null
-  const sessRows = sqliteQuery(
+  const sessRows = bsqliteQuery(
     dbPath,
-    `SELECT id, directory, title, time_updated, time_created, version
-     FROM session WHERE id = ${JSON.stringify(sessionId)}`
+    `SELECT id, directory, title, time_updated, time_created, version FROM session WHERE id = ?`,
+    [sessionId]
   )
   if (!sessRows.length) return null
   const s = sessRows[0]
-  const cnt = sqliteQuery(
+  const cnt = bsqliteQuery(
     dbPath,
     `SELECT
-      (SELECT COUNT(*) FROM message WHERE session_id = ${JSON.stringify(sessionId)}) AS messages,
-     (SELECT COUNT(*) FROM part WHERE session_id = ${JSON.stringify(sessionId)}) AS parts`
+      (SELECT COUNT(*) FROM message WHERE session_id = ?) AS messages,
+      (SELECT COUNT(*) FROM part WHERE session_id = ?) AS parts`,
+    [sessionId, sessionId]
   )[0] ?? { messages: 0, parts: 0 }
   const cacheVal = `db:${s.time_updated}:${cnt.messages}:${cnt.parts}`
   if (cacheGet && cacheGet(sessionId) === cacheVal) return null
   if (cacheSet) cacheSet(sessionId, cacheVal)
 
-  const msgRows = sqliteQuery(
+  const msgRows = bsqliteQuery(
     dbPath,
-    `SELECT id, data, time_created FROM message WHERE session_id = ${JSON.stringify(sessionId)} ORDER BY time_created, id`
+    `SELECT id,
+       json_extract(data,'$.role') AS role,
+       COALESCE(json_extract(data,'$.id'), id) AS msg_id,
+       COALESCE(json_extract(data,'$.time.created'), time_created) AS ts,
+       json_extract(data,'$.summary.title') AS summary_title,
+       COALESCE(json_extract(data,'$.model.modelID'), json_extract(data,'$.modelID')) AS model_id
+     FROM message WHERE session_id = ? ORDER BY time_created, id`,
+    [sessionId]
   )
   const messages = []
   for (const row of msgRows) {
-    let m
-    try { m = JSON.parse(row.data) } catch { continue }
-    if (m.role === "user" || m.role === "assistant") {
-      m.id = m.id ?? row.id
-      m._timeCreated = m.time?.created ?? row.time_created
-      messages.push(m)
+    if (row.role === "user" || row.role === "assistant") {
+      messages.push({ id: row.msg_id ?? row.id, role: row.role, _timeCreated: row.ts, summary_title: row.summary_title, model_id: row.model_id })
     }
   }
   messages.sort((a, b) => (a._timeCreated ?? 0) - (b._timeCreated ?? 0))
 
+  const allPartRows = bsqliteQuery(
+    dbPath,
+    `SELECT message_id, data, time_created FROM part WHERE session_id = ? ORDER BY message_id, time_created, id`,
+    [sessionId]
+  )
+  const partsByMessage = new Map()
+  for (const row of allPartRows) {
+    if (!partsByMessage.has(row.message_id)) partsByMessage.set(row.message_id, [])
+    partsByMessage.get(row.message_id).push(row)
+  }
+
   const converted = messages.map((m, i) => {
     const mid = m.id ?? `opencode-${sessionId}-${i}`
-    const content =
-      readOCMessageContentFromPartRows(dbPath, mid) ?? m.summary?.title ?? `[${m.role} message]`
+    const partRows = partsByMessage.get(mid) ?? []
+    let content = null
+    if (partRows.length) {
+      const parts = []
+      for (const row of partRows) {
+        let p; try { p = JSON.parse(row.data) } catch { continue }
+        ocPushPartObject(p, parts, null, row.time_created)
+      }
+      parts.sort((a, b) => a.order - b.order)
+      content = ocMergePartsToContent(parts)
+    }
+    content = content ?? m.summary_title ?? `[${m.role} message]`
     return {
       uuid: mid,
       parentUuid: null,
       type: m.role === "assistant" ? "assistant" : "human",
       sessionId,
-      timestamp: m.time?.created
-        ? new Date(m.time.created).toISOString()
-        : m._timeCreated
-          ? new Date(m._timeCreated).toISOString()
-          : new Date().toISOString(),
+      timestamp: m._timeCreated ? new Date(m._timeCreated).toISOString() : new Date().toISOString(),
       isSidechain: false,
       message: { role: m.role, content },
     }
@@ -1015,7 +1064,7 @@ export function readOpenCodeSessionFromSqlite(dbPath, sessionId, cacheGet, cache
 export function* iterOpenCodeSessions(cacheGet, cacheSet) {
   const inDb = new Set()
   if (fs.existsSync(OPENCODE_DB)) {
-    for (const { id } of sqliteQuery(OPENCODE_DB, "SELECT id FROM session")) {
+    for (const { id } of bsqliteQuery(OPENCODE_DB, "SELECT id FROM session")) {
       if (!id) continue
       const result = readOpenCodeSessionFromSqlite(OPENCODE_DB, id, cacheGet, cacheSet)
       if (result) {
@@ -1056,6 +1105,7 @@ export { OPENCODE_DIR, OPENCODE_DB, OPENCODE_STORAGE }
 //   response_item reasoning — may be encrypted; include only plain summaries when available
 
 export const CODEX_SESSIONS_ROOT = path.join(homedir(), ".codex", "sessions")
+const _codexSessionFileCache = new Map()
 
 function stringifyCodexToolOutput(value) {
   if (typeof value === "string") return value
@@ -1130,10 +1180,50 @@ function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
   let pendingAssistantBlocks = []
   let pendingToolResults = []
   let pendingTs = null
+  let lastEmittedSig = ""
+
+  function contentSignature(content) {
+    if (typeof content === "string") return content
+    try {
+      return JSON.stringify(content)
+    } catch {
+      return String(content)
+    }
+  }
+
+  function pushDistinct(msg) {
+    const sig = [
+      msg.type ?? "",
+      msg.message?.role ?? "",
+      msg.timestamp ?? "",
+      contentSignature(msg.message?.content),
+    ].join("\u0000")
+    if (sig === lastEmittedSig) return
+    lastEmittedSig = sig
+    out.push(msg)
+  }
 
   function flushPending() {
-    if (pendingAssistantBlocks.length) seq = pushCodexAssistantBlocks(out, sessionId, seq, pendingTs ?? new Date(fileMtimeMs).toISOString(), pendingAssistantBlocks)
-    if (pendingToolResults.length) seq = pushCodexToolResults(out, sessionId, seq, pendingTs ?? new Date(fileMtimeMs).toISOString(), pendingToolResults)
+    if (pendingAssistantBlocks.length) {
+      const before = out.length
+      seq = pushCodexAssistantBlocks(out, sessionId, seq, pendingTs ?? new Date(fileMtimeMs).toISOString(), pendingAssistantBlocks)
+      if (out.length > before) lastEmittedSig = [
+        out[out.length - 1].type ?? "",
+        out[out.length - 1].message?.role ?? "",
+        out[out.length - 1].timestamp ?? "",
+        contentSignature(out[out.length - 1].message?.content),
+      ].join("\u0000")
+    }
+    if (pendingToolResults.length) {
+      const before = out.length
+      seq = pushCodexToolResults(out, sessionId, seq, pendingTs ?? new Date(fileMtimeMs).toISOString(), pendingToolResults)
+      if (out.length > before) lastEmittedSig = [
+        out[out.length - 1].type ?? "",
+        out[out.length - 1].message?.role ?? "",
+        out[out.length - 1].timestamp ?? "",
+        contentSignature(out[out.length - 1].message?.content),
+      ].join("\u0000")
+    }
     pendingAssistantBlocks = []
     pendingToolResults = []
     pendingTs = null
@@ -1145,7 +1235,7 @@ function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
       flushPending()
       const text = typeof row.payload.message === "string" ? row.payload.message.trim() : ""
       if (!text) continue
-      out.push({
+      pushDistinct({
         uuid: `codex-${sessionId}-u-${seq++}`,
         parentUuid: out.length > 0 ? out[out.length - 1].uuid : null,
         type: "human",
@@ -1161,7 +1251,7 @@ function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
       flushPending()
       const text = typeof row.payload.message === "string" ? row.payload.message.trim() : ""
       if (!text) continue
-      out.push({
+      pushDistinct({
         uuid: `codex-${sessionId}-a-${seq++}`,
         parentUuid: out.length > 0 ? out[out.length - 1].uuid : null,
         type: "assistant",
@@ -1207,7 +1297,7 @@ function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
       flushPending()
       const text = codexAssistantTextFromContent(row.payload.content)
       if (!text) continue
-      out.push({
+      pushDistinct({
         uuid: `codex-${sessionId}-a-${seq++}`,
         parentUuid: out.length > 0 ? out[out.length - 1].uuid : null,
         type: "assistant",
@@ -1263,9 +1353,15 @@ export function listCodexSessionFiles() {
   return out
 }
 
+export function clearCodexSessionFileCache() {
+  _codexSessionFileCache.clear()
+}
+
 export function findCodexSessionFile(sessionId) {
   if (!sessionId || !fs.existsSync(CODEX_SESSIONS_ROOT)) return null
   const sid = String(sessionId).trim()
+  const cached = _codexSessionFileCache.get(sid)
+  if (cached && fs.existsSync(cached)) return cached
   const files = listCodexSessionFiles()
   if (!files.length) return null
 
@@ -1288,10 +1384,9 @@ export function findCodexSessionFile(sessionId) {
       }
     })[0]
   }
-  if (exact.length) return pickNewest(exact)
-  if (tail.length) return pickNewest(tail)
-  if (loose.length) return pickNewest(loose)
-  return null
+  const picked = exact.length ? pickNewest(exact) : tail.length ? pickNewest(tail) : loose.length ? pickNewest(loose) : null
+  if (picked) _codexSessionFileCache.set(sid, picked)
+  return picked
 }
 
 export function readCodexSession(filePath, cacheGet, cacheSet) {
