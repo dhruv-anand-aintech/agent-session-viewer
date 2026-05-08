@@ -51,6 +51,7 @@ function relativeTime(iso: string): string {
 interface ProjectData {
   path: string
   displayName: string
+  groupPath?: string  // canonical relative path for tooltip (e.g. "Code/agent-session-viewer")
   sessions: SessionMeta[]
 }
 
@@ -310,7 +311,7 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
             return { msgs: filtered.slice(startIdx), startIdx, total: serverTotal || filtered.length, serverFetchedFrom: (serverTotal || filtered.length) - filtered.length }
           }
           // Prepend any older messages we already have that aren't in new tail
-          const alreadyHeld = fullRef.current.slice(0, prev.serverFetchedFrom > 0 ? fullRef.current.length - filtered.length : 0)
+          const alreadyHeld = fullRef.current.slice(0, Math.max(0, fullRef.current.length - filtered.length))
           const merged = [...alreadyHeld, ...filtered]
           fullRef.current = merged
           updateChatDir(merged)
@@ -1345,10 +1346,17 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
           : `Loading…`
     : null
 
-  const allFlat: { s: SessionMeta; projectPath: string }[] = projects
-    .flatMap(p => p.sessions.map(s => ({ s, projectPath: p.path })))
+  const _allFlatRaw: { s: SessionMeta; projectPath: string }[] = projects
+    .flatMap(p => p.sessions.map(s => ({ s, projectPath: s.projectPath || p.path })))
     .filter(({ s }) => platformFilter === "all" || (s.source ?? "claude") === platformFilter)
     .sort((a, b) => String(b.s.lastActivity ?? "").localeCompare(String(a.s.lastActivity ?? "")))
+  // Deduplicate by session ID — cross-platform merge can produce duplicates during SSE streaming
+  const _seenIds = new Set<string>()
+  const allFlat = _allFlatRaw.filter(({ s }) => {
+    if (_seenIds.has(s.id)) return false
+    _seenIds.add(s.id)
+    return true
+  })
 
   // Build flat groups: top-level sessions each with their subagents
   const subagentsByParent = new Map<string, { s: SessionMeta; projectPath: string }[]>()
@@ -1513,14 +1521,14 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
             .filter(p => p.sessions.length > 0)
             .map(project => (
               <div key={project.path} className="sidebar-project">
-              <div className="sidebar-project-name" data-tooltip={project.path}>{project.displayName}</div>
+              <div className="sidebar-project-name" data-tooltip={project.groupPath ?? project.path}>{project.displayName}</div>
               {project.sessions.map(s => (
                 <SessionItem
                   key={s.id}
                   s={s}
-                  projectPath={project.path}
+                  projectPath={s.projectPath || project.path}
                   isSelected={selected?.session === s.id}
-                  onSelect={() => handleSelect(project.path, s.id)}
+                  onSelect={() => handleSelect(s.projectPath || project.path, s.id)}
 
                 />
               ))}
@@ -1700,9 +1708,6 @@ export default function App() {
       <header className="topbar">
         <button className="topbar-menu-btn" onClick={() => setMobileSidebarOpen(o => !o)} title="Sessions">☰</button>
         <span className="topbar-title">Agent Session Viewer</span>
-        <div className="topbar-tabs">
-          <button className="topbar-tab active">Sessions</button>
-        </div>
         <span className={`conn-badge ${connected ? "conn-on" : "conn-off"}`}>
           {connected ? "● Live" : "○ Polling"}
         </span>

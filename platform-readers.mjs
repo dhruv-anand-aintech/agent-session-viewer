@@ -16,7 +16,9 @@ import { execFileSync } from "node:child_process"
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
 export function normProjectDir(absDir) {
-  return absDir.replace(homedir(), "").replace(/\//g, "-").replace(/^-/, "")
+  // Store actual path so cross-platform grouping can match by real directory.
+  // Use the absolute path directly; callers prepend their platform prefix (e.g. "codex:").
+  return absDir
 }
 
 export function sqliteQuery(dbPath, sql, opts = {}) {
@@ -454,7 +456,11 @@ export const CURSOR_PROJECTS_ROOT = path.join(homedir(), ".cursor", "projects")
 /** Slug dir name under ~/.cursor/projects → absolute workspace path (best-effort). */
 export function cursorAgentSlugToWorkspacePath(slug) {
   if (!slug) return ""
-  return `/${slug.replace(/-/g, "/")}`
+  // Slugs are absolute paths with / replaced by - (no leading /).
+  // Try naive decode first; if the path doesn't exist it's ambiguous — return best guess anyway
+  // since resolveProjectDir in the server will handle it the same way.
+  const naive = `/${slug.replace(/-/g, "/")}`
+  return naive
 }
 
 function extractCursorAgentMessageText(content) {
@@ -741,7 +747,7 @@ function buildCursorAgentSessionMetaAndMsgs(filePath, slug, sessionId, parsed, f
   return {
     meta: {
       id: sessionId,
-      projectPath: `cursor-agent:${slug}`,
+      projectPath: `cursor-agent:${cursorAgentSlugToWorkspacePath(slug)}`,
       messageCount: msgs.length,
       userMessageCount: converted.filter(r => r.role === "user").length,
       lastActivity: msToIso(lastActivityMs),

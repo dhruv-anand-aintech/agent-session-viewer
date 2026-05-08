@@ -19,6 +19,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { randomInt } from "node:crypto"
 import { homedir, networkInterfaces } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -140,12 +141,19 @@ async function startNgrok(localPort) {
   }
 }
 
+// ── PIN generation ────────────────────────────────────────────────────────────
+
+function generatePin() {
+  return String(randomInt(100000, 1000000)) // 6-digit PIN
+}
+
 // ── Share URL printer ─────────────────────────────────────────────────────────
 
-function printShareBox(url, notes = []) {
+function printShareBox(url, notes = [], pin = null) {
   const padded = url.padEnd(38)
   console.log("  ┌──────────────────────────────────────────────────────┐")
   console.log(`  │  Share URL:  ${padded} │`)
+  if (pin) console.log(`  │  PIN:        ${pin.padEnd(38)} │`)
   for (const note of notes) console.log(`  │  ${note.padEnd(52)} │`)
   console.log("  └──────────────────────────────────────────────────────┘\n")
 }
@@ -197,10 +205,18 @@ const port = await pickPort(Number.isFinite(preferredPort) ? preferredPort : 300
 const needsExternalBind = modeLan || modeTunnel || modeNgrok
 const bindToAll = needsExternalBind || hasFlag("--host")
 
+// Auto-generate a PIN for remote flag modes (AUTH_PIN may already be set by user)
+const remoteFlagPin = needsExternalBind && !process.env.AUTH_PIN ? generatePin() : null
+
 const server = spawn(process.execPath, [SERVER], {
   cwd: PKG_ROOT,
   stdio: "inherit",
-  env: { ...process.env, PORT: String(port), HOST: bindToAll ? "0.0.0.0" : "127.0.0.1" },
+  env: {
+    ...process.env,
+    PORT: String(port),
+    HOST: bindToAll ? "0.0.0.0" : "127.0.0.1",
+    ...(remoteFlagPin ? { AUTH_PIN: remoteFlagPin } : {}),
+  },
 })
 server.once("error", err => { console.error(err); process.exit(1) })
 server.once("exit", code => process.exit(code ?? 0))
@@ -213,23 +229,25 @@ await new Promise(r => setTimeout(r, 600))
 
 let cleanup = null
 
+const activePin = remoteFlagPin ?? process.env.AUTH_PIN ?? null
+
 if (modeLan) {
   const ip = getLanIp()
   const url = ip ? `http://${ip}:${port}` : `http://localhost:${port} (LAN IP not found)`
-  console.log(`\n  Agent Session Viewer\n  LAN: ${url}\n`)
+  printShareBox(url, ["Open this on any device on the same WiFi/Ethernet."], activePin)
   if (openBrowser && ip) {
     spawn(process.platform === "darwin" ? "open" : "xdg-open", [url], { detached: true, stdio: "ignore" }).unref()
   }
 } else if (modeTunnel) {
   const t = await startLocaltunnel(port)
-  printShareBox(t.url, ["URL changes on each restart (no account needed)"])
+  printShareBox(t.url, ["URL changes on each restart (no account needed)"], activePin)
   cleanup = t.close
 } else if (modeNgrok) {
   const t = await startNgrok(port)
   const notes = t.permanent
     ? ["✓ Permanent — same URL every time"]
     : ["URL changes on restart — add a static domain for permanent URL"]
-  printShareBox(t.url, notes)
+  printShareBox(t.url, notes, activePin)
   cleanup = t.close
 } else {
   // Interactive TUI
@@ -240,13 +258,14 @@ if (modeLan) {
     const open = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open"
     spawn(open, [url], { detached: true, stdio: "ignore" }).unref()
   } else if (choice === "2") {
-    // LAN — restart server bound to 0.0.0.0
+    // LAN — restart server bound to 0.0.0.0 with PIN
     server.kill()
+    const menuPin = process.env.AUTH_PIN ?? generatePin()
     const lanIp = getLanIp()
     const lanServer = spawn(process.execPath, [SERVER], {
       cwd: PKG_ROOT,
       stdio: "inherit",
-      env: { ...process.env, PORT: String(port), HOST: "0.0.0.0" },
+      env: { ...process.env, PORT: String(port), HOST: "0.0.0.0", AUTH_PIN: menuPin },
     })
     lanServer.once("exit", code => process.exit(code ?? 0))
     process.once("SIGINT", () => { lanServer.kill(); process.exit(130) })
@@ -256,17 +275,41 @@ if (modeLan) {
     printShareBox(url, [
       "Open this on any device on the same WiFi/Ethernet.",
       "No account or tunnel needed.",
-    ])
+    ], menuPin)
   } else if (choice === "3") {
+    // localtunnel — restart server with PIN (was started without external bind)
+    server.kill()
+    const menuPin = process.env.AUTH_PIN ?? generatePin()
+    const tunnelServer = spawn(process.execPath, [SERVER], {
+      cwd: PKG_ROOT,
+      stdio: "inherit",
+      env: { ...process.env, PORT: String(port), HOST: "0.0.0.0", AUTH_PIN: menuPin },
+    })
+    tunnelServer.once("exit", code => process.exit(code ?? 0))
+    process.once("SIGINT", () => { tunnelServer.kill(); process.exit(130) })
+    process.once("SIGTERM", () => { tunnelServer.kill(); process.exit(143) })
+    await new Promise(r => setTimeout(r, 400))
     const t = await startLocaltunnel(port)
-    printShareBox(t.url, ["URL changes on each restart (no account needed)"])
+    printShareBox(t.url, ["URL changes on each restart (no account needed)"], menuPin)
     cleanup = t.close
   } else if (choice === "4") {
+    // ngrok — restart server with PIN
+    server.kill()
+    const menuPin = process.env.AUTH_PIN ?? generatePin()
+    const ngrokServer = spawn(process.execPath, [SERVER], {
+      cwd: PKG_ROOT,
+      stdio: "inherit",
+      env: { ...process.env, PORT: String(port), HOST: "0.0.0.0", AUTH_PIN: menuPin },
+    })
+    ngrokServer.once("exit", code => process.exit(code ?? 0))
+    process.once("SIGINT", () => { ngrokServer.kill(); process.exit(130) })
+    process.once("SIGTERM", () => { ngrokServer.kill(); process.exit(143) })
+    await new Promise(r => setTimeout(r, 400))
     const t = await startNgrok(port)
     const notes = t.permanent
       ? ["✓ Permanent — same URL every time"]
       : ["URL changes on restart — add a static domain for permanent URL"]
-    printShareBox(t.url, notes)
+    printShareBox(t.url, notes, menuPin)
     cleanup = t.close
   } else {
     console.log(`\n  Running at http://localhost:${port}\n`)

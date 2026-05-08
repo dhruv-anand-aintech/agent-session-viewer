@@ -8,7 +8,7 @@
 
 import { createReadStream, existsSync, mkdirSync, openSync, readSync, closeSync, readdirSync, readFileSync, realpathSync, statSync, watch, writeFileSync } from "fs"
 import { homedir } from "os"
-import { dirname, extname, join, sep } from "path"
+import { basename, dirname, extname, join, sep } from "path"
 import http from "http"
 import { fileURLToPath } from "url"
 import { exec } from "child_process"
@@ -65,11 +65,80 @@ function encodedDirToDisplayName(encodedDir) {
   return encodedDir.replace(/^-?Users-[^-]+-Code-/, "")
 }
 
+/**
+ * Decode a Claude-style dash-encoded dir name to the best-guess absolute path.
+ *
+ * Claude encodes workspace paths by replacing every "/" with "-" and stripping the
+ * leading "/". So "/Users/alice/Code/my-project" becomes "-Users-alice-Code-my-project".
+ * This is ambiguous when directory names themselves contain dashes.
+ *
+ * Strategy: strip the "-Users-<username>-" prefix, then greedily match the longest
+ * run of dash-separated segments that names a real directory on disk, descending one
+ * level at a time. This correctly resolves both:
+ *   - flat names with dashes:  "Code-agent-session-viewer" → ~/Code/agent-session-viewer
+ *   - nested paths:            "Code-home-debug-CloudSweeper" → ~/Code/home-debug/CloudSweeper
+ */
+function decodeClaudeEncodedDir(encodedDir) {
+  const withoutUser = encodedDir.replace(/^-?Users-[^-]+-/, "")
+  const segments = withoutUser.split("-").filter(Boolean)
+
+  let current = homedir()
+  let i = 0
+  while (i < segments.length) {
+    let matched = false
+    for (let j = segments.length; j > i; j--) {
+      const name = segments.slice(i, j).join("-")
+      if (existsSync(join(current, name))) {
+        current = join(current, name)
+        i = j
+        matched = true
+        break
+      }
+    }
+    if (!matched) {
+      current = join(current, segments.slice(i).join("-"))
+      break
+    }
+  }
+  return current
+}
+
+/**
+ * Resolve any projectPath variant to the best-guess absolute real directory.
+ * Used as the canonical merge key in mergeProjectsInto and for display.
+ */
+function resolveProjectDir(projectPath) {
+  // Cursor "no workspace" variants — both map to the same virtual canonical dir
+  if (projectPath === "cursor:cursor-unknown") return join(homedir(), ".cursor", "no-workspace")
+  if (projectPath === "cursor-agent:/empty/window") return join(homedir(), ".cursor", "no-workspace")
+  if (projectPath === "cursor-agent:empty-window") return join(homedir(), ".cursor", "no-workspace")
+
+  // Modern platform-prefixed with absolute path: "prefix:/actual/path"
+  const absMatch = projectPath.match(/^[a-z-]+:(\/.+)$/)
+  if (absMatch) return absMatch[1]
+
+  // Claude absolute path under CLAUDE_DIR (always dash-encoded by Claude itself)
+  if (projectPath.startsWith(CLAUDE_DIR + "/")) {
+    return decodeClaudeEncodedDir(projectPath.slice(CLAUDE_DIR.length + 1))
+  }
+
+  // Legacy platform-prefixed with encoded path (old normProjectDir / cursor-agent slug)
+  // e.g. "cursor-agent:Users-dhruvanand-Code-myproject" or "codex:Code-myproject"
+  const encodedMatch = projectPath.match(/^[a-z-]+:([^/].+)$/)
+  if (encodedMatch) {
+    const encoded = encodedMatch[1]
+    return decodeClaudeEncodedDir(encoded.startsWith("Users-") ? `-${encoded}` : encoded)
+  }
+
+  if (projectPath.startsWith("/")) return projectPath
+  return join(homedir(), projectPath)
+}
+
 const DIST_DIR = join(__dirname, "dist")
 const PORT = parseInt(process.env.PORT ?? "3001")
 const AUTH_PIN = process.env.AUTH_PIN ?? null
 const ts = () => new Date().toISOString().replace("T", " ").slice(0, 23)
-const ENABLE_BACKGROUND_INDEXER = process.env.ENABLE_LANCEDB_BACKGROUND_INDEXER === "1"
+const ENABLE_BACKGROUND_INDEXER = process.env.ENABLE_LANCEDB_BACKGROUND_INDEXER !== "0"
 
 /** Max lines sent on initial debug load / SSE init (full file still tracked for append). */
 const DEBUG_TAIL_LINES = 500
@@ -101,13 +170,8 @@ function loadSidebarCache() {
   if (_sidebarCache) return _sidebarCache
   try {
     const raw = JSON.parse(readFileSync(SIDEBAR_CACHE_FILE, "utf8"))
-    // Migrate v1 (plain object keyed by sessionId) to v2
-    if (!raw.v || raw.v < 2) {
-      _sidebarCache = { v: 2, sessions: [], _map: new Map() }
-    } else {
-      _sidebarCache = raw
-      _sidebarCache._map = new Map(_sidebarCache.sessions.map(e => [e.id, e]))
-    }
+    _sidebarCache = raw
+    _sidebarCache._map = new Map(_sidebarCache.sessions.map(e => [e.id, e]))
   } catch {
     _sidebarCache = { v: 2, sessions: [], _map: new Map() }
   }
@@ -467,14 +531,20 @@ function sortProjectGroups(projects) {
   })
 }
 
-/** Merge incoming project rows into acc (by path + session id), then sort groups by most recent row. */
+/** Merge incoming project rows into acc (by resolved absolute directory). */
 function mergeProjectsInto(acc, incoming) {
-  const map = new Map(acc.map(p => [p.path, { ...p, sessions: [...p.sessions] }]))
+  const map = new Map(acc.map(p => [resolveProjectDir(p.path), { ...p, sessions: [...p.sessions] }]))
   for (const inc of incoming) {
-    if (!map.has(inc.path)) {
-      map.set(inc.path, { ...inc, sessions: [...inc.sessions] })
+    const absDir = resolveProjectDir(inc.path)
+    const isCursorNoWorkspace = absDir === join(homedir(), ".cursor", "no-workspace")
+    const folderName = isCursorNoWorkspace ? "Cursor (no workspace)" : basename(absDir)
+    const groupPath = isCursorNoWorkspace ? "Cursor sessions without a workspace" : absDir.startsWith(homedir() + "/") ? "~" + absDir.slice(homedir().length) : absDir
+    if (!map.has(absDir)) {
+      map.set(absDir, { ...inc, sessions: [...inc.sessions], displayName: folderName, groupPath })
     } else {
-      const cur = map.get(inc.path)
+      const cur = map.get(absDir)
+      cur.displayName = folderName
+      cur.groupPath = groupPath
       const byId = new Map(cur.sessions.map(s => [s.id, s]))
       for (const s of inc.sessions) byId.set(s.id, s)
       cur.sessions = Array.from(byId.values()).sort((a, b) =>
@@ -535,7 +605,7 @@ async function streamRecentSidebarInitial(res, maxSessions) {
   // Emit cached sidebar state and signal bootstrap done immediately — UI is interactive from the start.
   const cachedState = loadCachedSidebarState()
   if (cachedState?.length) {
-    sseWrite(res, "projects", sortProjectGroups(cachedState))
+    sseWrite(res, "projects", mergeProjectsInto([], cachedState))
     const cachedTotal = cachedState.reduce((s, p) => s + p.sessions.length, 0)
     sseWrite(res, "projects_meta", { total: cachedTotal })
   }
@@ -778,10 +848,9 @@ function resultsToProjects(results, platformPrefix) {
     msgCache.set(`${projectPath}/${id}`, msgs)
     indexSession(projectPath, id, msgs, meta)
     if (!projects.has(projectPath)) {
-      const dirPart = projectPath.replace(`${platformPrefix}:`, "")
       projects.set(projectPath, {
         path: projectPath,
-        displayName: `${platformPrefix}: ${encodedDirToDisplayName(dirPart)}`,
+        displayName: projectPath,  // overwritten by mergeProjectsInto with canonical folder name
         sessions: [],
       })
     }
@@ -870,7 +939,7 @@ function broadcastProjectsFromCache() {
   if (sseClients.size === 0) return
   const projects = loadCachedSidebarState()
   if (!projects) return
-  const sorted = sortProjectGroups(projects)
+  const sorted = mergeProjectsInto([], projects)
   for (const c of sseClients) {
     const payload =
       c.maxSessions != null && c.maxSessions > 0
@@ -916,7 +985,7 @@ function handleClaudeFileChange(filename) {
     // Update sidebar cache so the next broadcast reflects new mtime + message count
     const projectDisplayName = encodedDirToDisplayName(projectDir)
     updateSidebarCacheEntry(sessionId, {
-      projectPath: projectKey,
+      projectPath,  // absolute path — matches what scanOneClaudeFolder uses
       projectDisplayName,
       source: "claude",
       messageCount: meta.messageCount,
