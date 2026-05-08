@@ -1229,14 +1229,14 @@ function useIsMobile() {
   return mobile
 }
 
-function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsTruncated, onLoadAllSessions, selected, onSelect, width, onDragStart, mobileOpen, onMobileClose }: {
+function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsTruncated, onLoadAllSessions, activeSessionId: activeSessionIdProp, onSelect, width, onDragStart, mobileOpen, onMobileClose }: {
   projects: ProjectData[]
   projectsLoading: boolean
   totalSessions: number | null
   listMode: "recent" | "full"
   sessionsTruncated: boolean
   onLoadAllSessions: () => void
-  selected: { project: string; session: string } | null
+  activeSessionId: string | null
   onSelect: (p: string, s: string) => void
   width: number
   onDragStart: (e: React.PointerEvent) => void
@@ -1467,7 +1467,7 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
                 key={s.id}
                 s={s}
                 projectPath={projectPath}
-                isSelected={selected?.session === s.id && selected?.project === projectPath}
+                isSelected={activeSessionIdProp === s.id}
                 onSelect={() => handleSelect(projectPath, s.id)}
                 highlightTitleQuery={q}
               />
@@ -1483,7 +1483,7 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
                   key={`${hit.projectPath}/${hit.sessionId}`}
                   s={{ ...hit.meta, id: hit.meta.id ?? hit.sessionId }}
                   projectPath={hit.projectPath}
-                  isSelected={selected?.session === hit.sessionId && selected?.project === hit.projectPath}
+                  isSelected={activeSessionIdProp === hit.sessionId}
                   onSelect={() => handleSelect(hit.projectPath, hit.sessionId)}
                   highlightTitleQuery={hit.bestKey === "title" ? sidebarSearchQuery.trim() : undefined}
                   searchMatch={
@@ -1505,7 +1505,7 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
                 key={s.id}
                 s={s}
                 projectPath={projectPath}
-                isSelected={selected?.session === s.id && selected?.project === projectPath}
+                isSelected={activeSessionIdProp === s.id}
                 onSelect={() => handleSelect(projectPath, s.id)}
                 highlightTitleQuery={q}
               />
@@ -1527,7 +1527,7 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
                   key={s.id}
                   s={s}
                   projectPath={s.projectPath || project.path}
-                  isSelected={selected?.session === s.id}
+                  isSelected={activeSessionIdProp === s.id}
                   onSelect={() => handleSelect(s.projectPath || project.path, s.id)}
 
                 />
@@ -1544,7 +1544,7 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
                   <SessionItem
                     s={s}
                     projectPath={projectPath}
-                    isSelected={selected?.session === s.id}
+                    isSelected={activeSessionIdProp === s.id}
                     onSelect={() => handleSelect(projectPath, s.id)}
 
                     subagentCount={children.length}
@@ -1556,7 +1556,7 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
                       key={`${cp}/${cs.id}`}
                       s={cs}
                       projectPath={cp}
-                      isSelected={selected?.session === cs.id}
+                      isSelected={activeSessionIdProp === cs.id}
                       onSelect={() => handleSelect(cp, cs.id)}
 
                     />
@@ -1569,7 +1569,7 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
                 key={`${projectPath}/${s.id}`}
                 s={s}
                 projectPath={projectPath}
-                isSelected={selected?.session === s.id}
+                isSelected={activeSessionIdProp === s.id}
                 onSelect={() => handleSelect(projectPath, s.id)}
               />
             ))}
@@ -1685,7 +1685,11 @@ export default function App() {
     history.replaceState(null, "", "?s=" + s)
   }, [activeProjectPath, activeSessionId])
 
-  const activeProject = projects.find(p => p.path === activeProjectPath)
+  const activeProject = activeProjectPath
+    ? (projects.find(p => p.path === activeProjectPath) ??
+       // Fallback: find by session ID for URL-loaded sessions whose projectPath format differs from cache
+       (activeSessionId ? projects.find(p => p.sessions.some(s => s.id === activeSessionId)) : undefined))
+    : undefined
   const activeMeta = activeProject?.sessions.find(s => s.id === activeSessionId)
 
   // When loading from a URL param (?s=), the target session may not be in the sidebar yet
@@ -1724,7 +1728,7 @@ export default function App() {
               listMode={listMode}
               sessionsTruncated={sessionsTruncated}
               onLoadAllSessions={loadAllSessions}
-              selected={selected}
+              activeSessionId={activeSessionId}
               onSelect={(p, s) => setSelected({ project: p, session: s })}
               width={sidebarWidth}
               onDragStart={onDragStart}

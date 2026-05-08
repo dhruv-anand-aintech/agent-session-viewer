@@ -384,7 +384,7 @@ function claudeSessionMetaFromMsgs(msgs, sessionId, projectKey, names, stat) {
 
   return {
     id: sessionId,
-    projectPath: projectKey,
+    projectPath: projectKey,  // projectKey = full CLAUDE_DIR path passed by caller
     lastActivity: last?.timestamp ?? stat.mtime.toISOString(),
     version: first?.version,
     gitBranch: first?.gitBranch,
@@ -424,7 +424,7 @@ async function loadProjectsFull() {
         const ck = `${root}/${dir}/${sessionId}`
         const msgs = msgCache.has(ck) ? msgCache.get(ck) : parseJsonl(fp)
         if (!msgCache.has(ck)) msgCache.set(ck, msgs)
-        sessions.push(claudeSessionMetaFromMsgs(msgs, sessionId, projectKey, names, stat))
+        sessions.push(claudeSessionMetaFromMsgs(msgs, sessionId, `${root}/${dir}`, names, stat))
       }
 
       if (sessions.length > 0) {
@@ -484,7 +484,7 @@ function scanOneClaudeFolder(root, label, dir, names, fileBySessKey) {
     const firstName = cachedEntry?.firstName ?? cheapReadFirstUserMsg(fp)
     sessions.push({
       id: sessionId,
-      projectPath: projectKey,
+      projectPath: projectPath,  // full CLAUDE_DIR path, consistent with project.path
       lastActivity: stat.mtime.toISOString(),
       version: undefined,
       gitBranch: undefined,
@@ -492,7 +492,7 @@ function scanOneClaudeFolder(root, label, dir, names, fileBySessKey) {
       userMessageCount: cachedEntry?.userMessageCount ?? null,
       messageCount: cachedEntry?.messageCount ?? 0,
       firstName,
-      customName: names[`${projectKey}/${sessionId}`] ?? null,
+      customName: names[`${projectPath}/${sessionId}`] ?? null,
       source: "claude",
     })
   }
