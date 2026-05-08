@@ -844,14 +844,13 @@ const bottomRef = useRef<HTMLDivElement>(null)
       )}
 <div className="messages-scroll" ref={scrollRef} onScroll={handleScroll}>
         {loading && !win && <div className="loading-state">Loading messages…</div>}
-        {loadingMore && <div className="loading-state loading-state--more">Loading earlier messages…</div>}
-        {!loading && hasEarlier && (
+        {(hasEarlier || loadingMore) && !loading && (
           <div>
             <div ref={topSentinelRef} style={{ height: 1 }} />
             <div className="load-more-wrap">
               <button className="load-more-pill" onClick={loadEarlierPreserveScroll} disabled={loadingMore}>
-                {loadingMore ? "Loading…" : "↑ Load earlier messages"}
-                <span className="load-more-count">{(win?.serverFetchedFrom ?? 0) + startIdx} remaining</span>
+                {loadingMore ? "Loading earlier messages…" : "↑ Load earlier messages"}
+                {!loadingMore && <span className="load-more-count">{(win?.serverFetchedFrom ?? 0) + startIdx} remaining</span>}
               </button>
             </div>
           </div>
