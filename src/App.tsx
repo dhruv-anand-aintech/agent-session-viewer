@@ -305,50 +305,71 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
     })()
   }, [projectDir, sessionId, idbKey, fetchRemote, initWindow, updateChatDir])
 
-  // Auto-refresh for active sessions — only update window tail with new messages
+  // Auto-refresh for active sessions — SSE push from server fs.watch; falls back to polling
   useEffect(() => {
     if (!isActive || !projectDir || !sessionId || !idbKey) return
-    const t = setInterval(async () => {
-      try {
-        const r = await fetch(sessionUrl(projectDir, sessionId, INITIAL_TAIL), { credentials: "include" })
-        if (!r.ok) return
-        const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || 0
-        const msgs: SessionMessage[] = await r.json()
-        const filtered = msgs.filter(m => m.type !== "file-history-snapshot")
-        // Mark any UUIDs not seen at initial load as "new"
-        const brandNew = filtered.filter(m => m.uuid && !seenUuidsRef.current.has(m.uuid))
-        if (brandNew.length > 0) {
-          setNewMsgUuids(prev => {
-            const next = new Set(prev)
-            brandNew.forEach(m => next.add(m.uuid!))
-            brandNew.forEach(m => seenUuidsRef.current.add(m.uuid!))
-            return next as ReadonlySet<string>
-          })
-        }
-        // Merge new tail: keep any earlier-loaded messages, append new ones
-        setWin(prev => {
-          if (!prev) {
-            const startIdx = Math.max(0, filtered.length - MAX_DOM)
-            fullRef.current = filtered
-            updateChatDir(filtered)
-            return { msgs: filtered.slice(startIdx), startIdx, total: serverTotal || filtered.length, serverFetchedFrom: (serverTotal || filtered.length) - filtered.length }
-          }
-          // Prepend any older messages we already have that aren't in new tail
-          const alreadyHeld = fullRef.current.slice(0, Math.max(0, fullRef.current.length - filtered.length))
-          const merged = [...alreadyHeld, ...filtered]
-          fullRef.current = merged
-          updateChatDir(merged)
-          const newStart = prev.startIdx
-          const newMsgs = merged.slice(newStart)
-          if (newMsgs.length > MAX_DOM) {
-            const trimStart = newStart + (newMsgs.length - MAX_DOM)
-            return { msgs: merged.slice(trimStart), startIdx: trimStart, total: serverTotal || merged.length, serverFetchedFrom: (serverTotal || merged.length) - merged.length }
-          }
-          return { msgs: newMsgs, startIdx: newStart, total: serverTotal || merged.length, serverFetchedFrom: (serverTotal || merged.length) - merged.length }
+
+    function applyTailUpdate(msgs: SessionMessage[], total: number) {
+      const filtered = msgs.filter(m => m.type !== "file-history-snapshot")
+      const brandNew = filtered.filter(m => m.uuid && !seenUuidsRef.current.has(m.uuid))
+      if (brandNew.length > 0) {
+        setNewMsgUuids(prev => {
+          const next = new Set(prev)
+          brandNew.forEach(m => next.add(m.uuid!))
+          brandNew.forEach(m => seenUuidsRef.current.add(m.uuid!))
+          return next as ReadonlySet<string>
         })
-      } catch { /* ignore */ }
-    }, 4000)
-    return () => clearInterval(t)
+      }
+      setWin(prev => {
+        if (!prev) {
+          const startIdx = Math.max(0, filtered.length - MAX_DOM)
+          fullRef.current = filtered
+          updateChatDir(filtered)
+          return { msgs: filtered.slice(startIdx), startIdx, total: total || filtered.length, serverFetchedFrom: (total || filtered.length) - filtered.length }
+        }
+        const alreadyHeld = fullRef.current.slice(0, Math.max(0, fullRef.current.length - filtered.length))
+        const merged = [...alreadyHeld, ...filtered]
+        fullRef.current = merged
+        updateChatDir(merged)
+        const newStart = prev.startIdx
+        const newMsgs = merged.slice(newStart)
+        if (newMsgs.length > MAX_DOM) {
+          const trimStart = newStart + (newMsgs.length - MAX_DOM)
+          return { msgs: merged.slice(trimStart), startIdx: trimStart, total: total || merged.length, serverFetchedFrom: (total || merged.length) - merged.length }
+        }
+        return { msgs: newMsgs, startIdx: newStart, total: total || merged.length, serverFetchedFrom: (total || merged.length) - merged.length }
+      })
+    }
+
+    const qs = `?project=${encodeURIComponent(projectDir)}&session=${encodeURIComponent(sessionId)}&tail=${INITIAL_TAIL}`
+    const es = new EventSource(`/api/session-watch${qs}`)
+    let pollFallback: ReturnType<typeof setInterval> | null = null
+
+    es.addEventListener("session_update", (e: MessageEvent) => {
+      try {
+        const { msgs, total } = JSON.parse(e.data)
+        applyTailUpdate(msgs, total)
+      } catch { /* ignore malformed */ }
+    })
+
+    es.addEventListener("no_watch", () => {
+      // Server can't watch this platform's file (cursor, hermes, etc.) — fall back to polling
+      es.close()
+      pollFallback = setInterval(async () => {
+        try {
+          const r = await fetch(sessionUrl(projectDir, sessionId, INITIAL_TAIL), { credentials: "include" })
+          if (!r.ok) return
+          const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || 0
+          const msgs: SessionMessage[] = await r.json()
+          applyTailUpdate(msgs, serverTotal)
+        } catch { /* ignore */ }
+      }, 4000)
+    })
+
+    return () => {
+      es.close()
+      if (pollFallback) clearInterval(pollFallback)
+    }
   }, [isActive, projectDir, sessionId, idbKey, updateChatDir])
 
   // true if there are more messages to show — either locally-held earlier ones OR unfetched on server

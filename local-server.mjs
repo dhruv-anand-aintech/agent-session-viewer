@@ -39,6 +39,8 @@ import {
   normProjectDir,
   readOpenclawSessions,
   OPENCLAW_ROOT,
+  findOpenclawSessionFile,
+  findCodexSessionFile,
 } from "./platform-readers.mjs"
 import { buildSidebarSearchDoc, runSidebarSessionSearch, runThreadKeywordSearch } from "./lib/session-search-core.mjs"
 import { indexSession, removeSession, getSearchRows } from "./lib/search-index.mjs"
@@ -1328,6 +1330,94 @@ const server = http.createServer(async (req, res) => {
     const client = { res, maxSessions }
     sseClients.add(client)
     req.on("close", () => sseClients.delete(client))
+    return
+  }
+
+  // GET /api/session-watch — SSE push for active session updates
+  // Watches the underlying file for changes; pushes session_update events with new tail.
+  if (url.pathname === "/api/session-watch") {
+    if (!checkCookieAuth(req) && !checkHeaderAuth(req)) { res.writeHead(401); res.end(); return }
+    const projectPath = url.searchParams.get("project") ?? ""
+    const sessionId = url.searchParams.get("session") ?? ""
+    const tailN = Math.min(parseInt(url.searchParams.get("tail") ?? "5") || 5, 100)
+    if (!projectPath || !sessionId) { res.writeHead(400); res.end("Missing project/session"); return }
+
+    // Resolve the watchable file path
+    let watchFile = null
+    if (projectPath.startsWith("openclaw:")) {
+      watchFile = findOpenclawSessionFile(sessionId)
+    } else if (projectPath.startsWith("codex:")) {
+      watchFile = findCodexSessionFile(sessionId)
+    } else if (!projectPath.startsWith("cursor:") && !projectPath.startsWith("cursor-agent:") &&
+               !projectPath.startsWith("opencode:") && !projectPath.startsWith("hermes:") &&
+               !projectPath.startsWith("antigravity:")) {
+      // Claude JSONL
+      const fp = projectPath.startsWith("/")
+        ? join(projectPath, `${sessionId}.jsonl`)
+        : join(CLAUDE_DIR, projectPath, `${sessionId}.jsonl`)
+      if (existsSync(fp)) watchFile = fp
+    }
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+    })
+    res.write(": connected\n\n")
+
+    if (!watchFile) {
+      // Platform doesn't support file watching; client should fall back to polling
+      res.write(`event: no_watch\ndata: {}\n\n`)
+      req.on("close", () => {})
+      return
+    }
+
+    let lastSize = 0
+    try { lastSize = statSync(watchFile).size } catch { /* file may not exist yet */ }
+
+    function pushUpdate() {
+      try {
+        const msgs = getSessionMessagesAll(projectPath, sessionId)
+        if (!msgs) return
+        // Invalidate cache so next read is fresh
+        msgCache.delete(`${projectPath}/${sessionId}`)
+        const fresh = getSessionMessagesAll(projectPath, sessionId)
+        if (!fresh) return
+        const tail = fresh.slice(-tailN)
+        const payload = JSON.stringify({ msgs: tail, total: fresh.length })
+        res.write(`event: session_update\ndata: ${payload}\n\n`)
+      } catch { /* ignore */ }
+    }
+
+    // Send an initial snapshot immediately
+    pushUpdate()
+
+    let watcher = null
+    let debounceTimer = null
+    try {
+      watcher = watch(watchFile, () => {
+        clearTimeout(debounceTimer)
+        // Small debounce: JSONL appends may fire multiple events per write
+        debounceTimer = setTimeout(() => {
+          try {
+            const newSize = statSync(watchFile).size
+            if (newSize === lastSize) return
+            lastSize = newSize
+            // Invalidate mem-cache so fresh parse picks up new lines
+            msgCache.delete(`${projectPath}/${sessionId}`)
+            pushUpdate()
+          } catch { /* ignore */ }
+        }, 50)
+      })
+    } catch {
+      res.write(`event: no_watch\ndata: {}\n\n`)
+    }
+
+    req.on("close", () => {
+      clearTimeout(debounceTimer)
+      try { watcher?.close() } catch { /* ignore */ }
+    })
     return
   }
 

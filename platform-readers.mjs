@@ -1896,6 +1896,17 @@ function readOpenclawSession(filePath, cacheGet, cacheSet) {
   }
 }
 
+export function findOpenclawSessionFile(sessionId) {
+  if (!sessionId || !fs.existsSync(OPENCLAW_ROOT)) return null
+  let agentDirs
+  try { agentDirs = fs.readdirSync(OPENCLAW_ROOT, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name) } catch { return null }
+  for (const agentName of agentDirs) {
+    const candidate = path.join(OPENCLAW_ROOT, agentName, "sessions", `${sessionId}.jsonl`)
+    if (fs.existsSync(candidate)) return candidate
+  }
+  return null
+}
+
 export function readOpenclawSessions(cacheGet, cacheSet) {
   const results = []
   if (!fs.existsSync(OPENCLAW_ROOT)) return results
