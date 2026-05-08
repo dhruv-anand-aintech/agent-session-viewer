@@ -37,6 +37,8 @@ import {
   readHermesSessions,
   readCodexSessionById,
   normProjectDir,
+  readOpenclawSessions,
+  OPENCLAW_ROOT,
 } from "./platform-readers.mjs"
 import { buildSidebarSearchDoc, runSidebarSessionSearch, runThreadKeywordSearch } from "./lib/session-search-core.mjs"
 import { indexSession, removeSession, getSearchRows } from "./lib/search-index.mjs"
@@ -302,6 +304,74 @@ function parseJsonl(fp) {
   } catch { return [] }
 }
 
+/**
+ * Count non-empty lines in a JSONL file with a fast byte scan (no JSON parsing).
+ * Reads the whole file in 256KB chunks, counts newlines.
+ */
+function countJsonlLines(fp) {
+  try {
+    const { size } = statSync(fp)
+    if (size === 0) return 0
+    const CHUNK = 262144
+    const buf = Buffer.alloc(CHUNK)
+    const fd = openSync(fp, "r")
+    let count = 0
+    let offset = 0
+    let prevWasNewline = true  // so a leading non-empty first line counts
+    try {
+      while (offset < size) {
+        const n = readSync(fd, buf, 0, CHUNK, offset)
+        if (n === 0) break
+        for (let i = 0; i < n; i++) {
+          const b = buf[i]
+          if (b === 10 /* \n */) {
+            prevWasNewline = true
+          } else if (prevWasNewline) {
+            prevWasNewline = false
+            count++
+          }
+        }
+        offset += n
+      }
+    } finally { closeSync(fd) }
+    return count
+  } catch { return 0 }
+}
+
+/**
+ * Parse the last `n` valid JSON lines from a JSONL file without reading the whole file.
+ * Reads backward in 64KB chunks until `n` parsed objects are collected.
+ */
+function readJsonlTail(fp, n) {
+  try {
+    const { size } = statSync(fp)
+    if (size === 0) return []
+    const CHUNK = 65536
+    let offset = size
+    let partial = ""
+    const lines = []
+    const fd = openSync(fp, "r")
+    try {
+      while (offset > 0 && lines.length < n) {
+        const readSize = Math.min(CHUNK, offset)
+        offset -= readSize
+        const buf = Buffer.alloc(readSize)
+        readSync(fd, buf, 0, readSize, offset)
+        const chunk = buf.toString("utf8") + partial
+        const parts = chunk.split("\n")
+        partial = parts[0]  // possibly incomplete first line
+        for (let i = parts.length - 1; i >= 1 && lines.length < n; i--) {
+          const line = parts[i].trim()
+          if (!line) continue
+          try { lines.push(JSON.parse(line)) } catch { /* skip malformed */ }
+        }
+      }
+    } finally { closeSync(fd) }
+    lines.reverse()
+    return lines
+  } catch { return [] }
+}
+
 /** Read just the first ~4KB of a JSONL to cheaply extract the first user message text. */
 function cheapReadFirstUserMsg(fp, maxLines = 30) {
   try {
@@ -449,6 +519,7 @@ async function loadProjectsFull() {
     ...loadOpenCodeSessions(),
     ...await loadAntigravitySessions(),
     ...loadHermesSessions(),
+    ...loadOpenclawSessions(),
   ]
 
   return allProjects.sort((a, b) => {
@@ -636,6 +707,7 @@ async function streamRecentSidebarInitial(res, maxSessions) {
       loadCodexSessions,
       loadOpenCodeSessions,
       loadHermesSessions,
+      loadOpenclawSessions,
     ]
     for (const loadFn of fastPlatformLoads) {
       if (res.destroyed) return
@@ -727,6 +799,7 @@ async function loadProjectsBundleRecent(maxSessions) {
     ...loadOpenCodeSessions(),
     ...await loadAntigravitySessions(),
     ...loadHermesSessions(),
+    ...loadOpenclawSessions(),
   ].sort((a, b) => {
     const aLast = a.sessions[0]?.lastActivity ?? ""
     const bLast = b.sessions[0]?.lastActivity ?? ""
@@ -813,6 +886,12 @@ function loadSessionMessagesOndemand(projectPath, sessionId) {
     if (r && Array.isArray(r.msgs) && r.meta.id === sessionId) return r.msgs
     return null
   }
+  if (projectPath.startsWith("openclaw:")) {
+    for (const { meta, msgs } of readOpenclawSessions(null, null)) {
+      if (meta.id === sessionId) return msgs
+    }
+    return null
+  }
   return null
 }
 
@@ -829,7 +908,7 @@ function getSessionMessagesAll(projectPath, sessionId) {
     return ondemand
   }
   if (
-    /^(opencode|codex|hermes|antigravity|cursor-agent):/.test(projectPath) &&
+    /^(opencode|codex|hermes|antigravity|cursor-agent|openclaw):/.test(projectPath) &&
     !/^[A-Za-z]:[\\/]/.test(projectPath)
   ) {
     return null
@@ -913,6 +992,13 @@ async function loadAntigravitySessions() {
 function loadHermesSessions() {
   if (!existsSync(HERMES_DB)) return []
   return resultsToProjects(readHermesSessions(null, null), "hermes")
+}
+
+// ── Openclaw sessions ──────────────────────────────────────────────────────────
+
+function loadOpenclawSessions() {
+  if (!existsSync(OPENCLAW_ROOT)) return []
+  return resultsToProjects(readOpenclawSessions(null, null), "openclaw")
 }
 
 // --- Auth ---
@@ -1297,7 +1383,7 @@ const server = http.createServer(async (req, res) => {
     if (msgCache.has(cacheKey)) { jsonPaged(msgCache.get(cacheKey), "mem-cache"); return }
 
     // Non-Claude platforms: on-demand read via platform-readers
-    const isNonClaude = /^(opencode|codex|hermes|antigravity|cursor-agent):/.test(projectPath)
+    const isNonClaude = /^(opencode|codex|hermes|antigravity|cursor-agent|openclaw):/.test(projectPath)
     if (isNonClaude) {
       const t0ondemand = performance.now()
       const ondemand = loadSessionMessagesOndemand(projectPath, sessionId)
@@ -1310,12 +1396,33 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(404); res.end("Not Found"); return
     }
 
-    // Claude Code: parse JSONL and cache result so subsequent loads are instant
+    // Claude Code: serve tail instantly from file end; background-parse full session into cache
     const fp = projectPath.startsWith("/")
       ? join(projectPath, `${sessionId}.jsonl`)
       : join(CLAUDE_DIR, projectPath, `${sessionId}.jsonl`)
     if (!existsSync(fp)) { res.writeHead(404); res.end("Not Found"); return }
-    console.log(`[perf] /api/session claude:${shortId} — parsing JSONL (cold cache)…`)
+
+    if (tail > 0 && skip === 0) {
+      // Fast path: read tail from end + count lines without full JSON parse
+      const tailMsgs = readJsonlTail(fp, tail)
+      const lineTotal = countJsonlLines(fp)
+      const jsonStr = JSON.stringify(tailMsgs)
+      const totalMs = (performance.now() - reqT0).toFixed(1)
+      console.log(`[perf] /api/session claude:${shortId} tail=${tail} → ${tailMsgs.length}/${lineTotal} msgs | load:jsonl-tail | total:${totalMs}ms | resp:${(jsonStr.length/1024).toFixed(1)}KB`)
+      res.writeHead(200, { "Content-Type": "application/json", "X-Message-Total": String(lineTotal) })
+      res.end(jsonStr)
+      // Warm the full cache in the background so subsequent load-more requests are instant
+      setImmediate(() => {
+        if (!msgCache.has(cacheKey)) {
+          const full = parseJsonl(fp)
+          msgCache.set(cacheKey, full)
+        }
+      })
+      return
+    }
+
+    // skip > 0 or tail=0: need full parse (load-earlier pagination)
+    console.log(`[perf] /api/session claude:${shortId} — parsing JSONL (cold cache, skip=${skip})…`)
     const parsed = parseJsonl(fp)
     msgCache.set(cacheKey, parsed)
     jsonPaged(parsed, "jsonl-parse")
@@ -1471,6 +1578,17 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       json({ error: err.message }, 404)
     }
+    return
+  }
+
+  // POST /api/open — open any local file/path in the OS default viewer
+  if (url.pathname === "/api/open" && req.method === "POST") {
+    const filePath = url.searchParams.get("path")
+    if (!filePath) { json({ error: "Missing path" }, 400); return }
+    exec(`open "${filePath.replace(/"/g, '\\"')}"`, (err) => {
+      if (err) json({ error: err.message }, 500)
+      else json({ ok: true })
+    })
     return
   }
 

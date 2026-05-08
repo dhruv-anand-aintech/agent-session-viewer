@@ -110,6 +110,8 @@
   font-family: var(--font-mono); font-size: 11px;
   vertical-align: middle; cursor: default;
 }
+.pp-path-chip--link { cursor: pointer; }
+.pp-path-chip--link:hover { background: hsla(210, 70%, 52%, 0.2); border-color: hsla(210, 70%, 52%, 0.4); }
 
 /* ── Markdown content ────────────────────────────────────────────────────── */
 .pp-markdown {

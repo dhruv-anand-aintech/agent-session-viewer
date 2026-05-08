@@ -22,6 +22,7 @@
   --color-opencode: hsl(140, 55%, 52%);
   --color-antigravity: hsl(263, 55%, 65%);
   --color-hermes: hsl(40, 58%, 54%);
+  --color-openclaw: hsl(320, 55%, 60%);
   --success: hsl(97, 59.1%, 46.1%);
   --danger: hsl(0, 80%, 65%);
   --font-ui: "Anthropic Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -184,6 +185,11 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   background: hsla(40, 58%, 54%, 0.12);
   border-color: var(--color-hermes);
   color: hsl(40, 58%, 68%);
+}
+.sidebar-platform-btn.active-openclaw {
+  background: hsla(320, 55%, 60%, 0.12);
+  border-color: var(--color-openclaw);
+  color: hsl(320, 55%, 75%);
 }
 
 .sidebar-search-row {
@@ -544,6 +550,14 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
 .load-more-pill:hover { background: var(--bg-000); color: var(--text-100); }
 .load-more-count { padding: 1px 6px; border-radius: 999px; background: var(--bg-300); font-size: 10px; color: var(--text-400); }
 .loading-state { display: flex; justify-content: center; padding: 24px; color: var(--text-400); font-size: 12px; }
+.msg-new { position: relative; }
+.new-msg-dot {
+  display: block; position: absolute; left: 6px; top: 18px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 5px #22c55e99;
+  pointer-events: none;
+}
 
 
 .msg-with-suggestion { position: relative; }
@@ -585,6 +599,10 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
 .message-row.assistant[data-platform="hermes"] .role-badge {
   background: hsla(40, 58%, 54%, 0.12);
   color: hsl(40, 58%, 68%);
+}
+.message-row.assistant[data-platform="openclaw"] .role-badge {
+  background: hsla(320, 55%, 60%, 0.12);
+  color: hsl(320, 55%, 75%);
 }
 .timestamp { font-size: 10px; color: var(--text-400); }
 .text-body { line-height: 1.65; white-space: pre-wrap; word-break: break-word; font-size: 14px; color: var(--text-100); }

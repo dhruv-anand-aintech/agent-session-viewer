@@ -9,13 +9,17 @@ marked.setOptions({ breaks: true, gfm: true })
 
 // ── Primitives ────────────────────────────────────────────────────────────────
 
+function openPath(path: string) {
+  fetch(`/api/open?path=${encodeURIComponent(path)}`, { method: "POST", credentials: "include" }).catch(() => {})
+}
+
 function PathSpan({ text }: { text: string }) {
   const parts = linkifyPaths(text)
   return (
     <>
       {parts.map((p, i) =>
         p.type === "path"
-          ? <span key={i} className="pp-path-chip" title={p.value}>{p.value.split("/").pop()}</span>
+          ? <span key={i} className="pp-path-chip pp-path-chip--link" title={p.value} onClick={() => openPath(p.value)}>{p.value.split("/").pop()}</span>
           : <span key={i}>{p.value}</span>
       )}
     </>

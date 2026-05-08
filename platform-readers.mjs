@@ -1761,3 +1761,136 @@ export function readHermesSessions(cacheGet, cacheSet) {
 
   return results
 }
+
+// ── Openclaw ──────────────────────────────────────────────────────────────────
+//
+// Openclaw stores sessions as JSONL under:
+//   ~/.openclaw/agents/<agentName>/sessions/<sessionId>.jsonl
+//
+// JSONL record types:
+//   { type:"session", id, timestamp, cwd }           — session header
+//   { type:"message", ..., message:{ role:"user"|"assistant", content:[...] } }
+//   { type:"message", ..., message:{ role:"toolResult", toolCallId, content } }
+//   { type:"thinking_level_change"|"custom"|... }    — metadata, ignored
+
+export const OPENCLAW_ROOT = path.join(homedir(), ".openclaw", "agents")
+
+function readOpenclawSession(filePath, cacheGet, cacheSet) {
+  let st
+  try { st = fs.statSync(filePath) } catch { return null }
+  const cacheVal = `${st.mtimeMs}:${st.size}`
+  if (cacheGet && cacheGet(filePath) === cacheVal) return null
+
+  let lines
+  try { lines = fs.readFileSync(filePath, "utf8").trim().split("\n").filter(Boolean) } catch { return null }
+  if (!lines.length) return null
+
+  const rows = []
+  for (const line of lines) {
+    try { rows.push(JSON.parse(line)) } catch { /* skip malformed */ }
+  }
+
+  const header = rows.find(r => r.type === "session") ?? {}
+  const sessionId = header.id ?? path.basename(filePath, ".jsonl")
+  if (!sessionId) return null
+  const cwd = header.cwd ?? ""
+  const agentName = path.basename(path.dirname(path.dirname(filePath)))
+  const projectDir = cwd ? normProjectDir(cwd) : `openclaw-${agentName}`
+
+  const out = []
+  let seq = 0
+
+  for (const row of rows) {
+    if (row.type !== "message") continue
+    const msg = row.message
+    if (!msg) continue
+    const ts = row.timestamp
+      ? (typeof row.timestamp === "number" ? new Date(row.timestamp).toISOString() : row.timestamp)
+      : new Date(st.mtimeMs).toISOString()
+
+    if (msg.role === "user") {
+      const content = Array.isArray(msg.content) ? msg.content : (typeof msg.content === "string" ? msg.content : "")
+      if (!content || (Array.isArray(content) && !content.length)) continue
+      out.push({
+        uuid: `openclaw-${sessionId}-${seq}`,
+        parentUuid: seq > 0 ? `openclaw-${sessionId}-${seq - 1}` : null,
+        type: "human", sessionId, timestamp: ts, isSidechain: false,
+        message: { role: "user", content },
+      })
+      seq++
+    } else if (msg.role === "assistant") {
+      const content = Array.isArray(msg.content) ? msg.content : (typeof msg.content === "string" ? msg.content : "")
+      if (!content || (Array.isArray(content) && !content.length)) continue
+      out.push({
+        uuid: `openclaw-${sessionId}-${seq}`,
+        parentUuid: seq > 0 ? `openclaw-${sessionId}-${seq - 1}` : null,
+        type: "assistant", sessionId, timestamp: ts, isSidechain: false,
+        message: { role: "assistant", content },
+      })
+      seq++
+    } else if (msg.role === "toolResult") {
+      // openclaw uses OpenAI-style toolResult role; convert to Anthropic tool_result block
+      const resultContent = Array.isArray(msg.content)
+        ? msg.content
+        : [{ type: "text", text: String(msg.content ?? "") }]
+      out.push({
+        uuid: `openclaw-${sessionId}-${seq}`,
+        parentUuid: seq > 0 ? `openclaw-${sessionId}-${seq - 1}` : null,
+        type: "human", sessionId, timestamp: ts, isSidechain: false,
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: msg.toolCallId ?? undefined, content: resultContent }],
+        },
+      })
+      seq++
+    }
+  }
+
+  if (cacheSet) cacheSet(filePath, cacheVal)
+  if (!out.length) return null
+
+  const firstUserMsg = out.find(m => m.message?.role === "user")
+  let firstName = null
+  if (firstUserMsg) {
+    const c = firstUserMsg.message.content
+    const text = typeof c === "string" ? c : (Array.isArray(c) ? (c.find(b => b?.type === "text")?.text ?? "") : "")
+    // Strip openclaw's prepended "[Day YYYY-MM-DD HH:MM TZ] " timestamp prefix
+    firstName = text.replace(/^\[[^\]]{5,40}\]\s*/, "").replace(/\s+/g, " ").trim().slice(0, 80) || null
+  }
+
+  return {
+    meta: {
+      id: sessionId,
+      projectPath: `openclaw:${projectDir}`,
+      messageCount: out.length,
+      userMessageCount: out.filter(m => m.type === "human").length,
+      lastActivity: out[out.length - 1]?.timestamp ?? new Date(st.mtimeMs).toISOString(),
+      isActive: Date.now() - st.mtimeMs < 5 * 60 * 1000,
+      firstName,
+      source: "openclaw",
+    },
+    msgs: out,
+  }
+}
+
+export function readOpenclawSessions(cacheGet, cacheSet) {
+  const results = []
+  if (!fs.existsSync(OPENCLAW_ROOT)) return results
+  let agentDirs
+  try {
+    agentDirs = fs.readdirSync(OPENCLAW_ROOT, { withFileTypes: true })
+      .filter(e => e.isDirectory()).map(e => e.name)
+  } catch { return results }
+  for (const agentName of agentDirs) {
+    const sessDir = path.join(OPENCLAW_ROOT, agentName, "sessions")
+    if (!fs.existsSync(sessDir)) continue
+    let entries
+    try { entries = fs.readdirSync(sessDir) } catch { continue }
+    for (const name of entries) {
+      if (!name.endsWith(".jsonl") || name.includes(".trajectory")) continue
+      const result = readOpenclawSession(path.join(sessDir, name), cacheGet, cacheSet)
+      if (result) results.push(result)
+    }
+  }
+  return results
+}

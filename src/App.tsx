@@ -27,7 +27,7 @@ interface SessionMeta {
   firstName?: string
   customName?: string
   parentSessionId?: string
-  source?: "claude" | "cursor" | "opencode" | "antigravity" | "hermes" | "codex" | string
+  source?: "claude" | "cursor" | "opencode" | "antigravity" | "hermes" | "codex" | "openclaw" | string
 }
 
 function isRecentlyActive(iso: string): boolean {
@@ -223,6 +223,9 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
   const [chatDir, setChatDir] = useState<string | null>(null)
   // Locally-held messages (tail of the full session)
   const fullRef = useRef<SessionMessage[]>([])
+  // UUIDs seen at initial load (ref — no render needed); UUIDs added by auto-refresh after that (state)
+  const seenUuidsRef = useRef<Set<string>>(new Set())
+  const [newMsgUuids, setNewMsgUuids] = useState<ReadonlySet<string>>(new Set())
 
   const idbKey = projectDir && sessionId ? IDB_KEY(projectDir, sessionId) : null
 
@@ -236,6 +239,8 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
     fullRef.current = filtered
     updateChatDir(filtered)
     const startIdx = Math.max(0, filtered.length - MAX_DOM)
+    seenUuidsRef.current = new Set(filtered.map(m => m.uuid).filter(Boolean) as string[])
+    setNewMsgUuids(new Set())
     // serverFetchedFrom tracks RAW server position — use msgs.length (not filtered) so skip stays aligned
     setWin({ msgs: filtered.slice(startIdx), startIdx, total: serverTotal, serverFetchedFrom: serverTotal - msgs.length })
   }, [updateChatDir])
@@ -249,9 +254,17 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
       const fetchMs = performance.now() - t0
       if (!r.ok) return
       const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || 0
-      const msgs: SessionMessage[] = await r.json()
+      let msgs: SessionMessage[] = await r.json()
       const parseMs = performance.now() - t0 - fetchMs
-      const total = serverTotal || msgs.length
+      let total = serverTotal || msgs.length
+      // If all fetched messages are snapshots, fetch a larger chunk so we get visible content
+      if (msgs.every(m => m.type === "file-history-snapshot") && total > msgs.length) {
+        const r2 = await fetch(sessionUrl(projectDir, sessionId, 50), { credentials: "include" })
+        if (r2.ok) {
+          msgs = await r2.json()
+          total = parseInt(r2.headers.get("X-Message-Total") ?? "0") || total
+        }
+      }
       markRemoteFetch(sessionId, fetchMs, parseMs, msgs.length, total)
       await idbPut(idbKey, { msgs, total })
       initWindow(msgs, total)
@@ -302,6 +315,16 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
         const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || 0
         const msgs: SessionMessage[] = await r.json()
         const filtered = msgs.filter(m => m.type !== "file-history-snapshot")
+        // Mark any UUIDs not seen at initial load as "new"
+        const brandNew = filtered.filter(m => m.uuid && !seenUuidsRef.current.has(m.uuid))
+        if (brandNew.length > 0) {
+          setNewMsgUuids(prev => {
+            const next = new Set(prev)
+            brandNew.forEach(m => next.add(m.uuid!))
+            brandNew.forEach(m => seenUuidsRef.current.add(m.uuid!))
+            return next as ReadonlySet<string>
+          })
+        }
         // Merge new tail: keep any earlier-loaded messages, append new ones
         setWin(prev => {
           if (!prev) {
@@ -441,6 +464,7 @@ function useWindowedMessages(projectDir: string | null, sessionId: string | null
     chatDir,
     injectFullMessages,
     bringMessageIndexIntoView,
+    newMsgUuids,
   }
 }
 
@@ -473,6 +497,7 @@ function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projec
     fullRef,
     injectFullMessages,
     bringMessageIndexIntoView,
+    newMsgUuids,
   } = useWindowedMessages(projectDir, sessionMeta.id, isRecentlyActive(sessionMeta.lastActivity))
 
   const [threadSearchOpen, setThreadSearchOpen] = useState(false)
@@ -862,12 +887,14 @@ const bottomRef = useRef<HTMLDivElement>(null)
           const chosen = sugg && nextText ? wordOverlap(sugg.text, nextText) > 0.4 : false
           const activeSearchIdx = threadSearchOpen && threadHits.length > 0 ? threadHits[threadHitPos]?.idx : undefined
           const isThreadSearchHit = activeSearchIdx === startIdx + i
+          const isNew = !!(msg.uuid && newMsgUuids.has(msg.uuid) && (msg.type === "user" || msg.type === "assistant" || msg.type === "human"))
           return (
             <div
               key={msg.uuid ? `${msg.uuid}:${startIdx + i}` : startIdx + i}
-              className={[sugg ? "msg-with-suggestion" : "", isThreadSearchHit ? "msg-search-hit-wrap" : ""].filter(Boolean).join(" ") || undefined}
+              className={[sugg ? "msg-with-suggestion" : "", isThreadSearchHit ? "msg-search-hit-wrap" : "", isNew ? "msg-new" : ""].filter(Boolean).join(" ") || undefined}
               data-msg-index={startIdx + i}
             >
+              {isNew && <span className="new-msg-dot" title="New since load" />}
               <Block msg={msg} index={startIdx + i} nextMsg={visible[i + 1]} source={sessionMeta.source} />
               {sugg && (
                 <div className="suggestion-pill" title={sugg.text}>
@@ -910,6 +937,8 @@ function platformIconLabel(source?: string): string {
       return "Hermes"
     case "codex":
       return "Codex"
+    case "openclaw":
+      return "Openclaw"
     default:
       return "Claude"
   }
@@ -929,6 +958,8 @@ function platformIconSrc(source?: string): string | null {
       return "https://www.google.com/s2/favicons?sz=64&domain=idx.google.com"
     case "hermes":
       return "https://www.google.com/s2/favicons?sz=64&domain=nousresearch.com"
+    case "openclaw":
+      return null
     default:
       return null
   }
@@ -946,6 +977,8 @@ function platformFallbackGlyph(source?: string): string {
       return "⚚"
     case "codex":
       return "{}"
+    case "openclaw":
+      return "🐾"
     default:
       return "C"
   }
@@ -982,6 +1015,7 @@ const PLATFORM_FILTER_ACTIVE: Record<string, string> = {
   opencode: "active-opencode",
   antigravity: "active-antigravity",
   hermes: "active-hermes",
+  openclaw: "active-openclaw",
 }
 
 function platformFilterActiveClass(p: string): string {
@@ -1254,7 +1288,7 @@ function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsT
 
   useEffect(() => {
     const q = sidebarSearchQuery.trim()
-    if (!q) return
+    if (!q) { setSidebarSearchHits(null); setSidebarSearchLoading(false); return }
     let cancelled = false
     console.log("[sidebar-search] fetching q=", q)
     fetch(`/api/search/sessions?q=${encodeURIComponent(q)}`, { credentials: "include" })
