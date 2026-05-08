@@ -713,6 +713,7 @@ async function streamRecentSidebarInitial(res, maxSessions) {
       if (res.destroyed) return
       const part = await loadFn()
       if (!part.length) continue
+      flushSidebarCacheFromProjects(part, null)
       acc = mergeProjectsInto(acc, part)
       sseWrite(res, "projects", sortProjectGroups(acc))
       await yieldEventLoopTick()

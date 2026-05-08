@@ -959,7 +959,7 @@ function platformIconSrc(source?: string): string | null {
     case "hermes":
       return "https://www.google.com/s2/favicons?sz=64&domain=nousresearch.com"
     case "openclaw":
-      return null
+      return "https://www.google.com/s2/favicons?sz=64&domain=openclaw.ai"
     default:
       return null
   }
