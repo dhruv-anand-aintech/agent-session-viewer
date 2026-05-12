@@ -15,6 +15,11 @@ dist-ssr
 .wrangler
 .env
 
+continuation*.md
+continuation*.archive.*.md
+.autopilot.json
+tmp/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
