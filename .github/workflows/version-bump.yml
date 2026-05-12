@@ -15,6 +15,9 @@ on:
         description: 'Or specify exact version (e.g. 1.2.3) — overrides bump type'
         required: false
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   bump:
     name: Bump version and tag
