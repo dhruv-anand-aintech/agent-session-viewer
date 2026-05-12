@@ -69,6 +69,7 @@ Change-detection: each reader returns `{ meta, msgs }[]`; callers pass `cacheGet
 - Prefer **small, focused diffs**; match existing style (minimal comments unless non-obvious).
 - **Platform parsing** — changes go in `platform-readers.mjs` so `local-server.mjs` and `build-cache.mjs` stay in sync.
 - Do not add features to `worker/index.ts` — it is deprecated.
+- **Do not add debounce** — search inputs and other reactive UI already handle this or the user will ask explicitly. Do not reach for debounce as a default fix for "too many requests."
 
 ## Testing locally
 
