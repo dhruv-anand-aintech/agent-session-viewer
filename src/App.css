@@ -535,6 +535,78 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   color: var(--text-100);
 }
 
+.thread-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 14px 14px;
+  min-height: 0;
+  max-height: 48vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.thread-search-result-card {
+  border: 1px solid var(--border-100);
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-200);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.16);
+}
+.thread-search-result-card.active {
+  border-color: hsla(200, 65%, 52%, 0.58);
+  box-shadow: 0 0 0 1px hsla(200, 65%, 52%, 0.18);
+}
+.thread-search-result-card-head {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  border: none;
+  background: hsla(255, 100%, 100%, 0.03);
+  color: inherit;
+  cursor: pointer;
+  padding: 10px 12px;
+}
+.thread-search-result-card-head:hover {
+  background: hsla(255, 100%, 100%, 0.05);
+}
+.thread-search-result-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--text-400);
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+.thread-search-result-card-id {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-300);
+  color: var(--text-300);
+}
+.thread-search-result-card-snippet {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-200);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.thread-search-result-card-body {
+  border-top: 1px solid var(--border-100);
+  background: var(--bg-100);
+}
+.thread-search-result-card--pretty .thread-search-result-card-body {
+  padding-bottom: 6px;
+}
+.thread-search-result-loading {
+  padding: 14px 12px;
+  color: var(--text-400);
+  font-size: 12px;
+}
+
 /* ── Scroll area ──────────────────────────────────────────────────────────── */
 .messages-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 28px 0 calc(48px + env(safe-area-inset-bottom, 0px)); }
 .messages-scroll::-webkit-scrollbar { width: 4px; }

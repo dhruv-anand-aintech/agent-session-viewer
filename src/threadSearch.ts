@@ -1,7 +1,7 @@
 /** Client-side keyword thread search (parity with lib/session-search-core.mjs runThreadKeywordSearch). */
 import type { SessionMessage } from "./types"
 
-export type ThreadSearchHit = { idx: number; text: string; score?: number }
+export type ThreadSearchHit = { idx: number; text: string; uuid?: string; score?: number }
 
 function flattenContent(content: unknown): string {
   if (content == null) return ""
@@ -103,7 +103,7 @@ export function runThreadSearch(query: string, msgs: SessionMessage[]): ThreadSe
     const norm = normalizeKeywordText(text)
     if (!norm) continue
     const score = scoreKeywordHit(norm, terms, phrase)
-    if (score > 0) hits.push({ idx, text, score })
+    if (score > 0) hits.push({ idx, text, uuid: msgs[idx]?.uuid, score })
   }
 
   return hits.sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || a.idx - b.idx).slice(0, 40)
