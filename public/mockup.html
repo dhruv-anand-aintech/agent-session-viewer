@@ -745,7 +745,7 @@ body {
       <span class="conn-badge conn-on" title="SSE connected">● live</span>
     </div>
     <div style="display:flex;align-items:center;gap:6px">
-      <span class="topbar-meta">7 platforms · 42 sessions</span>
+      <span class="topbar-meta">6 platforms · 38 sessions</span>
       <button type="button" class="topbar-settings-btn" title="Settings" aria-label="Settings">⚙</button>
     </div>
   </header>
@@ -777,59 +777,62 @@ body {
           <input class="sidebar-search-input" placeholder="Search threads…" value="" readonly tabindex="-1" aria-label="Search threads (preview)" />
         </div>
 
+        <!-- project: checkout-service -->
         <div class="sidebar-project">
-          <div class="sidebar-project-name">agent-session-viewer</div>
+          <div class="sidebar-project-name">checkout-service</div>
           <button type="button" class="sidebar-session active">
             <span class="platform-icon-wrap"><img src="https://www.google.com/s2/favicons?sz=64&domain=claude.ai" alt="Claude" title="Claude" /></span>
             <span class="ss-live">●</span>
-            <span class="ss-name">prettify cursor transcript cards</span>
-            <span class="ss-meta"><span class="ss-count">6/156</span><span class="ss-time">now</span></span>
+            <span class="ss-name">retry logic for payment gateway</span>
+            <span class="ss-meta"><span class="ss-count">8/203</span><span class="ss-time">now</span></span>
           </button>
           <button type="button" class="sidebar-session sidechain">
             <span class="platform-icon-wrap"><img src="https://www.google.com/s2/favicons?sz=64&domain=claude.ai" alt="Claude" title="Claude" /></span>
             <span class="ss-subagent-icon" title="Sub-agent session">⤷</span>
-            <span class="ss-name">Explore platform-readers</span>
-            <span class="ss-meta"><span class="ss-count">2/12</span><span class="ss-time">2m</span></span>
+            <span class="ss-name">Explore stripe webhook handlers</span>
+            <span class="ss-meta"><span class="ss-count">2/18</span><span class="ss-time">3m</span></span>
           </button>
           <button type="button" class="sidebar-session">
             <span class="platform-icon-wrap"><img src="https://www.google.com/s2/favicons?sz=64&domain=cursor.com" alt="Cursor" title="Cursor" /></span>
-            <span class="ss-name">resume compose session</span>
-            <span class="ss-meta"><span class="ss-count">12/48</span><span class="ss-time">18m</span></span>
+            <span class="ss-name">add idempotency key to orders API</span>
+            <span class="ss-meta"><span class="ss-count">14/61</span><span class="ss-time">22m</span></span>
           </button>
         </div>
 
+        <!-- project: data-pipeline -->
         <div class="sidebar-project">
-          <div class="sidebar-project-name">my-product</div>
+          <div class="sidebar-project-name">data-pipeline</div>
           <button type="button" class="sidebar-session">
             <span class="platform-icon-wrap"><img src="https://www.google.com/s2/favicons?sz=64&domain=openai.com" alt="Codex" title="Codex" /></span>
             <span class="ss-live">●</span>
-            <span class="ss-name">api route tests</span>
-            <span class="ss-meta"><span class="ss-count">9/54</span><span class="ss-time">4m</span></span>
+            <span class="ss-name">backfill job for user_events partition</span>
+            <span class="ss-meta"><span class="ss-count">11/77</span><span class="ss-time">6m</span></span>
           </button>
           <button type="button" class="sidebar-session">
             <span class="platform-icon-wrap"><img src="https://www.google.com/s2/favicons?sz=64&domain=opencode.ai" alt="OpenCode" title="OpenCode" /></span>
-            <span class="ss-name">config migration</span>
-            <span class="ss-meta"><span class="ss-count">1/22</span><span class="ss-time">1d</span></span>
+            <span class="ss-name">kafka consumer lag alert tuning</span>
+            <span class="ss-meta"><span class="ss-count">3/29</span><span class="ss-time">1h</span></span>
           </button>
           <button type="button" class="sidebar-session">
             <span class="platform-icon-wrap"><img src="https://www.google.com/s2/favicons?sz=64&domain=nousresearch.com" alt="Hermes" title="Hermes" /></span>
-            <span class="ss-name">debug memory pipeline</span>
-            <span class="ss-meta"><span class="ss-count">5/31</span><span class="ss-time">2d</span></span>
+            <span class="ss-name">fix timestamp drift in event dedup</span>
+            <span class="ss-meta"><span class="ss-count">6/44</span><span class="ss-time">3h</span></span>
           </button>
         </div>
 
+        <!-- project: auth-service -->
         <div class="sidebar-project">
-          <div class="sidebar-project-name">infra</div>
+          <div class="sidebar-project-name">auth-service</div>
           <button type="button" class="sidebar-session">
             <span class="platform-icon-wrap"><img src="https://www.google.com/s2/favicons?sz=64&domain=idx.google.com" alt="Antigravity" title="Antigravity" /></span>
-            <span class="ss-name">deploy rollout</span>
-            <span class="ss-meta"><span class="ss-count">3/9</span><span class="ss-time">5d</span></span>
+            <span class="ss-name">rotate JWT signing keys zero-downtime</span>
+            <span class="ss-meta"><span class="ss-count">5/17</span><span class="ss-time">2d</span></span>
           </button>
         </div>
 
         <div class="sidebar-load-more">
           <div class="sidebar-load-more-btn" tabindex="-1">
-            Load all sessions<span style="opacity:.85"> — mock only</span>
+            Load all sessions<span style="opacity:.85"> — 28 more</span>
           </div>
         </div>
       </div>
@@ -838,12 +841,12 @@ body {
     <div class="content">
       <div class="session-pane">
         <div class="session-header">
-          <span class="session-id">9c7af41b</span>
-          <span class="session-cwd" title="cwd">~/Code/agent-session-viewer</span>
-          <button type="button" class="session-path-btn">📄 9c7af41b.jsonl</button>
-          <span class="git-branch">⎇ main</span>
+          <span class="session-id">a3f812c0</span>
+          <span class="session-cwd" title="cwd">~/Code/checkout-service</span>
+          <button type="button" class="session-path-btn">📄 a3f812c0.jsonl</button>
+          <span class="git-branch">⎇ feat/payment-retry</span>
           <span class="active-badge">● Live</span>
-          <span class="msg-count">158 messages</span>
+          <span class="msg-count">203 messages</span>
           <button type="button" class="thread-search-toggle active" title="Search in thread" aria-pressed="true">🔎</button>
           <div class="user-nav">
             <button type="button" class="user-nav-btn" title="Jump to first">⤒</button>
@@ -857,8 +860,8 @@ body {
         </div>
 
         <div class="thread-search-panel" aria-hidden="true">
-          <input class="thread-search-input" placeholder="Search this thread…" value="fuse tool_use" readonly tabindex="-1" />
-          <span class="thread-search-meta">Match 3 of 12</span>
+          <input class="thread-search-input" placeholder="Search this thread…" value="exponential backoff" readonly tabindex="-1" />
+          <span class="thread-search-meta">Match 2 of 7</span>
           <button type="button" class="thread-search-step" tabindex="-1">◀</button>
           <button type="button" class="thread-search-step" tabindex="-1">▶</button>
           <span style="margin-left:auto;font-size:12px;color:var(--text-400);cursor:default;">✕</span>
@@ -867,15 +870,15 @@ body {
         <div class="session-todos">
           <div class="session-todo-item done">
             <span class="session-todo-check">✓</span>
-            <span class="session-todo-text">Preserve structured blocks from Cursor agent JSONL</span>
+            <span class="session-todo-text">Add RetryPolicy interface with jitter support</span>
           </div>
           <div class="session-todo-item active">
             <span class="session-todo-check">◆</span>
-            <span class="session-todo-text">Refresh mockup + README docs</span>
+            <span class="session-todo-text">Wire exponential backoff into PaymentClient.charge()</span>
           </div>
           <div class="session-todo-item">
             <span class="session-todo-check">○</span>
-            <span class="session-todo-text">Ship fuzzy thread search QA</span>
+            <span class="session-todo-text">Write integration tests against Stripe test clock</span>
           </div>
         </div>
 
@@ -883,7 +886,7 @@ body {
 
           <section class="pp-turn" aria-label="Conversation turn">
             <div class="pp-user-row">
-              <div class="pp-user-bubble">prettify the cursor chats using the same Pretty cards — Shell, Write with paths[], thread search chrome, and README mockup refresh.</div>
+              <div class="pp-user-bubble">add exponential backoff with jitter to the payment charge call — cap at 4 retries, 30s max delay. use the existing RetryPolicy interface.</div>
             </div>
             <div class="pp-assistant-row">
               <div class="pp-assistant-bubble">
@@ -891,45 +894,64 @@ body {
                 <div class="pp-thinking-pill">
                   <span class="pp-thinking-icon" aria-hidden="true">🧠</span>
                   <span class="pp-thinking-label">Thinking</span>
-                  <span class="pp-thinking-preview">· Map classifyTool for Shell ↔ Bash and Cursor Write inputs…</span>
+                  <span class="pp-thinking-preview">· Check RetryPolicy signature and where PaymentClient.charge is called…</span>
                 </div>
 
                 <div class="pp-tool-card pp-file-read">
                   <div class="pp-tool-header">
                     <span class="pp-tool-icon">📄</span>
                     <span class="pp-tool-label" style="color:hsl(210,65%,68%)">Read</span>
-                    <span class="pp-file-name">PrettyMessageBlock.tsx</span>
-                    <span class="pp-file-path-muted">src/pretty/</span>
+                    <span class="pp-file-name">PaymentClient.ts</span>
+                    <span class="pp-file-path-muted">src/clients/</span>
                     <span class="pp-fold-arrow">▸</span>
                   </div>
                 </div>
 
-                <div class="pp-tool-card pp-file-write">
+                <div class="pp-tool-card pp-file-read">
                   <div class="pp-tool-header">
-                    <span class="pp-tool-icon">✍️</span>
-                    <span class="pp-tool-label" style="color:hsl(40,75%,65%)">Write</span>
-                    <span class="pp-file-name">summary.json</span>
-                    <span class="pp-write-more-paths" title="+2 more targets">+2 files</span>
-                    <span class="pp-file-path-muted">tmp/</span>
+                    <span class="pp-tool-icon">📄</span>
+                    <span class="pp-tool-label" style="color:hsl(210,65%,68%)">Read</span>
+                    <span class="pp-file-name">retry.ts</span>
+                    <span class="pp-file-path-muted">src/utils/</span>
+                    <span class="pp-fold-arrow">▸</span>
+                  </div>
+                </div>
+
+                <div class="pp-tool-card pp-file-edit">
+                  <div class="pp-tool-header">
+                    <span class="pp-tool-icon">✏️</span>
+                    <span class="pp-tool-label" style="color:hsl(20,65%,65%)">Edit</span>
+                    <span class="pp-file-name">PaymentClient.ts</span>
+                    <span class="pp-file-path-muted">src/clients/</span>
                     <span class="pp-fold-arrow">▾</span>
                   </div>
-                  <pre class="pp-file-body">{
-  &quot;summary&quot;: &quot;Mapped Shell → BashCard; paths[] + contents on Write.&quot;
-}</pre>
+                  <div class="pp-diff-body">
+                    <pre class="pp-diff-del">-  async charge(params: ChargeParams): Promise&lt;ChargeResult&gt; {
+-    return this.stripe.paymentIntents.create(params)
+-  }</pre>
+                    <pre class="pp-diff-add">+  async charge(params: ChargeParams): Promise&lt;ChargeResult&gt; {
++    return withRetry(() =&gt; this.stripe.paymentIntents.create(params), {
++      maxAttempts: 4, baseDelayMs: 500, maxDelayMs: 30_000, jitter: true,
++    })
++  }</pre>
+                  </div>
                 </div>
 
                 <div class="pp-tool-card pp-bash">
                   <div class="pp-tool-header">
                     <span class="pp-tool-icon">›_</span>
                     <span class="pp-tool-label" style="color:hsl(140,50%,58%)">Bash</span>
-                    <code class="pp-bash-cmd">npm run build</code>
-                    <span class="pp-tool-desc">verify TypeScript build</span>
-                    <span class="pp-fold-arrow">▸</span>
+                    <code class="pp-bash-cmd">npx tsc --noEmit</code>
+                    <span class="pp-tool-desc">verify no type errors</span>
+                    <span class="pp-fold-arrow">▾</span>
+                  </div>
+                  <div class="pp-bash-body">
+                    <pre class="pp-bash-result">Done in 1.4s</pre>
                   </div>
                 </div>
 
                 <div class="pp-markdown">
-                  <p>Cards mirror production: <strong>thinking</strong> pills, <code>tool_use</code> rows (<code>Read</code>, <code>Write</code> with batch paths), and <code>Shell</code> grouped with the green bash strip.</p>
+                  <p>Wired <code>withRetry</code> into <code>PaymentClient.charge()</code> — full jitter caps delay at 30 s after 4 attempts. Types pass. Next: integration tests against the Stripe test clock.</p>
                 </div>
               </div>
             </div>
@@ -937,47 +959,63 @@ body {
 
           <section class="pp-turn">
             <div class="pp-user-row">
-              <div class="pp-user-bubble">tighten the diff card and sub-agent rail for the README screenshot.</div>
+              <div class="pp-user-bubble">write a unit test that verifies the 4-attempt cap and that delays grow exponentially.</div>
             </div>
             <div class="pp-assistant-row">
               <div class="pp-assistant-bubble">
-                <div class="pp-tool-card pp-file-edit">
+                <div class="pp-tool-card pp-file-write">
                   <div class="pp-tool-header">
-                    <span class="pp-tool-icon">✏️</span>
-                    <span class="pp-tool-label" style="color:hsl(20,65%,65%)">Edit</span>
-                    <span class="pp-file-name">mockup.html</span>
-                    <span class="pp-file-path-muted">public/</span>
+                    <span class="pp-tool-icon">✍️</span>
+                    <span class="pp-tool-label" style="color:hsl(40,75%,65%)">Write</span>
+                    <span class="pp-file-name">PaymentClient.retry.test.ts</span>
+                    <span class="pp-file-path-muted">src/clients/__tests__/</span>
+                    <span class="pp-fold-arrow">▸</span>
+                  </div>
+                </div>
+                <div class="pp-tool-card pp-bash">
+                  <div class="pp-tool-header">
+                    <span class="pp-tool-icon">›_</span>
+                    <span class="pp-tool-label" style="color:hsl(140,50%,58%)">Bash</span>
+                    <code class="pp-bash-cmd">npx vitest run src/clients/__tests__/PaymentClient.retry.test.ts</code>
                     <span class="pp-fold-arrow">▾</span>
                   </div>
-                  <div class="pp-diff-body">
-                    <pre class="pp-diff-del">- &lt;span class=&quot;topbar-title&quot;&gt;Legacy title&lt;/span&gt;</pre>
-                    <pre class="pp-diff-add">+ &lt;img src=&quot;./favicon.svg&quot; alt=&quot;&quot;&gt; Agent Session Viewer</pre>
+                  <div class="pp-bash-body">
+                    <pre class="pp-bash-result"> ✓ caps retries at 4 attempts (12ms)
+ ✓ delay grows exponentially with jitter bound (8ms)
+ ✓ succeeds on first attempt when no error (3ms)
+
+Test Files  1 passed (1)
+Tests       3 passed (3)</pre>
                   </div>
+                </div>
+                <div class="pp-markdown">
+                  <p>All 3 tests pass. The <strong>exponential growth assertion</strong> uses <code>vi.useFakeTimers()</code> to confirm each delay is ≥ 2× the previous before jitter.</p>
                 </div>
               </div>
             </div>
           </section>
 
           <aside class="pp-subagent-row" aria-label="Sub-agent transcript">
-            <div class="pp-subagent-label">⤷ sub-agent · search helpers</div>
+            <div class="pp-subagent-label">⤷ sub-agent · explore stripe webhook handlers</div>
             <div class="pp-subagent-body">
               <div class="pp-assistant-row">
                 <div class="pp-assistant-bubble">
                   <div class="pp-thinking-pill">
                     <span class="pp-thinking-icon" aria-hidden="true">🧠</span>
                     <span class="pp-thinking-label">Thinking</span>
-                    <span class="pp-thinking-preview">· Confirm fuse.js snippets for thread search parity…</span>
+                    <span class="pp-thinking-preview">· Find where payment_intent.payment_failed is handled…</span>
                   </div>
                   <div class="pp-tool-card pp-bash">
                     <div class="pp-tool-header">
                       <span class="pp-tool-icon">›_</span>
                       <span class="pp-tool-label" style="color:hsl(140,50%,58%)">Bash</span>
-                      <code class="pp-bash-cmd">rg classifyTool src/pretty/ -n</code>
+                      <code class="pp-bash-cmd">rg "payment_intent.payment_failed" src/ -n</code>
                       <span class="pp-fold-arrow">▾</span>
                     </div>
                     <div class="pp-bash-body">
-                      <pre class="pp-bash-result">utils.ts
-45:function classifyTool(name: string)</pre>
+                      <pre class="pp-bash-result">src/webhooks/stripe.ts
+88:  case "payment_intent.payment_failed":
+94:    await handlePaymentFailed(event.data.object)</pre>
                     </div>
                   </div>
                 </div>
