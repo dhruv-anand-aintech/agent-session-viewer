@@ -1255,7 +1255,7 @@ function serveStatic(req, res) {
 }
 
 // --- LanceDB background indexer ---
-// Kick off after a short delay so the server is accepting requests first
+// Kick off after a longer delay (10s) so the TUI and tunnels can finish their initial output
   if (ENABLE_BACKGROUND_INDEXER) {
   setTimeout(() => {
     console.log(`${ts()} [lancedb-indexer] startup timer fired`)
@@ -1265,7 +1265,7 @@ function serveStatic(req, res) {
       getCacheRows,
       (projectPath, sessionId) => getSessionMessagesAll(projectPath, sessionId)
     ).catch(err => console.warn(`${ts()} [lancedb-indexer] startup error:`, err.message))
-  }, 3000)
+  }, 10000)
 } else {
   console.log(`${ts()} [lancedb-indexer] background indexing disabled; run 'npm run build-search-index' in a separate terminal`)
 }

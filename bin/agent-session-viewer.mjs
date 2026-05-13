@@ -228,6 +228,11 @@ const targetHost = (needsExternalBind || hasFlag("--host")) ? "0.0.0.0" : "127.0
 const port = await pickPort(preferredPortInput, targetHost)
 const activePin = process.env.AUTH_PIN ?? (needsExternalBind ? generatePin() : null)
 
+if (activePin) {
+  console.log(`\n  🔐 Security: PIN protection enabled.`)
+  console.log(`     PIN: ${activePin}\n`)
+}
+
 // ── Start local server ────────────────────────────────────────────────────────
 
 const server = spawn(process.execPath, [SERVER], {
