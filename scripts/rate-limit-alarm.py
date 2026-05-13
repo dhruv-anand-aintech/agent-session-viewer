@@ -185,12 +185,28 @@ def extract_signal_text(data: Any) -> str:
         if key in data:
             add(data[key])
 
-    rate_limits = data.get("rate_limits")
+    rate_limits = _find_rate_limits(data)
     if isinstance(rate_limits, dict):
+        if rate_limits.get("primary") is None and rate_limits.get("secondary") is None:
+            credits = rate_limits.get("credits")
+            if isinstance(credits, dict) and not credits.get("has_credits", True):
+                parts.append("rate limit")
         for key in ("rate_limit_reached_type", "limit_name", "limit_id"):
             add(rate_limits.get(key))
 
     return normalize_text(parts)
+
+
+def _find_rate_limits(data: dict[str, Any]) -> Any:
+    rl = data.get("rate_limits")
+    if isinstance(rl, dict):
+        return rl
+    payload = data.get("payload")
+    if isinstance(payload, dict):
+        rl = payload.get("rate_limits")
+        if isinstance(rl, dict):
+            return rl
+    return None
 
 
 def transcript_path_from_context(data: Any) -> Path | None:
@@ -327,9 +343,14 @@ def has_explicit_limit_signal(data: Any, text: str) -> bool:
     if isinstance(data, dict):
         if data.get("error") == "rate_limit":
             return True
-        rate_limits = data.get("rate_limits")
-        if isinstance(rate_limits, dict) and rate_limits.get("rate_limit_reached_type"):
-            return True
+        rate_limits = _find_rate_limits(data)
+        if isinstance(rate_limits, dict):
+            if rate_limits.get("rate_limit_reached_type"):
+                return True
+            if rate_limits.get("primary") is None and rate_limits.get("secondary") is None:
+                credits = rate_limits.get("credits")
+                if isinstance(credits, dict) and not credits.get("has_credits", True):
+                    return True
     for value in collect_strings(data):
         if isinstance(value, str) and value.strip().lower() in {"rate_limit", "rate limit"}:
             return True

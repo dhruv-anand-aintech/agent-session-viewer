@@ -65,21 +65,21 @@ function getLanIp() {
   return null
 }
 
-function tryPort(p) {
+function tryPort(p, host = "127.0.0.1") {
   return new Promise(r => {
     const s = net.createServer()
     s.once("error", () => r(false))
-    s.listen(p, () => s.close(() => r(true)))
+    s.listen(p, host, () => s.close(() => r(true)))
   })
 }
-async function pickPort(start) {
-  for (let i = 0; i <= 50; i++) {
-    if (await tryPort(start + i)) {
+async function pickPort(start, host = "127.0.0.1") {
+  for (let i = 0; i <= 100; i++) {
+    if (await tryPort(start + i, host)) {
       if (i > 0) console.warn(`Port ${start} busy — using ${start + i}`)
       return start + i
     }
   }
-  throw new Error(`No free port found in range ${start}–${start + 50}`)
+  throw new Error(`No free port found in range ${start}–${start + 100}`)
 }
 
 function ask(question, defaultVal = "") {
@@ -199,11 +199,12 @@ if (!skipCache && existsSync(BUILD_CACHE)) {
 
 // ── Start local server ────────────────────────────────────────────────────────
 
-const port = await pickPort(Number.isFinite(preferredPort) ? preferredPort : 3001)
-
 // LAN or tunnel mode needs the server accessible externally
 const needsExternalBind = modeLan || modeTunnel || modeNgrok
 const bindToAll = needsExternalBind || hasFlag("--host")
+const targetHost = bindToAll ? "0.0.0.0" : "127.0.0.1"
+
+const port = await pickPort(Number.isFinite(preferredPort) ? preferredPort : 3001, targetHost)
 
 // Auto-generate a PIN for remote flag modes (AUTH_PIN may already be set by user)
 const remoteFlagPin = needsExternalBind && !process.env.AUTH_PIN ? generatePin() : null
@@ -214,7 +215,7 @@ const server = spawn(process.execPath, [SERVER], {
   env: {
     ...process.env,
     PORT: String(port),
-    HOST: bindToAll ? "0.0.0.0" : "127.0.0.1",
+    HOST: targetHost,
     ...(remoteFlagPin ? { AUTH_PIN: remoteFlagPin } : {}),
   },
 })
