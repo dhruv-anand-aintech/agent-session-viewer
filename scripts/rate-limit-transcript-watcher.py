@@ -200,7 +200,7 @@ def process_hit(api: dict[str, Any], agent: str, path: Path, entry: Any) -> None
     session_id = infer_session_id(entry, path)
     cwd = infer_cwd(entry, path)
     location = f"{agent} transcript @ {cwd} (session {session_id})"
-    targets = api["extract_targets"](entry, None)
+    targets = api["extract_targets"](entry, None, os.fspath(path))
     terminal_app = api["emit_hit_alert"](agent, location, text, targets, session_id, cwd)
     if not targets:
         return

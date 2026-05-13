@@ -516,7 +516,31 @@ def split_candidates(text: str) -> list[str]:
     return pieces or [text]
 
 
-def extract_targets(data: Any, text_override: str | None = None) -> list[tuple[datetime, str]]:
+def _read_resets_from_file(file_path: str) -> datetime | None:
+    try:
+        with open(file_path, "r", encoding="utf-8") as fh:
+            for line in reversed(list(fh)):
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                rl = _find_rate_limits(entry)
+                if not isinstance(rl, dict):
+                    continue
+                primary = rl.get("primary")
+                if isinstance(primary, dict):
+                    ts = primary.get("resets_at")
+                    if ts:
+                        dt = datetime.fromtimestamp(ts, tz=now_local().tzinfo)
+                        return dt.astimezone()
+    except OSError:
+        return None
+    return None
+
+
+def extract_targets(data: Any, text_override: str | None = None, file_path: str | None = None) -> list[tuple[datetime, str]]:
     text = text_override if text_override is not None else extract_signal_text(data)
     if not text:
         return []
@@ -533,7 +557,6 @@ def extract_targets(data: Any, text_override: str | None = None) -> list[tuple[d
         if reset_at.tzinfo is None:
             reset_at = reset_at.replace(tzinfo=now.tzinfo)
         if reset_at <= now:
-            # For bare times without a date, assume the next occurrence.
             if TIME_RE.search(candidate) and not MONTH_DAY_RE.search(candidate) and not ISO_RE.search(candidate):
                 reset_at = reset_at + timedelta(days=1)
         key = (int(reset_at.timestamp()), candidate)
@@ -541,6 +564,12 @@ def extract_targets(data: Any, text_override: str | None = None) -> list[tuple[d
             continue
         seen.add(key)
         targets.append((reset_at, candidate))
+
+    if not targets and file_path:
+        fallback = _read_resets_from_file(file_path)
+        if fallback and fallback > now:
+            targets.append((fallback, fallback.strftime("resets %b %d at %I:%M%p (local)")))
+
     return targets
 
 
