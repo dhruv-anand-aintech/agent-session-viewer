@@ -11,8 +11,11 @@ from typing import Any, Iterable
 
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))) / "agent-session-viewer-rate-limit"
 WATCH_STATE = STATE_DIR / "watch-state.json"
-ALARM_SCRIPT = Path.home() / ".config" / "agent-rate-limit" / "rate-limit-alarm.py"
+APP_CONFIG_FILE = Path.home() / ".config" / "agent-session-viewer" / "config.json"
+DEFAULT_ALARM_SCRIPT = Path(__file__).resolve().parent / "rate-limit-alarm.py"
+ALARM_SCRIPT = Path(os.environ.get("AGENT_SESSION_VIEWER_RATE_LIMIT_ALARM_SCRIPT", os.fspath(DEFAULT_ALARM_SCRIPT)))
 POLL_INTERVAL = 1.5
+STARTUP_LOOKBACK_SECONDS = 30 * 60
 
 WATCH_SPECS = [
     {
@@ -35,9 +38,9 @@ WATCH_SPECS = [
     },
     {
         "agent": "Gemini",
-        "paths": [Path.home() / ".gemini" / "tmp" / "code" / "chats"],
+        "paths": [Path.home() / ".gemini" / "tmp"],
         "kinds": {"jsonl"},
-        "path_contains": (),
+        "path_contains": ("chats",),
     },
     {
         "agent": "OpenClaw",
@@ -68,6 +71,22 @@ WATCH_SPECS = [
 
 def load_alarm_api() -> dict[str, Any]:
     return runpy.run_path(os.fspath(ALARM_SCRIPT), run_name="__watch__")
+
+
+def rate_limit_alerts_enabled() -> bool:
+    env_value = os.environ.get("AGENT_SESSION_VIEWER_RATE_LIMIT_ALERTS")
+    if env_value is not None:
+        return env_value.strip().lower() not in {"0", "false", "no", "off"}
+    try:
+        config = json.loads(APP_CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return True
+    settings = config.get("settings") if isinstance(config, dict) else None
+    if isinstance(settings, dict) and "rateLimitAlertsEnabled" in settings:
+        return bool(settings["rateLimitAlertsEnabled"])
+    if isinstance(config, dict) and "rateLimitAlertsEnabled" in config:
+        return bool(config["rateLimitAlertsEnabled"])
+    return True
 
 
 def load_state() -> dict[str, dict[str, int]]:
@@ -179,13 +198,14 @@ def process_hit(api: dict[str, Any], agent: str, path: Path, entry: Any) -> None
     if not text or not entry_has_rate_limit(api, entry):
         return
     session_id = infer_session_id(entry, path)
-    location = f"{agent} transcript @ {infer_cwd(entry, path)} ({session_id[:8]})"
+    cwd = infer_cwd(entry, path)
+    location = f"{agent} transcript @ {cwd} (session {session_id})"
     targets = api["extract_targets"](entry, None)
-    api["emit_hit_alert"](agent, location, text, targets)
+    terminal_app = api["emit_hit_alert"](agent, location, text, targets, session_id, cwd)
     if not targets:
         return
     for fire_at, summary in targets:
-        api["schedule_alarm"](agent, fire_at, summary)
+        api["schedule_alarm"](agent, fire_at, summary, session_id, cwd, terminal_app)
 
 
 def state_key(agent: str, path: Path) -> str:
@@ -257,7 +277,11 @@ def scan_path(api: dict[str, Any], spec: dict[str, Any], path: Path, state: dict
         scan_json_file(api, spec["agent"], path, state, initial=initial)
 
 
-def prime_state(state: dict[str, dict[str, int]]) -> None:
+def file_age_seconds(stat: os.stat_result) -> float:
+    return max(0.0, time.time() - stat.st_mtime)
+
+
+def reconcile_startup_state(state: dict[str, dict[str, int]]) -> None:
     for spec in WATCH_SPECS:
         for root in spec["paths"]:
             if not root.exists():
@@ -271,7 +295,16 @@ def prime_state(state: dict[str, dict[str, int]]) -> None:
                     stat = path.stat()
                 except FileNotFoundError:
                     continue
-                state.setdefault(state_key(spec["agent"], path), {"offset": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+                key = state_key(spec["agent"], path)
+                prev = state.get(key)
+                recent = file_age_seconds(stat) <= STARTUP_LOOKBACK_SECONDS
+                if prev is None:
+                    state[key] = {
+                        "offset": 0 if recent else stat.st_size,
+                        "mtime_ns": stat.st_mtime_ns,
+                        "backfilled": 1 if recent else 0,
+                    }
+                    continue
 
 
 def scan_once(api: dict[str, Any], state: dict[str, dict[str, int]], initial: bool = False) -> None:
@@ -287,12 +320,30 @@ def scan_once(api: dict[str, Any], state: dict[str, dict[str, int]], initial: bo
                 scan_path(api, spec, path, state, initial=initial)
 
 
-def main() -> int:
+def load_alarm_api_with_mtime() -> tuple[dict[str, Any], int]:
     api = load_alarm_api()
+    try:
+        mtime_ns = ALARM_SCRIPT.stat().st_mtime_ns
+    except FileNotFoundError:
+        mtime_ns = 0
+    return api, mtime_ns
+
+
+def main() -> int:
+    api, alarm_mtime_ns = load_alarm_api_with_mtime()
     state = load_state()
-    prime_state(state)
+    reconcile_startup_state(state)
     save_state(state)
     while True:
+        if not rate_limit_alerts_enabled():
+            time.sleep(POLL_INTERVAL)
+            continue
+        try:
+            current_mtime_ns = ALARM_SCRIPT.stat().st_mtime_ns
+        except FileNotFoundError:
+            current_mtime_ns = 0
+        if current_mtime_ns != alarm_mtime_ns:
+            api, alarm_mtime_ns = load_alarm_api_with_mtime()
         scan_once(api, state)
         save_state(state)
         time.sleep(POLL_INTERVAL)

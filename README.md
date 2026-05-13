@@ -59,6 +59,7 @@ npm run local -- --lan
 - **Thread search** — fuzzy in-sidebar search across all sessions
 - **Mobile-friendly** — slide-in sidebar drawer, back button, safe-area aware
 - **PIN-protected** — simple cookie auth for remote access
+- **Optional rate-limit alerts** — a separate machine runner tails new transcript lines/files and shows persistent macOS applet alerts when a coding agent hits a usage limit
 
 ## Platform support
 
@@ -69,6 +70,7 @@ All platforms are auto-detected from their standard locations — no configurati
 | **Claude Code** | `~/.claude/projects/**/*.jsonl` | JSONL |
 | **Codex** | `~/.codex/sessions/**/*.jsonl` | JSONL event stream |
 | **Cursor** | `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` | SQLite |
+| **Gemini CLI** | `~/.gemini/tmp/**/chats/*.jsonl` | JSONL |
 | **OpenCode** | `~/.local/share/opencode/` | SQLite + JSON |
 | **Hermes** | `~/.hermes/state.db` | SQLite |
 | **Antigravity** | `~/.gemini/antigravity/brain/{uuid}/` | Markdown artifacts |
@@ -81,9 +83,40 @@ All platforms are auto-detected from their standard locations — no configurati
 
 **OpenCode** — reads from `~/.local/share/opencode/opencode.db` (newer releases) with fallback to the flat `storage/` directory layout.
 
+**Gemini CLI** — chat transcripts are read from per-workspace folders under `~/.gemini/tmp/*/chats/`.
+
 **Antigravity** — Google's coding agent stores structured artifacts per session (`task.md`, `implementation_plan.md`, `walkthrough.md`). Each artifact is shown as an assistant message. Full conversation logs use an undisclosed protobuf schema and are not read.
 
 **Hermes** — reads from `~/.hermes/state.db`. Sessions are grouped by source (Telegram channel, WhatsApp number, etc.).
+
+## Optional rate-limit alerts
+
+The rate-limit alert system is intentionally separate from the web app. It installs a user LaunchAgent that tails newly-written transcript lines and newly-created transcript files for Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Hermes, OpenClaw, and related claw agents.
+
+```bash
+npm run rate-limit-watch:launchd-install
+```
+
+If installed from npm or Homebrew, the same global command is available:
+
+```bash
+agent-session-viewer-rate-limit-install
+```
+
+The installer copies the runner into `~/.config/agent-session-viewer/rate-limit/`, so it does not depend on the current repo checkout after installation. Runtime cursors are stored under `~/.local/state/agent-session-viewer-rate-limit/`; alert/app scheduling state is stored under `~/.local/state/agent-rate-limit-alarm/`.
+
+Disable alerts from the Settings panel or by setting:
+
+```bash
+AGENT_SESSION_VIEWER_RATE_LIMIT_ALERTS=0
+```
+
+To remove the LaunchAgent and copied runner:
+
+```bash
+npm run rate-limit-watch:launchd-uninstall
+# or: agent-session-viewer-rate-limit-uninstall
+```
 
 ## Claw bot integration
 

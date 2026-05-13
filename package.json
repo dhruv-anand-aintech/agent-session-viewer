@@ -4,7 +4,10 @@
   "description": "Live multi-platform AI coding session viewer — Claude Code, Cursor, Codex, OpenCode, Hermes, Antigravity",
   "type": "module",
   "bin": {
-    "agent-session-viewer": "bin/agent-session-viewer.mjs"
+    "agent-session-viewer": "bin/agent-session-viewer.mjs",
+    "agent-session-viewer-rate-limit-install": "scripts/install-rate-limit-watch.sh",
+    "agent-session-viewer-rate-limit-uninstall": "scripts/uninstall-rate-limit-watch.sh",
+    "agent-session-viewer-rate-limit-watch": "scripts/rate-limit-transcript-watcher.py"
   },
   "files": [
     "bin/",
@@ -15,7 +18,12 @@
     "setup-local.mjs",
     "shared-utils.mjs",
     "platform-readers.mjs",
-    "daemon/"
+    "daemon/",
+    "scripts/com.dhruvanand.agent-session-viewer.rate-limit-watch.plist",
+    "scripts/install-rate-limit-watch.sh",
+    "scripts/rate-limit-alarm.py",
+    "scripts/rate-limit-transcript-watcher.py",
+    "scripts/uninstall-rate-limit-watch.sh"
   ],
   "keywords": [
     "ai",

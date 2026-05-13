@@ -8,10 +8,10 @@
 	<array>
 		<string>/usr/bin/env</string>
 		<string>python3</string>
-		<string>ROOT_PLACEHOLDER/scripts/rate-limit-transcript-watcher.py</string>
+		<string>RUNNER_DIR_PLACEHOLDER/rate-limit-transcript-watcher.py</string>
 	</array>
 	<key>WorkingDirectory</key>
-	<string>ROOT_PLACEHOLDER</string>
+	<string>RUNNER_DIR_PLACEHOLDER</string>
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
