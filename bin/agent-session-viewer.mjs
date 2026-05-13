@@ -37,7 +37,7 @@ const args     = process.argv.slice(2)
 const hasFlag  = f => args.includes(f)
 const flagValue = f => { const i = args.indexOf(f); return i !== -1 && args[i + 1] ? args[i + 1] : null }
 
-const preferredPort = Number(flagValue("--port") ?? process.env.PORT ?? "3001")
+const preferredPortInput = Number(flagValue("--port") ?? process.env.PORT ?? "3001")
 const skipCache  = hasFlag("--skip-cache")
 const openBrowser = hasFlag("--open")
 const modeLan    = hasFlag("--lan")
@@ -197,17 +197,38 @@ if (!skipCache && existsSync(BUILD_CACHE)) {
   catch { console.warn("Cache build failed — sidebar will populate after first load.") }
 }
 
+// ── Logic: Determine Mode and Configuration ──────────────────────────────────
+
+let choice = null
+let needsExternalBind = modeLan || modeTunnel || modeNgrok
+let useTunnel = modeTunnel
+let useNgrok = modeNgrok
+
+// If no mode flags provided, show interactive TUI
+if (!needsExternalBind && !hasFlag("--host")) {
+  // Probing port on localhost first to show in menu
+  const tempPort = await pickPort(preferredPortInput, "127.0.0.1")
+  choice = await showMenu(tempPort)
+
+  if (choice === "2" || choice === "3" || choice === "4") {
+    needsExternalBind = true
+    if (choice === "3") useTunnel = true
+    if (choice === "4") useNgrok = true
+    
+    // Ask for PIN if not already set in env
+    if (!process.env.AUTH_PIN) {
+      const suggestedPin = generatePin()
+      const userPin = await ask(`Enter PIN for remote access (leave blank for ${suggestedPin})`, "")
+      process.env.AUTH_PIN = userPin || suggestedPin
+    }
+  }
+}
+
+const targetHost = (needsExternalBind || hasFlag("--host")) ? "0.0.0.0" : "127.0.0.1"
+const port = await pickPort(preferredPortInput, targetHost)
+const activePin = process.env.AUTH_PIN ?? (needsExternalBind ? generatePin() : null)
+
 // ── Start local server ────────────────────────────────────────────────────────
-
-// LAN or tunnel mode needs the server accessible externally
-const needsExternalBind = modeLan || modeTunnel || modeNgrok
-const bindToAll = needsExternalBind || hasFlag("--host")
-const targetHost = bindToAll ? "0.0.0.0" : "127.0.0.1"
-
-const port = await pickPort(Number.isFinite(preferredPort) ? preferredPort : 3001, targetHost)
-
-// Auto-generate a PIN for remote flag modes (AUTH_PIN may already be set by user)
-const remoteFlagPin = needsExternalBind && !process.env.AUTH_PIN ? generatePin() : null
 
 const server = spawn(process.execPath, [SERVER], {
   cwd: PKG_ROOT,
@@ -216,7 +237,7 @@ const server = spawn(process.execPath, [SERVER], {
     ...process.env,
     PORT: String(port),
     HOST: targetHost,
-    ...(remoteFlagPin ? { AUTH_PIN: remoteFlagPin } : {}),
+    ...(activePin ? { AUTH_PIN: activePin } : {}),
   },
 })
 server.once("error", err => { console.error(err); process.exit(1) })
@@ -224,103 +245,46 @@ server.once("exit", code => process.exit(code ?? 0))
 process.once("SIGINT", () => { server.kill(); process.exit(130) })
 process.once("SIGTERM", () => { server.kill(); process.exit(143) })
 
+// Give the server a moment to bind before printing/opening
 await new Promise(r => setTimeout(r, 600))
 
-// ── Handle flags / menu ───────────────────────────────────────────────────────
+// ── Post-spawn: Handle Browser / Tunnels ─────────────────────────────────────
 
 let cleanup = null
 
-const activePin = remoteFlagPin ?? process.env.AUTH_PIN ?? null
-
-if (modeLan) {
-  const ip = getLanIp()
-  const url = ip ? `http://${ip}:${port}` : `http://localhost:${port} (LAN IP not found)`
-  printShareBox(url, ["Open this on any device on the same WiFi/Ethernet."], activePin)
-  if (openBrowser && ip) {
-    spawn(process.platform === "darwin" ? "open" : "xdg-open", [url], { detached: true, stdio: "ignore" }).unref()
-  }
-} else if (modeTunnel) {
+if (useTunnel) {
   const t = await startLocaltunnel(port)
   printShareBox(t.url, ["URL changes on each restart (no account needed)"], activePin)
   cleanup = t.close
-} else if (modeNgrok) {
+} else if (useNgrok) {
   const t = await startNgrok(port)
   const notes = t.permanent
     ? ["✓ Permanent — same URL every time"]
     : ["URL changes on restart — add a static domain for permanent URL"]
   printShareBox(t.url, notes, activePin)
   cleanup = t.close
+} else if (needsExternalBind || modeLan) {
+  const ip = getLanIp()
+  const url = ip ? `http://${ip}:${port}` : `http://localhost:${port} (LAN IP not found)`
+  printShareBox(url, ["Open this on any device on the same WiFi/Ethernet."], activePin)
+  if (openBrowser && ip) {
+    spawn(process.platform === "darwin" ? "open" : "xdg-open", [url], { detached: true, stdio: "ignore" }).unref()
+  }
 } else {
-  // Interactive TUI
-  const choice = await showMenu(port)
-
-  if (choice === "1" || choice === "") {
-    const url = `http://localhost:${port}`
+  // Choice 1, 5, or default local
+  const url = `http://localhost:${port}`
+  console.log("\n  ┌──────────────────────────────────────────────────────┐")
+  console.log("  │  Agent Session Viewer (local)                        │")
+  console.log(`  │  ${url.padEnd(52)} │`)
+  if (activePin) {
+    console.log(`  │  PIN: ${activePin.padEnd(47)} │`)
+  }
+  console.log("  └──────────────────────────────────────────────────────┘\n")
+  
+  if (choice === "1" || choice === "" || (openBrowser && !hasFlag("--host"))) {
     const open = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open"
     spawn(open, [url], { detached: true, stdio: "ignore" }).unref()
-  } else if (choice === "2") {
-    // LAN — restart server bound to 0.0.0.0 with PIN
-    server.kill()
-    const menuPin = process.env.AUTH_PIN ?? generatePin()
-    const lanIp = getLanIp()
-    const lanServer = spawn(process.execPath, [SERVER], {
-      cwd: PKG_ROOT,
-      stdio: "inherit",
-      env: { ...process.env, PORT: String(port), HOST: "0.0.0.0", AUTH_PIN: menuPin },
-    })
-    lanServer.once("exit", code => process.exit(code ?? 0))
-    process.once("SIGINT", () => { lanServer.kill(); process.exit(130) })
-    process.once("SIGTERM", () => { lanServer.kill(); process.exit(143) })
-    await new Promise(r => setTimeout(r, 400))
-    const url = lanIp ? `http://${lanIp}:${port}` : `http://localhost:${port}`
-    printShareBox(url, [
-      "Open this on any device on the same WiFi/Ethernet.",
-      "No account or tunnel needed.",
-    ], menuPin)
-  } else if (choice === "3") {
-    // localtunnel — restart server with PIN (was started without external bind)
-    server.kill()
-    const menuPin = process.env.AUTH_PIN ?? generatePin()
-    const tunnelServer = spawn(process.execPath, [SERVER], {
-      cwd: PKG_ROOT,
-      stdio: "inherit",
-      env: { ...process.env, PORT: String(port), HOST: "0.0.0.0", AUTH_PIN: menuPin },
-    })
-    tunnelServer.once("exit", code => process.exit(code ?? 0))
-    process.once("SIGINT", () => { tunnelServer.kill(); process.exit(130) })
-    process.once("SIGTERM", () => { tunnelServer.kill(); process.exit(143) })
-    await new Promise(r => setTimeout(r, 400))
-    const t = await startLocaltunnel(port)
-    printShareBox(t.url, ["URL changes on each restart (no account needed)"], menuPin)
-    cleanup = t.close
-  } else if (choice === "4") {
-    // ngrok — restart server with PIN
-    server.kill()
-    const menuPin = process.env.AUTH_PIN ?? generatePin()
-    const ngrokServer = spawn(process.execPath, [SERVER], {
-      cwd: PKG_ROOT,
-      stdio: "inherit",
-      env: { ...process.env, PORT: String(port), HOST: "0.0.0.0", AUTH_PIN: menuPin },
-    })
-    ngrokServer.once("exit", code => process.exit(code ?? 0))
-    process.once("SIGINT", () => { ngrokServer.kill(); process.exit(130) })
-    process.once("SIGTERM", () => { ngrokServer.kill(); process.exit(143) })
-    await new Promise(r => setTimeout(r, 400))
-    const t = await startNgrok(port)
-    const notes = t.permanent
-      ? ["✓ Permanent — same URL every time"]
-      : ["URL changes on restart — add a static domain for permanent URL"]
-    printShareBox(t.url, notes, menuPin)
-    cleanup = t.close
-  } else {
-    console.log(`\n  Running at http://localhost:${port}\n`)
   }
-}
-
-if (openBrowser && !modeLan) {
-  const url = `http://localhost:${port}`
-  const open = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open"
-  spawn(open, [url], { detached: true, stdio: "ignore" }).unref()
 }
 
 if (cleanup) {
