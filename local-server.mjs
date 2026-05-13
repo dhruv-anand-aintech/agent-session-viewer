@@ -1924,6 +1924,13 @@ function shutdown() {
 process.once("SIGINT", shutdown)
 process.once("SIGTERM", shutdown)
 
+process.on("uncaughtException", err => {
+  console.error(`${ts()} [uncaughtException]`, err.stack || err)
+})
+process.on("unhandledRejection", (reason, promise) => {
+  console.error(`${ts()} [unhandledRejection] at:`, promise, "reason:", reason)
+})
+
 const BIND_HOST = process.env.HOST ?? "127.0.0.1"
 server.listen(PORT, BIND_HOST, () => {
   const displayHost = BIND_HOST === "0.0.0.0" ? "0.0.0.0 (all interfaces)" : "localhost"
