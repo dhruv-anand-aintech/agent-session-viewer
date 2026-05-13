@@ -100,7 +100,7 @@ function ask(question, defaultVal = "") {
 async function startCloudflare(localPort) {
   const untun = await import("untun")
   const startTunnel = untun.startTunnel ?? untun.default?.startTunnel
-  if (!startTunnel) throw new Error("Could not find startTunnel export in untun. Exports: " + Object.keys(untun))
+  if (!startTunnel) throw new Error("Could not find startTunnel export in untun")
   process.stdout.write("  Starting Cloudflare Tunnel… ")
   const tunnel = await startTunnel({ port: localPort })
   const url = await tunnel.getURL()
