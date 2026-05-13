@@ -1250,24 +1250,34 @@ function serveStatic(req, res) {
   if (!existsSync(filePath) || statSync(filePath).isDirectory()) {
     filePath = join(DIST_DIR, "index.html")
   }
+  
+  // Explicitly gate index.html if a PIN is required but not provided via cookie
+  if (basename(filePath) === "index.html" && AUTH_PIN && !checkCookieAuth(req)) {
+    // We still serve index.html because the React app will show PinGate based on /api/capabilities result.
+    // However, if we wanted to be even stricter, we could serve a different small HTML here.
+    // Let's stick to the current SPA-based gating but ensure /api/capabilities is correct.
+  }
+  
   res.writeHead(200, { "Content-Type": MIME[extname(filePath)] ?? "application/octet-stream" })
   createReadStream(filePath).pipe(res)
 }
 
 // --- LanceDB background indexer ---
-// Kick off after a longer delay (10s) so the TUI and tunnels can finish their initial output
-  if (ENABLE_BACKGROUND_INDEXER) {
-  setTimeout(() => {
-    console.log(`${ts()} [lancedb-indexer] startup timer fired`)
-    const getCacheRows = () => loadSidebarCache().sessions.map(e => ({ projectPath: e.projectPath, sessionId: e.id }))
-    console.log(`${ts()} [lancedb-indexer] cache rows:`, getCacheRows().length, "searchRows:", getSearchRows().length)
-    startBackgroundIndexer(
+let _backgroundIndexerStarted = false
+async function triggerBackgroundIndexer() {
+  if (_backgroundIndexerStarted || !ENABLE_BACKGROUND_INDEXER) return
+  _backgroundIndexerStarted = true
+  console.log(`${ts()} [lancedb-indexer] starting background indexing…`)
+  const getCacheRows = () => loadSidebarCache().sessions.map(e => ({ projectPath: e.projectPath, sessionId: e.id }))
+  try {
+    await startBackgroundIndexer(
       getCacheRows,
       (projectPath, sessionId) => getSessionMessagesAll(projectPath, sessionId)
-    ).catch(err => console.warn(`${ts()} [lancedb-indexer] startup error:`, err.message))
-  }, 10000)
-} else {
-  console.log(`${ts()} [lancedb-indexer] background indexing disabled; run 'npm run build-search-index' in a separate terminal`)
+    )
+  } catch (err) {
+    console.warn(`${ts()} [lancedb-indexer] background indexing error:`, err.message)
+    _backgroundIndexerStarted = false
+  }
 }
 
 // --- Event-loop lag detector (temporary debug) ---
@@ -1302,6 +1312,13 @@ const server = http.createServer(async (req, res) => {
   const json = (data, status = 200) => {
     res.writeHead(status, { "Content-Type": "application/json" })
     res.end(JSON.stringify(data))
+  }
+
+  // POST /api/indexer/start — trigger indexer from wrapper
+  if (url.pathname === "/api/indexer/start" && req.method === "POST") {
+    triggerBackgroundIndexer()
+    json({ ok: true })
+    return
   }
 
   // POST /api/login

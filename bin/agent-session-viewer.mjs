@@ -253,6 +253,12 @@ process.once("SIGTERM", () => { server.kill(); process.exit(143) })
 // Give the server a moment to bind before printing/opening
 await new Promise(r => setTimeout(r, 600))
 
+async function triggerServerIndexer() {
+  try {
+    await fetch(`http://127.0.0.1:${port}/api/indexer/start`, { method: "POST" })
+  } catch { /* ignore */ }
+}
+
 // ── Post-spawn: Handle Browser / Tunnels ─────────────────────────────────────
 
 let cleanup = null
@@ -260,6 +266,7 @@ let cleanup = null
 if (useTunnel) {
   const t = await startLocaltunnel(port)
   printShareBox(t.url, ["URL changes on each restart (no account needed)"], activePin)
+  triggerServerIndexer()
   cleanup = t.close
 } else if (useNgrok) {
   const t = await startNgrok(port)
@@ -267,11 +274,13 @@ if (useTunnel) {
     ? ["✓ Permanent — same URL every time"]
     : ["URL changes on restart — add a static domain for permanent URL"]
   printShareBox(t.url, notes, activePin)
+  triggerServerIndexer()
   cleanup = t.close
 } else if (needsExternalBind || modeLan) {
   const ip = getLanIp()
   const url = ip ? `http://${ip}:${port}` : `http://localhost:${port} (LAN IP not found)`
   printShareBox(url, ["Open this on any device on the same WiFi/Ethernet."], activePin)
+  triggerServerIndexer()
   if (openBrowser && ip) {
     spawn(process.platform === "darwin" ? "open" : "xdg-open", [url], { detached: true, stdio: "ignore" }).unref()
   }
@@ -285,6 +294,7 @@ if (useTunnel) {
     console.log(`  │  PIN: ${activePin.padEnd(47)} │`)
   }
   console.log("  └──────────────────────────────────────────────────────┘\n")
+  triggerServerIndexer()
   
   if (choice === "1" || choice === "" || (openBrowser && !hasFlag("--host"))) {
     const open = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open"
