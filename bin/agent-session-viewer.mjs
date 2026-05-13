@@ -20,7 +20,7 @@
  *   --ngrok          start ngrok tunnel, skip menu
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync, openSync } from "node:fs"
 import { randomInt } from "node:crypto"
 import { homedir, networkInterfaces } from "node:os"
 import { join, dirname } from "node:path"
@@ -255,7 +255,7 @@ if (activePin) {
 
 const LOG_FILE = join(CONFIG_DIR, "server.log")
 mkdirSync(CONFIG_DIR, { recursive: true })
-const logStream = require("fs").openSync(LOG_FILE, "a")
+const logStream = openSync(LOG_FILE, "a")
 
 // ... inside spawn options:
 const server = spawn(process.execPath, [SERVER], {
