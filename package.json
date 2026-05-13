@@ -1,6 +1,6 @@
 {
   "name": "agent-session-viewer",
-  "version": "0.1.36",
+  "version": "0.1.37",
   "description": "Live multi-platform AI coding session viewer — Claude Code, Cursor, Codex, OpenCode, Hermes, Antigravity",
   "type": "module",
   "bin": {
@@ -20,6 +20,8 @@
     "platform-readers.mjs",
     "daemon/",
     "scripts/com.dhruvanand.agent-session-viewer.rate-limit-watch.plist",
+    "scripts/gemini-transcript-archive-hook.py",
+    "scripts/install-gemini-transcript-archive-hook.py",
     "scripts/install-rate-limit-watch.sh",
     "scripts/rate-limit-alarm.py",
     "scripts/rate-limit-transcript-watcher.py",

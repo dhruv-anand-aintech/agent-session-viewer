@@ -104,8 +104,42 @@ async function startCloudflare(localPort) {
   process.stdout.write("  Starting Cloudflare Tunnel… ")
   const tunnel = await startTunnel({ port: localPort })
   const url = await tunnel.getURL()
-  console.log("ready.\n")
+  console.log("created.")
+  await waitForRemoteUrl(url, "Cloudflare Tunnel")
   return { url, close: () => tunnel.close() }
+}
+
+async function waitForRemoteUrl(url, label) {
+  const probeUrl = `${url.replace(/\/$/, "")}/api/capabilities`
+  const started = Date.now()
+  let attempt = 0
+  process.stdout.write(`  Waiting for ${label} URL to become reachable`)
+
+  while (Date.now() - started < 60_000) {
+    attempt++
+    try {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 3500)
+      const resp = await fetch(probeUrl, { signal: controller.signal })
+      clearTimeout(timer)
+      if (resp.ok) {
+        const data = await resp.json().catch(() => null)
+        if (data && typeof data === "object" && "pinRequired" in data) {
+          console.log(" ready.\n")
+          return
+        }
+      }
+    } catch { /* tunnel not ready yet */ }
+
+    if (attempt === 1) {
+      process.stdout.write(" — not ready yet")
+    } else {
+      process.stdout.write(".")
+    }
+    await new Promise(r => setTimeout(r, 1500))
+  }
+
+  console.log("\n  URL was created but did not pass the readiness check within 60s.\n")
 }
 
 // ── Tunnel: localtunnel (no account, random URL) ──────────────────────────────

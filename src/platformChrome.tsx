@@ -21,7 +21,7 @@ export function platformIconSrc(source?: string): string | null {
     case "codex": return "https://www.google.com/s2/favicons?sz=64&domain=openai.com"
     case "antigravity": return "https://www.google.com/s2/favicons?sz=64&domain=idx.google.com"
     case "hermes": return "https://www.google.com/s2/favicons?sz=64&domain=nousresearch.com"
-    case "gemini": return "https://www.google.com/s2/favicons?sz=64&domain=google.com"
+    case "gemini": return "https://www.google.com/s2/favicons?sz=64&domain=gemini.google.com"
     case "openclaw": return "https://www.google.com/s2/favicons?sz=64&domain=openclaw.ai"
     default: return null
   }

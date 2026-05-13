@@ -19,6 +19,8 @@ UID_NUM="$(id -u)"
 mkdir -p "$RUNNER_DIR" "$LOG_DIR"
 install -m 755 "$ROOT/scripts/rate-limit-transcript-watcher.py" "$RUNNER_DIR/rate-limit-transcript-watcher.py"
 install -m 755 "$ROOT/scripts/rate-limit-alarm.py" "$RUNNER_DIR/rate-limit-alarm.py"
+install -m 755 "$ROOT/scripts/gemini-transcript-archive-hook.py" "$RUNNER_DIR/gemini-transcript-archive-hook.py"
+python3 "$ROOT/scripts/install-gemini-transcript-archive-hook.py"
 sed -e "s|RUNNER_DIR_PLACEHOLDER|$RUNNER_DIR|g" "$PLIST_SRC" | sed -e "s|LOG_PLACEHOLDER|$LOG_DIR|g" > "$LA_PLIST"
 
 if launchctl print "gui/${UID_NUM}/${LABEL}" &>/dev/null; then

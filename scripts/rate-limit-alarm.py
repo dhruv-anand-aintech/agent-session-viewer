@@ -39,7 +39,16 @@ KEYWORDS = (
 )
 
 LIMIT_SIGNAL_RE = re.compile(
-    r"\b(?:you['’]?ve hit your(?: usage)? limit|rate[_ -]?limit|limit reached)\b",
+    r"\b(?:"
+    r"you(?:['’]?ve| have) hit your(?: usage)? limit|"
+    r"limit reached|"
+    r"(?:rate[_ -]?limit|usage limit|weekly limit|5h limit|quota|model) (?:exceeded|reached|hit|exhausted)|"
+    r"(?:exceeded|reached|hit) (?:the )?(?:rate[_ -]?limit|usage limit|weekly limit|5h limit|quota)|"
+    r"resource exhausted|"
+    r"quota exceeded|"
+    r"model(?: [\w.-]+){0,4} exhausted|"
+    r"429(?: too many requests)?"
+    r")\b",
     re.I,
 )
 TERMINAL_APPS = ("iTerm", "Terminal")
@@ -95,6 +104,7 @@ ISO_RE = re.compile(
     r"\b(?P<iso>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:\d{2})?)\b"
 )
 CLOCK_TIME_RE = re.compile(r"\b(?P<hour>\d{1,2}):(?P<minute>\d{2})(?:\s*(?P<ampm>am|pm))?\b", re.I)
+TIME_RE = CLOCK_TIME_RE
 HOUR_AMPM_RE = re.compile(r"\b(?P<hour>\d{1,2})\s*(?P<ampm>am|pm)\b", re.I)
 MONTH_DAY_RE = re.compile(
     r"\b(?P<month>jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
@@ -352,7 +362,7 @@ def has_explicit_limit_signal(data: Any, text: str) -> bool:
                 if isinstance(credits, dict) and not credits.get("has_credits", True):
                     return True
     for value in collect_strings(data):
-        if isinstance(value, str) and value.strip().lower() in {"rate_limit", "rate limit"}:
+        if isinstance(value, str) and value.strip().lower() == "rate_limit":
             return True
     return False
 

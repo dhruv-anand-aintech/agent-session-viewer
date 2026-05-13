@@ -15,6 +15,7 @@ import { Worker } from "worker_threads"
 import { exec } from "child_process"
 import { stripXml, trimProjectsByRecentSessionCount, countSessionsInProjects } from "./shared-utils.mjs"
 import { loadSessionMessages } from "./lib/session-message-loader.mjs"
+import { isOnDemandSessionPlatform } from "./lib/session-platform-routing.mjs"
 import {
   readCodexSessions,
   CODEX_SESSIONS_ROOT,
@@ -773,7 +774,7 @@ async function streamRecentSidebarInitial(res, maxSessions) {
     let acc = []
 
     // Launch all platform workers immediately so they run concurrently with the Claude scan.
-    const PLATFORMS = ["codex", "opencode", "hermes", "openclaw", "cursor", "cursor-agent", "antigravity"]
+    const PLATFORMS = ["codex", "gemini", "opencode", "hermes", "openclaw", "cursor", "cursor-agent", "antigravity"]
     const _platformT0 = performance.now()
     // pendingWorkers: Map<platform, Promise<{platform, projects}>>
     const pendingWorkers = new Map(
@@ -941,6 +942,9 @@ const msgCache = new Map() // `projectPath/sessionId` → SessionMessage[]
  * If msgCache is cold (e.g. /api/session before /api/projects finished), load on demand.
  */
 function loadSessionMessagesOndemand(projectPath, sessionId) {
+  const shared = loadSessionMessages(projectPath, sessionId)
+  if (Array.isArray(shared)) return shared
+
   if (projectPath.startsWith("cursor:")) {
     try {
       const { msgs } = readCursorSessionMsgs(sessionId)
@@ -977,6 +981,10 @@ function loadSessionMessagesOndemand(projectPath, sessionId) {
     const result = readCodexSessionById(sessionId, null, null)
     if (result?.meta?.projectPath === projectPath && Array.isArray(result.msgs)) return result.msgs
     return null
+  }
+  if (projectPath.startsWith("gemini:")) {
+    const { msgs } = readGeminiSessionMsgs(sessionId)
+    return Array.isArray(msgs) ? msgs : null
   }
   if (projectPath.startsWith("hermes:")) {
     for (const { meta, msgs } of readHermesSessions(null, null)) {
@@ -1678,7 +1686,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Non-Claude platforms: on-demand read via platform-readers
-    const isNonClaude = /^(opencode|codex|hermes|antigravity|cursor-agent|openclaw):/.test(projectPath)
+    const isNonClaude = isOnDemandSessionPlatform(projectPath)
     if (isNonClaude) {
       const t0ondemand = performance.now()
       const ondemand = loadSessionMessagesOndemand(projectPath, sessionId)

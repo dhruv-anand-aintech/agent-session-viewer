@@ -35,7 +35,7 @@ function bsqliteDb(dbPath) {
 /** Like sqliteQuery but uses better-sqlite3 when available (zero subprocess overhead). */
 function bsqliteQuery(dbPath, sql, params = []) {
   const db = bsqliteDb(dbPath)
-  if (!db) return sqliteQuery(dbPath, sql)
+  if (!db) return sqliteQuery(dbPath, sqliteInterpolateParams(sql, params))
   try {
     return db.prepare(sql).all(...params)
   } catch { return [] }
@@ -47,6 +47,19 @@ export function normProjectDir(absDir) {
   // Store actual path so cross-platform grouping can match by real directory.
   // Use the absolute path directly; callers prepend their platform prefix (e.g. "codex:").
   return absDir
+}
+
+function sqliteQuote(value) {
+  if (value == null) return "NULL"
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "NULL"
+  if (typeof value === "boolean") return value ? "1" : "0"
+  return `'${String(value).replaceAll("'", "''")}'`
+}
+
+function sqliteInterpolateParams(sql, params) {
+  if (!params?.length) return sql
+  let i = 0
+  return sql.replace(/\?/g, () => sqliteQuote(params[i++]))
 }
 
 export function sqliteQuery(dbPath, sql, opts = {}) {
@@ -834,6 +847,20 @@ export function readCursorAgentSessions(cacheGet, cacheSet) {
 const OPENCODE_DIR = path.join(homedir(), ".local", "share", "opencode")
 const OPENCODE_DB = path.join(OPENCODE_DIR, "opencode.db")
 const OPENCODE_STORAGE = path.join(OPENCODE_DIR, "storage")
+const _ocSessionColumnCache = new Map()
+
+function ocSessionHasColumn(dbPath, column) {
+  const key = `${dbPath}:${column}`
+  if (_ocSessionColumnCache.has(key)) return _ocSessionColumnCache.get(key)
+  const rows = bsqliteQuery(dbPath, "PRAGMA table_info(session)")
+  const has = rows.some(row => row.name === column)
+  _ocSessionColumnCache.set(key, has)
+  return has
+}
+
+function ocParentSessionId(sessionData) {
+  return sessionData?.parent_id ?? sessionData?.parentID ?? sessionData?.parentId ?? sessionData?.parentSessionId ?? null
+}
 
 function ocPushPartObject(p, parts, fileFallbackId, orderHint) {
   const order = p.time?.start ?? orderHint ?? 0
@@ -895,6 +922,7 @@ export function readOpenCodeSession(sessionFile, cacheGet, cacheSet) {
   if (!sessionData?.id) return null
 
   const sessionId = sessionData.id
+  const parentSessionId = ocParentSessionId(sessionData)
   const updatedAt = sessionData.time?.updated ?? sessionData.time?.created ?? 0
 
   // Count total parts for change detection (updatedAt alone isn't enough)
@@ -929,7 +957,7 @@ export function readOpenCodeSession(sessionFile, cacheGet, cacheSet) {
       type: m.role === "assistant" ? "assistant" : "human",
       sessionId,
       timestamp: m.time?.created ? new Date(m.time.created).toISOString() : new Date().toISOString(),
-      isSidechain: false,
+      isSidechain: !!parentSessionId,
       message: { role: m.role, content },
     }
   })
@@ -947,6 +975,9 @@ export function readOpenCodeSession(sessionFile, cacheGet, cacheSet) {
       firstName: sessionData.title ?? null,
       source: "opencode",
       lastUsedModel: opencodeLastModelFromMessageRows(messages),
+      parentSessionId: parentSessionId ?? undefined,
+      isSidechain: !!parentSessionId,
+      agentType: parentSessionId ? (sessionData.agent ?? "subagent") : undefined,
     },
     msgs: converted,
   }
@@ -967,13 +998,16 @@ function opencodeLastModelFromMessageRows(messages) {
  */
 export function readOpenCodeSessionFromSqlite(dbPath, sessionId, cacheGet, cacheSet) {
   if (!dbPath || !fs.existsSync(dbPath) || !sessionId) return null
+  const parentExpr = ocSessionHasColumn(dbPath, "parent_id") ? "parent_id" : "NULL AS parent_id"
+  const agentExpr = ocSessionHasColumn(dbPath, "agent") ? "agent" : "NULL AS agent"
   const sessRows = bsqliteQuery(
     dbPath,
-    `SELECT id, directory, title, time_updated, time_created, version FROM session WHERE id = ?`,
+    `SELECT id, directory, title, time_updated, time_created, version, ${parentExpr}, ${agentExpr} FROM session WHERE id = ?`,
     [sessionId]
   )
   if (!sessRows.length) return null
   const s = sessRows[0]
+  const parentSessionId = s.parent_id ?? null
   const cnt = bsqliteQuery(
     dbPath,
     `SELECT
@@ -1035,7 +1069,7 @@ export function readOpenCodeSessionFromSqlite(dbPath, sessionId, cacheGet, cache
       type: m.role === "assistant" ? "assistant" : "human",
       sessionId,
       timestamp: m._timeCreated ? new Date(m._timeCreated).toISOString() : new Date().toISOString(),
-      isSidechain: false,
+      isSidechain: !!parentSessionId,
       message: { role: m.role, content },
     }
   })
@@ -1052,6 +1086,9 @@ export function readOpenCodeSessionFromSqlite(dbPath, sessionId, cacheGet, cache
       firstName: s.title || null,
       source: "opencode",
       lastUsedModel: opencodeLastModelFromMessageRows(messages),
+      parentSessionId: parentSessionId ?? undefined,
+      isSidechain: !!parentSessionId,
+      agentType: parentSessionId ? (s.agent || "subagent") : undefined,
     },
     msgs: converted,
   }
@@ -2211,6 +2248,72 @@ function buildGeminiSessionResult(filePath, slug, slugMap, cacheGet, cacheSet, i
   }
 }
 
+function readGeminiHeader(filePath) {
+  try {
+    const fd = fs.openSync(filePath, "r")
+    try {
+      const buf = Buffer.alloc(8192)
+      const bytes = fs.readSync(fd, buf, 0, buf.length, 0)
+      const firstLine = buf.subarray(0, bytes).toString("utf8").split("\n")[0]
+      return firstLine ? JSON.parse(firstLine) : null
+    } finally {
+      fs.closeSync(fd)
+    }
+  } catch {
+    return null
+  }
+}
+
+function countGeminiContentRows(filePath) {
+  try {
+    const lines = fs.readFileSync(filePath, "utf8").split("\n").filter(Boolean)
+    let count = 0
+    for (let i = 1; i < lines.length; i++) {
+      try {
+        const row = JSON.parse(lines[i])
+        if (row.id && row.type && geminiRowHasContent(row)) count++
+      } catch { /* skip */ }
+    }
+    return count
+  } catch {
+    return 0
+  }
+}
+
+function findGeminiSessionFile(sessionId) {
+  if (!fs.existsSync(GEMINI_TMP_ROOT)) return null
+  const candidates = []
+
+  const stack = [{ dir: GEMINI_TMP_ROOT, slug: null }]
+  while (stack.length) {
+    const { dir, slug } = stack.pop()
+    let entries
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { continue }
+
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (!slug) {
+          stack.push({ dir: path.join(full, "chats"), slug: entry.name })
+        } else {
+          stack.push({ dir: full, slug })
+        }
+      } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        const header = readGeminiHeader(full)
+        if (header?.sessionId === sessionId || entry.name.includes(sessionId)) {
+          let st
+          try { st = fs.statSync(full) } catch { st = { mtimeMs: 0 } }
+          candidates.push({ filePath: full, slug, contentRows: countGeminiContentRows(full), mtimeMs: st.mtimeMs })
+        }
+      }
+    }
+  }
+
+  if (!candidates.length) return null
+  candidates.sort((a, b) => (b.contentRows - a.contentRows) || (b.mtimeMs - a.mtimeMs))
+  return candidates[0]
+}
+
 export function readGeminiSessions(cacheGet, cacheSet) {
   const results = []
   if (!fs.existsSync(GEMINI_TMP_ROOT)) return results
@@ -2270,39 +2373,10 @@ export function readGeminiSessionsFull(cacheGet, cacheSet) {
 }
 
 export function readGeminiSessionMsgs(sessionId, { tail = 0, skip = 0 } = {}) {
-  // Find the file first
-  if (!fs.existsSync(GEMINI_TMP_ROOT)) return { msgs: [], total: 0 }
   const slugMap = buildGeminiSlugMap()
-  
-  let targetFile = null
-  let targetSlug = null
-  
-  const stack = [{ dir: GEMINI_TMP_ROOT, slug: null }]
-  while (stack.length && !targetFile) {
-    const { dir, slug } = stack.pop()
-    let entries
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { continue }
-    
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name)
-      if (entry.isDirectory()) {
-        if (!slug) {
-          stack.push({ dir: path.join(full, "chats"), slug: entry.name })
-        } else {
-          stack.push({ dir: full, slug })
-        }
-      } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
-        if (entry.name.includes(sessionId)) {
-          targetFile = full
-          targetSlug = slug
-          break
-        }
-      }
-    }
-  }
-  
-  if (!targetFile) return { msgs: [], total: 0 }
-  const result = buildGeminiSessionResult(targetFile, targetSlug, slugMap, null, null, true)
+  const target = findGeminiSessionFile(sessionId)
+  if (!target) return { msgs: [], total: 0 }
+  const result = buildGeminiSessionResult(target.filePath, target.slug, slugMap, null, null, true)
   if (!result) return { msgs: [], total: 0 }
   
   let msgs = result.msgs
