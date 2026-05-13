@@ -1,10 +1,28 @@
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import "./PinGate.css"
 
 export default function PinGate({ onAuth }: { onAuth: () => void }) {
   const [pin, setPin] = useState("")
   const [error, setError] = useState("")
   const [loading, setLoading] = useState(false)
+  const [checking, setChecking] = useState(true)
+
+  useEffect(() => {
+    async function checkAuth() {
+      try {
+        const r = await fetch("/api/capabilities")
+        const data = await r.json()
+        if (data.authed) {
+          onAuth()
+        } else {
+          setChecking(false)
+        }
+      } catch {
+        setChecking(false)
+      }
+    }
+    checkAuth()
+  }, [onAuth])
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -28,6 +46,8 @@ export default function PinGate({ onAuth }: { onAuth: () => void }) {
     }
     setLoading(false)
   }
+
+  if (checking) return null
 
   return (
     <div className="pin-gate">
