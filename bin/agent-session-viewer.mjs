@@ -253,9 +253,14 @@ if (activePin) {
 
 // ── Start local server ────────────────────────────────────────────────────────
 
+const LOG_FILE = join(CONFIG_DIR, "server.log")
+mkdirSync(CONFIG_DIR, { recursive: true })
+const logStream = require("fs").openSync(LOG_FILE, "a")
+
+// ... inside spawn options:
 const server = spawn(process.execPath, [SERVER], {
   cwd: PKG_ROOT,
-  stdio: "inherit",
+  stdio: ["inherit", logStream, logStream],
   env: {
     ...process.env,
     PORT: String(port),
@@ -263,6 +268,7 @@ const server = spawn(process.execPath, [SERVER], {
     ...(activePin ? { AUTH_PIN: activePin } : {}),
   },
 })
+console.log(`\n  Logs: tail -f ${LOG_FILE}\n`)
 server.once("error", err => { console.error(err); process.exit(1) })
 server.once("exit", code => process.exit(code ?? 0))
 process.once("SIGINT", () => { server.kill(); process.exit(130) })
