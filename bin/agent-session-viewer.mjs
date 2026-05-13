@@ -98,7 +98,9 @@ function ask(question, defaultVal = "") {
 // ── Tunnel: Cloudflare (untun) ───────────────────────────────────────────────
 
 async function startCloudflare(localPort) {
-  const { createTunnel } = await import("untun")
+  const untun = await import("untun")
+  const createTunnel = untun.createTunnel ?? untun.default?.createTunnel
+  if (!createTunnel) throw new Error("Could not find createTunnel export in untun")
   process.stdout.write("  Starting Cloudflare Tunnel… ")
   const tunnel = await createTunnel({ port: localPort })
   const url = await tunnel.getURL()
