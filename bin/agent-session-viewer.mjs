@@ -6,6 +6,7 @@
  *
  *   [local]       http://localhost:PORT          — default, no sharing
  *   [lan]         http://192.168.x.x:PORT        — same WiFi/network, no account
+ *   [cloudflare]  https://xxx.trycloudflare.com  — internet, no account (Cloudflare Tunnel)
  *   [tunnel]      https://xxx.loca.lt            — internet, no account (URL changes on restart)
  *   [ngrok]       https://you.ngrok-free.app     — internet, permanent URL (free ngrok account)
  *
@@ -14,6 +15,7 @@
  *   --open           auto-open browser
  *   --skip-cache     skip sidebar cache pre-build
  *   --lan            bind to 0.0.0.0 and print LAN URL, skip menu
+ *   --cf             start cloudflare tunnel immediately, skip menu
  *   --tunnel         start localtunnel immediately, skip menu
  *   --ngrok          start ngrok tunnel, skip menu
  */
@@ -41,6 +43,7 @@ const preferredPortInput = Number(flagValue("--port") ?? process.env.PORT ?? "30
 const skipCache  = hasFlag("--skip-cache")
 const openBrowser = hasFlag("--open")
 const modeLan    = hasFlag("--lan")
+const modeCf     = hasFlag("--cf") || hasFlag("--cloudflare")
 const modeTunnel = hasFlag("--tunnel")
 const modeNgrok  = hasFlag("--ngrok")
 
@@ -90,6 +93,17 @@ function ask(question, defaultVal = "") {
       resolve(ans.trim() || defaultVal)
     })
   })
+}
+
+// ── Tunnel: Cloudflare (untun) ───────────────────────────────────────────────
+
+async function startCloudflare(localPort) {
+  const { createTunnel } = await import("untun")
+  process.stdout.write("  Starting Cloudflare Tunnel… ")
+  const tunnel = await createTunnel({ port: localPort })
+  const url = await tunnel.getURL()
+  console.log("ready.\n")
+  return { url, close: () => tunnel.close() }
 }
 
 // ── Tunnel: localtunnel (no account, random URL) ──────────────────────────────
@@ -175,15 +189,15 @@ async function showMenu(localPort) {
     console.log(`  [2]  Share on local network — ${lanUrl}`)
     console.log("       (same WiFi/Ethernet, no account needed)")
   }
-  console.log("  [3]  Internet tunnel — localtunnel")
-  console.log("       (free, no account, URL changes on restart)")
+  console.log("  [3]  Internet tunnel — Cloudflare (Highly Reliable)")
+  console.log("  [4]  Internet tunnel — localtunnel")
   if (saved.ngrokToken) {
     const domain = saved.ngrokDomain ?? "random URL"
-    console.log(`  [4]  ngrok — ${domain}`)
+    console.log(`  [5]  ngrok — ${domain}`)
   } else {
-    console.log("  [4]  ngrok — permanent URL (free account, one-time setup)")
+    console.log("  [5]  ngrok — permanent URL (free account, one-time setup)")
   }
-  console.log("  [5]  Just run (no sharing)\n")
+  console.log("  [6]  Just run (no sharing)\n")
 
   const choice = await ask("Choice", "1")
   return choice.trim()
@@ -200,7 +214,8 @@ if (!skipCache && existsSync(BUILD_CACHE)) {
 // ── Logic: Determine Mode and Configuration ──────────────────────────────────
 
 let choice = null
-let needsExternalBind = modeLan || modeTunnel || modeNgrok
+let needsExternalBind = modeLan || modeCf || modeTunnel || modeNgrok
+let useCf = modeCf
 let useTunnel = modeTunnel
 let useNgrok = modeNgrok
 
@@ -210,10 +225,11 @@ if (!needsExternalBind && !hasFlag("--host")) {
   const tempPort = await pickPort(preferredPortInput, "127.0.0.1")
   choice = await showMenu(tempPort)
 
-  if (choice === "2" || choice === "3" || choice === "4") {
+  if (choice === "2" || choice === "3" || choice === "4" || choice === "5") {
     needsExternalBind = true
-    if (choice === "3") useTunnel = true
-    if (choice === "4") useNgrok = true
+    if (choice === "3") useCf = true
+    if (choice === "4") useTunnel = true
+    if (choice === "5") useNgrok = true
     
     // Ask for PIN if not already set in env
     if (!process.env.AUTH_PIN) {
@@ -263,7 +279,12 @@ async function triggerServerIndexer() {
 
 let cleanup = null
 
-if (useTunnel) {
+if (useCf) {
+  const t = await startCloudflare(port)
+  printShareBox(t.url, ["Powered by Cloudflare Tunnel", "No account needed"], activePin)
+  triggerServerIndexer()
+  cleanup = t.close
+} else if (useTunnel) {
   const t = await startLocaltunnel(port)
   printShareBox(t.url, ["URL changes on each restart (no account needed)"], activePin)
   triggerServerIndexer()
@@ -285,7 +306,7 @@ if (useTunnel) {
     spawn(process.platform === "darwin" ? "open" : "xdg-open", [url], { detached: true, stdio: "ignore" }).unref()
   }
 } else {
-  // Choice 1, 5, or default local
+  // Choice 1, 6, or default local
   const url = `http://localhost:${port}`
   console.log("\n  ┌──────────────────────────────────────────────────────┐")
   console.log("  │  Agent Session Viewer (local)                        │")
