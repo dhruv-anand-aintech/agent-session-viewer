@@ -42,6 +42,9 @@ import {
   OPENCLAW_ROOT,
   findOpenclawSessionFile,
   findCodexSessionFile,
+  readGeminiSessions,
+  readGeminiSessionMsgs,
+  GEMINI_TMP_ROOT,
 } from "./platform-readers.mjs"
 import { buildSidebarSearchDoc, runSidebarSessionSearch, runThreadKeywordSearch } from "./lib/session-search-core.mjs"
 import { indexSession, removeSession, getSearchRows } from "./lib/search-index.mjs"
@@ -128,6 +131,13 @@ function resolveProjectDir(projectPath) {
   if (projectPath === "cursor:cursor-unknown") return join(homedir(), ".cursor", "no-workspace")
   if (projectPath === "cursor-agent:/empty/window") return join(homedir(), ".cursor", "no-workspace")
   if (projectPath === "cursor-agent:empty-window") return join(homedir(), ".cursor", "no-workspace")
+
+  // gemini: absolute path
+  if (projectPath.startsWith("gemini:")) {
+    const p = projectPath.slice(7)
+    if (p.startsWith("/")) return p
+    // fall through to legacy encoded path handling
+  }
 
   // Modern platform-prefixed with absolute path: "prefix:/actual/path"
   const absMatch = projectPath.match(/^[a-z-]+:(\/.+)$/)
@@ -559,6 +569,7 @@ async function loadProjectsFull() {
     ...loadCodexSessions(),
     ...loadCursorSessions(),
     ...loadCursorAgentSessions(),
+    ...loadGeminiSessions(),
     ...loadOpenCodeSessions(),
     ...await loadAntigravitySessions(),
     ...loadHermesSessions(),
@@ -889,6 +900,7 @@ async function loadProjectsBundleRecent(maxSessions) {
     ...loadCodexSessions(),
     ...loadCursorSessions(),
     ...loadCursorAgentSessions(),
+    ...loadGeminiSessions(),
     ...loadOpenCodeSessions(),
     ...await loadAntigravitySessions(),
     ...loadHermesSessions(),
@@ -1049,6 +1061,11 @@ function loadCodexSessions() {
 function loadCursorAgentSessions() {
   if (!existsSync(CURSOR_PROJECTS_ROOT)) return []
   return resultsToProjects(readCursorAgentSessions(null, null), "cursor-agent")
+}
+
+function loadGeminiSessions() {
+  if (!existsSync(GEMINI_TMP_ROOT)) return []
+  return resultsToProjects(readGeminiSessions(null, null), "gemini")
 }
 
 // ── OpenCode sessions ──────────────────────────────────────────────────────────

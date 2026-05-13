@@ -45,6 +45,8 @@ import {
   readAntigravityRpcSessions,
   HERMES_DB,
   readHermesSessions,
+  readGeminiSessionsFull,
+  GEMINI_TMP_ROOT,
 } from "../platform-readers.mjs"
 
 // ── Persistent sync cache ─────────────────────────────────────────────────────
@@ -86,6 +88,7 @@ const sc = {
   opencode: { get: k => scGet(`oc:${k}`), set: (k, v) => scSet(`oc:${k}`, v), del: k => scDel(`oc:${k}`) },
   antigravity: { get: k => scGet(`ag:${k}`), set: (k, v) => scSet(`ag:${k}`, v), del: k => scDel(`ag:${k}`) },
   hermes: { get: k => scGet(`h:${k}`), set: (k, v) => scSet(`h:${k}`, v) },
+  gemini: { get: k => scGet(`g:${k}`), set: (k, v) => scSet(`g:${k}`, v) },
 }
 
 loadSyncCache()
@@ -919,6 +922,57 @@ function startCursorAgentWatcher() {
   log(`Watching Cursor CLI transcripts at ${CURSOR_PROJECTS_ROOT}`)
 }
 
+// ── Gemini sessions ───────────────────────────────────────────────────────────
+
+async function syncGeminiResult(result) {
+  try {
+    const resp = await fetch(`${WORKER_URL}/api/sync`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "X-Auth-Pin": AUTH_PIN },
+      body: JSON.stringify(result),
+    })
+    if (resp.ok) {
+      log(`✓ gemini ${result.meta.projectPath}/${String(result.meta.id).slice(0, 8)} (${result.msgs.length} msgs)`)
+    } else {
+      log(`✗ gemini sync failed ${resp.status}`)
+    }
+  } catch (e) {
+    log(`✗ gemini fetch error: ${e.message}`)
+  }
+}
+
+async function initialSyncGemini() {
+  if (!fs.existsSync(GEMINI_TMP_ROOT)) {
+    log("Gemini CLI tmp chats not found — Gemini sync disabled")
+    return
+  }
+  const results = readGeminiSessionsFull(
+    id => sc.gemini.get(id),
+    (id, v) => sc.gemini.set(id, v)
+  )
+  for (const result of results) {
+    await syncGeminiResult(result)
+  }
+  log(`Gemini: synced ${results.length} session(s)`)
+}
+
+function startGeminiWatcher() {
+  if (!fs.existsSync(GEMINI_TMP_ROOT)) return
+  watch(GEMINI_TMP_ROOT, { recursive: true }, (_event, filename) => {
+    if (!filename?.endsWith(".jsonl")) return
+    const full = path.join(GEMINI_TMP_ROOT, filename)
+    if (!fs.existsSync(full)) return
+
+    // Re-read all sessions to find the one that changed
+    const results = readGeminiSessionsFull(
+      id => sc.gemini.get(id),
+      (id, v) => sc.gemini.set(id, v)
+    )
+    results.forEach(result => syncGeminiResult(result).catch(() => {}))
+  })
+  log(`Watching Gemini tmp at ${GEMINI_TMP_ROOT}`)
+}
+
 // ── Codex adaptor (via platform-readers.mjs) ─────────────────────────────────
 
 async function syncCodexResult(result) {
@@ -1144,6 +1198,7 @@ await initialSyncCodex()
 await initialSyncAntigravity()
 await initialSyncCursor()
 await initialSyncCursorAgent()
+await initialSyncGemini()
 await initialSyncOpenCode()
 await initialSyncHermes()
 
@@ -1167,6 +1222,7 @@ startCodexWatcher()
 startAntigravityWatcher()
 startCursorWatcher()
 startCursorAgentWatcher()
+startGeminiWatcher()
 startOpenCodeWatcher()
 startHermesWatcher()
 

@@ -2023,3 +2023,292 @@ export function readOpenclawSessions(cacheGet, cacheSet) {
   }
   return results
 }
+
+// ── Gemini CLI ────────────────────────────────────────────────────────────────
+//
+// Gemini CLI stores sessions as JSONL under:
+//   ~/.gemini/tmp/<workspace-slug>/chats/session-<iso>-<id>.jsonl
+//   Subagents: .../chats/<parentId>/<childId>.jsonl
+//
+// JSONL record types:
+//   { sessionId, projectHash, startTime, lastUpdated, kind }  — session header (first line)
+//   { id, timestamp, type: "user" | "gemini", content, thoughts, toolCalls, model } — message
+//   { $set: { lastUpdated } } — metadata update
+
+export const GEMINI_ROOT = path.join(homedir(), ".gemini")
+export const GEMINI_TMP_ROOT = path.join(GEMINI_ROOT, "tmp")
+export const GEMINI_PROJECTS_JSON = path.join(GEMINI_ROOT, "projects.json")
+
+function buildGeminiSlugMap() {
+  if (!fs.existsSync(GEMINI_PROJECTS_JSON)) return new Map()
+  try {
+    const data = JSON.parse(fs.readFileSync(GEMINI_PROJECTS_JSON, "utf8"))
+    const map = new Map()
+    if (data.projects) {
+      for (const [abs, slug] of Object.entries(data.projects)) {
+        map.set(slug, abs)
+      }
+    }
+    return map
+  } catch {
+    return new Map()
+  }
+}
+
+function parseGeminiMessageContent(content) {
+  if (typeof content === "string") return content.trim()
+  if (Array.isArray(content)) {
+    const parts = []
+    for (const block of content) {
+      if (block?.text) parts.push(block.text)
+    }
+    return parts.join("\n\n").trim()
+  }
+  return ""
+}
+
+function geminiRowHasContent(row) {
+  const text = parseGeminiMessageContent(row.content)
+  if (text) return true
+  if (row.thoughts && Array.isArray(row.thoughts) && row.thoughts.length > 0) return true
+  if (row.toolCalls && Array.isArray(row.toolCalls) && row.toolCalls.length > 0) return true
+  return false
+}
+
+function buildGeminiSessionResult(filePath, slug, slugMap, cacheGet, cacheSet, isFull = false) {
+  let st
+  try { st = fs.statSync(filePath) } catch { return null }
+  const cacheVal = `${st.mtimeMs}:${st.size}`
+  if (cacheGet && cacheGet(filePath) === cacheVal) return null
+
+  let lines
+  try { lines = fs.readFileSync(filePath, "utf8").trim().split("\n").filter(Boolean) } catch { return null }
+  if (!lines.length) return null
+
+  let header = {}
+  try { header = JSON.parse(lines[0]) } catch { return null }
+  if (!header.sessionId) return null
+
+  if (!isFull) {
+    // Metadata only
+    const absPath = slugMap.get(slug) || `/tmp/gemini/${slug}`
+    const projectPath = `gemini:${absPath}`
+    const lastActivity = header.lastUpdated || header.startTime || new Date(st.mtimeMs).toISOString()
+    
+    // Quick scan for first user message text
+    let firstName = null
+    for (let i = 1; i < Math.min(lines.length, 20); i++) {
+      try {
+        const row = JSON.parse(lines[i])
+        if (row.type === "user") {
+          const text = parseGeminiMessageContent(row.content)
+          if (text) {
+            firstName = text.replace(/\s+/g, " ").trim().slice(0, 80)
+            break
+          }
+        }
+      } catch { continue }
+    }
+
+    if (cacheSet) cacheSet(filePath, cacheVal)
+    return {
+      meta: {
+        id: header.sessionId,
+        projectPath,
+        messageCount: lines.length - 1, // rough estimate
+        userMessageCount: null,
+        lastActivity,
+        isActive: Date.now() - st.mtimeMs < 5 * 60 * 1000,
+        firstName,
+        source: "gemini",
+        isSidechain: header.kind === "subagent",
+        agentType: header.kind === "subagent" ? "subagent" : undefined,
+      },
+      msgs: [],
+    }
+  }
+
+  // Full loading
+  const msgs = []
+  for (let i = 1; i < lines.length; i++) {
+    let row
+    try { row = JSON.parse(lines[i]) } catch { continue }
+    if (row.id && row.type) {
+      const role = row.type === "gemini" ? "assistant" : "user"
+      const content = []
+      
+      if (row.thoughts && Array.isArray(row.thoughts)) {
+        for (const t of row.thoughts) {
+          content.push({ type: "thinking", thinking: t.description || t.text || "" })
+        }
+      }
+
+      if (row.toolCalls && Array.isArray(row.toolCalls)) {
+        for (const tc of row.toolCalls) {
+          const id = tc.id || `gemini-tool-${row.id}-${content.length}`
+          content.push({
+            type: "tool_use",
+            id,
+            name: tc.name || "tool",
+            input: tc.args || {},
+          })
+          if (tc.result && Array.isArray(tc.result)) {
+            for (const res of tc.result) {
+              const resContent = res.functionResponse?.response?.output || res.functionResponse?.response || ""
+              content.push({
+                type: "tool_result",
+                tool_use_id: id,
+                content: typeof resContent === "string" ? resContent : JSON.stringify(resContent),
+              })
+            }
+          }
+        }
+      }
+      
+      const text = parseGeminiMessageContent(row.content)
+      if (text) content.push({ type: "text", text })
+      
+      if (content.length === 0 && role === "assistant") continue 
+      
+      msgs.push({
+        uuid: `gemini-${header.sessionId}-${row.id}`,
+        parentUuid: msgs.length > 0 ? msgs[msgs.length - 1].uuid : null,
+        type: role === "assistant" ? "assistant" : "human",
+        sessionId: header.sessionId,
+        timestamp: row.timestamp || header.startTime || new Date(st.mtimeMs).toISOString(),
+        isSidechain: false,
+        message: { role, content: content.length === 1 && content[0].type === "text" ? content[0].text : content },
+      })
+    }
+  }
+
+  if (cacheSet) cacheSet(filePath, cacheVal)
+  if (!msgs.length) return null
+
+  const absPath = slugMap.get(slug) || `/tmp/gemini/${slug}`
+  const projectPath = `gemini:${absPath}`
+  
+  const firstUserMsg = msgs.find(m => m.message?.role === "user")
+  const firstText = typeof firstUserMsg?.message?.content === "string" 
+    ? firstUserMsg.message.content 
+    : (Array.isArray(firstUserMsg?.message?.content) ? firstUserMsg.message.content.find(b => b.type === "text")?.text : null)
+  const firstName = firstText ? firstText.replace(/\s+/g, " ").trim().slice(0, 80) : null
+
+  return {
+    meta: {
+      id: header.sessionId,
+      projectPath,
+      messageCount: msgs.length,
+      userMessageCount: msgs.filter(m => m.type === "human").length,
+      lastActivity: header.lastUpdated || msgs[msgs.length - 1]?.timestamp || new Date(st.mtimeMs).toISOString(),
+      isActive: Date.now() - st.mtimeMs < 5 * 60 * 1000,
+      firstName,
+      source: "gemini",
+      isSidechain: header.kind === "subagent",
+      agentType: header.kind === "subagent" ? "subagent" : undefined,
+    },
+    msgs,
+  }
+}
+
+export function readGeminiSessions(cacheGet, cacheSet) {
+  const results = []
+  if (!fs.existsSync(GEMINI_TMP_ROOT)) return results
+  const slugMap = buildGeminiSlugMap()
+  
+  const stack = [{ dir: GEMINI_TMP_ROOT, slug: null }]
+  while (stack.length) {
+    const { dir, slug } = stack.pop()
+    let entries
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { continue }
+    
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (!slug) {
+          // Top level directory is a slug
+          stack.push({ dir: path.join(full, "chats"), slug: entry.name })
+        } else {
+          // Subdirectory under chats might be a parent session ID
+          stack.push({ dir: full, slug })
+        }
+      } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        const result = buildGeminiSessionResult(full, slug, slugMap, cacheGet, cacheSet, false)
+        if (result) results.push(result)
+      }
+    }
+  }
+  return results
+}
+
+export function readGeminiSessionsFull(cacheGet, cacheSet) {
+  const results = []
+  if (!fs.existsSync(GEMINI_TMP_ROOT)) return results
+  const slugMap = buildGeminiSlugMap()
+  
+  const stack = [{ dir: GEMINI_TMP_ROOT, slug: null }]
+  while (stack.length) {
+    const { dir, slug } = stack.pop()
+    let entries
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { continue }
+    
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (!slug) {
+          stack.push({ dir: path.join(full, "chats"), slug: entry.name })
+        } else {
+          stack.push({ dir: full, slug })
+        }
+      } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        const result = buildGeminiSessionResult(full, slug, slugMap, cacheGet, cacheSet, true)
+        if (result) results.push(result)
+      }
+    }
+  }
+  return results
+}
+
+export function readGeminiSessionMsgs(sessionId, { tail = 0, skip = 0 } = {}) {
+  // Find the file first
+  if (!fs.existsSync(GEMINI_TMP_ROOT)) return { msgs: [], total: 0 }
+  const slugMap = buildGeminiSlugMap()
+  
+  let targetFile = null
+  let targetSlug = null
+  
+  const stack = [{ dir: GEMINI_TMP_ROOT, slug: null }]
+  while (stack.length && !targetFile) {
+    const { dir, slug } = stack.pop()
+    let entries
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { continue }
+    
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (!slug) {
+          stack.push({ dir: path.join(full, "chats"), slug: entry.name })
+        } else {
+          stack.push({ dir: full, slug })
+        }
+      } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        if (entry.name.includes(sessionId)) {
+          targetFile = full
+          targetSlug = slug
+          break
+        }
+      }
+    }
+  }
+  
+  if (!targetFile) return { msgs: [], total: 0 }
+  const result = buildGeminiSessionResult(targetFile, targetSlug, slugMap, null, null, true)
+  if (!result) return { msgs: [], total: 0 }
+  
+  let msgs = result.msgs
+  const total = msgs.length
+  if (tail > 0) {
+    msgs = msgs.slice(Math.max(0, total - skip - tail), total - skip)
+  }
+  return { msgs, total }
+}

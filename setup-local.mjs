@@ -24,6 +24,7 @@ const PLATFORMS = [
   { label: "OpenCode",     path: join(homedir(), ".local", "share", "opencode") },
   { label: "Hermes",       path: join(homedir(), ".hermes", "state.db") },
   { label: "Antigravity",  path: join(homedir(), ".gemini", "antigravity", "brain") },
+  { label: "Gemini CLI",    path: join(homedir(), ".gemini", "tmp") },
   { label: "Cursor",       path: join(homedir(), "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb") },
 ]
 

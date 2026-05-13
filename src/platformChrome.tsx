@@ -7,6 +7,7 @@ export function platformIconLabel(source?: string): string {
     case "antigravity": return "Antigravity"
     case "hermes": return "Hermes"
     case "codex": return "Codex"
+    case "gemini": return "Gemini"
     case "openclaw": return "Openclaw"
     default: return "Claude"
   }
@@ -20,6 +21,7 @@ export function platformIconSrc(source?: string): string | null {
     case "codex": return "https://www.google.com/s2/favicons?sz=64&domain=openai.com"
     case "antigravity": return "https://www.google.com/s2/favicons?sz=64&domain=idx.google.com"
     case "hermes": return "https://www.google.com/s2/favicons?sz=64&domain=nousresearch.com"
+    case "gemini": return "https://www.google.com/s2/favicons?sz=64&domain=google.com"
     case "openclaw": return "https://www.google.com/s2/favicons?sz=64&domain=openclaw.ai"
     default: return null
   }
@@ -31,6 +33,7 @@ export function platformFallbackGlyph(source?: string): string {
     case "opencode": return "</>"
     case "antigravity": return "◌"
     case "hermes": return "⚚"
+    case "gemini": return "♊"
     case "codex": return "{}"
     case "openclaw": return "🐾"
     default: return "C"
@@ -68,6 +71,7 @@ export const PLATFORM_FILTER_ACTIVE: Record<string, string> = {
   opencode: "active-opencode",
   antigravity: "active-antigravity",
   hermes: "active-hermes",
+  gemini: "active-gemini",
   openclaw: "active-openclaw",
 }
 

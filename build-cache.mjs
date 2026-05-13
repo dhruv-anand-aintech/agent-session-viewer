@@ -23,9 +23,11 @@ import {
   readCursorAgentSessions,
   iterOpenCodeSessions,
   readHermesSessions,
+  readGeminiSessions,
   CODEX_SESSIONS_ROOT,
   CURSOR_PROJECTS_ROOT,
   HERMES_DB,
+  GEMINI_TMP_ROOT,
 } from "./platform-readers.mjs"
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
@@ -193,6 +195,7 @@ const ocCacheSet = (id, val) => { _ocReaderCache[id] = val }
 try { ingestResults(readCursorSessions(), "cursor", "Cursor") } catch { /* db not present */ }
 try { if (existsSync(CODEX_SESSIONS_ROOT)) ingestResults(readCodexSessions(null, null), "codex", "Codex") } catch { /* ignore */ }
 try { if (existsSync(CURSOR_PROJECTS_ROOT)) ingestResults(readCursorAgentSessions(null, null), "cursor-agent", "Cursor agent") } catch { /* ignore */ }
+try { if (existsSync(GEMINI_TMP_ROOT)) ingestResults(readGeminiSessions(null, null), "gemini", "Gemini CLI") } catch { /* ignore */ }
 try {
   const ocResults = [...iterOpenCodeSessions(ocCacheGet, ocCacheSet)].map(x => {
     if (x.result) return x.result

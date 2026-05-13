@@ -48,7 +48,11 @@
     "daemon": "node daemon/watch.mjs",
     "daemon:launchd-install": "bash scripts/install-launchd-daemon.sh",
     "daemon:launchd-uninstall": "bash scripts/uninstall-launchd-daemon.sh",
-    "daemon:launchd-restart": "bash -c 'launchctl kickstart -k gui/$(id -u)/com.dhruvanand.agent-session-viewer.daemon'"
+    "daemon:launchd-restart": "bash -c 'launchctl kickstart -k gui/$(id -u)/com.dhruvanand.agent-session-viewer.daemon'",
+    "rate-limit-watch": "python3 scripts/rate-limit-transcript-watcher.py",
+    "rate-limit-watch:launchd-install": "bash scripts/install-rate-limit-watch.sh",
+    "rate-limit-watch:launchd-uninstall": "bash scripts/uninstall-rate-limit-watch.sh",
+    "rate-limit-watch:launchd-restart": "bash -c 'launchctl kickstart -k gui/$(id -u)/com.dhruvanand.agent-session-viewer.rate-limit-watch'"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
