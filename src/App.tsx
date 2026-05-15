@@ -5,6 +5,7 @@ import { useProjects, useCapabilities } from "./useProjects"
 import { SessionPane } from "./SessionPane"
 import { Sidebar } from "./Sidebar"
 import { SettingsModal } from "./SettingsModal"
+import { UsageLimits } from "./UsageLimits"
 import { wallClock } from "./utils"
 import "./App.css"
 
@@ -52,6 +53,9 @@ export default function App() {
   })
   const [showSettings, setShowSettings] = useState(false)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
+  const [tab, setTab] = useState<"sessions" | "usage">(() =>
+    window.location.hash === "#usage" ? "usage" : "sessions"
+  )
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = localStorage.getItem("sidebarWidth")
     return saved ? Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Number(saved))) : SIDEBAR_DEFAULT
@@ -123,11 +127,20 @@ export default function App() {
       : null)
   const effectiveProjectPath = canonicalProjectPath ?? activeProjectPath
 
+  const switchTab = (t: "sessions" | "usage") => {
+    setTab(t)
+    history.replaceState(null, "", t === "usage" ? "#usage" : window.location.pathname + window.location.search)
+  }
+
   return (
     <div className="app">
       <header className="topbar">
-        <button className="topbar-menu-btn" onClick={() => setMobileSidebarOpen(o => !o)} title="Sessions">☰</button>
-        <span className="topbar-title">Agent Session Viewer</span>
+        <button className="topbar-menu-btn" onClick={() => setMobileSidebarOpen(o => !o)} title="Sessions"
+          style={{ visibility: tab === "sessions" ? "visible" : "hidden" }}>☰</button>
+        <nav className="topbar-tabs">
+          <button className={`topbar-tab${tab === "sessions" ? " active" : ""}`} onClick={() => switchTab("sessions")}>Sessions</button>
+          <button className={`topbar-tab${tab === "usage" ? " active" : ""}`} onClick={() => switchTab("usage")}>Usage</button>
+        </nav>
         <span className={`conn-badge ${connected ? "conn-on" : "conn-off"}`}>
           {connected ? "● Live" : "○ Polling"}
         </span>
@@ -135,33 +148,36 @@ export default function App() {
       </header>
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
       <div className="main">
-        <>
-          <Sidebar
-            projects={projects}
-            projectsLoading={projectsLoading}
-            totalSessions={totalSessions}
-            listMode={listMode}
-            sessionsTruncated={sessionsTruncated}
-            onLoadAllSessions={loadAllSessions}
-            activeSessionId={activeSessionId}
-            onSelect={(p, s) => setSelected({ project: p, session: s })}
-            width={sidebarWidth}
-            onDragStart={onDragStart}
-            mobileOpen={mobileSidebarOpen}
-            onMobileClose={() => setMobileSidebarOpen(false)}
-          />
-          <div className="content">
-            {effectiveMeta && effectiveProjectPath
-              ? <SessionPane
-                  key={effectiveMeta.id}
-                  projectDir={effectiveProjectPath}
-                  sessionMeta={effectiveMeta}
-                  onBack={() => setMobileSidebarOpen(true)}
-                  capabilities={capabilities}
-                />
-              : <div className="empty-state">Select a session from the sidebar</div>}
-          </div>
-        </>
+        {tab === "usage"
+          ? <UsageLimits />
+          : <>
+              <Sidebar
+                projects={projects}
+                projectsLoading={projectsLoading}
+                totalSessions={totalSessions}
+                listMode={listMode}
+                sessionsTruncated={sessionsTruncated}
+                onLoadAllSessions={loadAllSessions}
+                activeSessionId={activeSessionId}
+                onSelect={(p, s) => setSelected({ project: p, session: s })}
+                width={sidebarWidth}
+                onDragStart={onDragStart}
+                mobileOpen={mobileSidebarOpen}
+                onMobileClose={() => setMobileSidebarOpen(false)}
+              />
+              <div className="content">
+                {effectiveMeta && effectiveProjectPath
+                  ? <SessionPane
+                      key={effectiveMeta.id}
+                      projectDir={effectiveProjectPath}
+                      sessionMeta={effectiveMeta}
+                      onBack={() => setMobileSidebarOpen(true)}
+                      capabilities={capabilities}
+                    />
+                  : <div className="empty-state">Select a session from the sidebar</div>}
+              </div>
+            </>
+        }
       </div>
     </div>
   )

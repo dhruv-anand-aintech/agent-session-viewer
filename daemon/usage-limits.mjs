@@ -23,8 +23,8 @@
 
 import fs from "node:fs"
 import path from "node:path"
-import { homedir } from "node:os"
-import { createRequire } from "node:module"
+import { homedir, tmpdir } from "node:os"
+import { execSync } from "node:child_process"
 
 // ── Config (lazy — read at call time so .env loaded by watch.mjs takes effect) ─
 
@@ -243,21 +243,24 @@ async function pollCodex() {
 // ── Cursor ────────────────────────────────────────────────────────────────────
 
 function readCursorAuth() {
-  // Try known locations for Cursor access token + user ID
-  const candidates = [
-    path.join(homedir(), ".cursor", "mcp.json"),
-    path.join(homedir(), "Library", "Application Support", "Cursor", "User", "globalStorage", "storage.json"),
-  ]
-  for (const f of candidates) {
-    if (!fs.existsSync(f)) continue
+  const vscdb = path.join(homedir(), "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb")
+  if (fs.existsSync(vscdb)) {
     try {
-      const d = JSON.parse(fs.readFileSync(f, "utf8"))
-      const token  = d["cursorAuth/accessToken"] ?? d.access_token ?? ""
-      const userId = d["cursorAuth/cachedUserId"] ?? d.user_id ?? ""
+      const tmpScript = path.join(tmpdir(), "_cursor_auth.py")
+      fs.writeFileSync(tmpScript, [
+        "import sqlite3,base64,json",
+        `con=sqlite3.connect(${JSON.stringify(vscdb)})`,
+        `row=con.execute("SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken'").fetchone()`,
+        "t=row[0] if row else ''",
+        "parts=t.split('.')",
+        "p=json.loads(base64.urlsafe_b64decode(parts[1]+'===')) if len(parts)>1 else {}",
+        "print(json.dumps({'token':t,'userId':p.get('sub','')}))",
+      ].join("\n"))
+      const out = execSync(`python3 "${tmpScript}"`, { encoding: "utf8" }).trim()
+      const { token, userId } = JSON.parse(out)
       if (token && userId) return { token, userId }
     } catch {}
   }
-  // env fallback
   const token  = process.env.CURSOR_ACCESS_TOKEN ?? ""
   const userId = process.env.CURSOR_USER_ID ?? ""
   if (token && userId) return { token, userId }

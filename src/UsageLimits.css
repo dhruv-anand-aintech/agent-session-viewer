@@ -1,0 +1,136 @@
+/* ── Usage Limits tab ─────────────────────────────────────────────────────── */
+
+.ul-root {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+  background: var(--bg-200);
+}
+
+.ul-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.ul-toolbar-label {
+  font-size: 12px;
+  color: var(--text-400);
+}
+
+.ul-refresh-btn {
+  background: var(--bg-000);
+  border: 1px solid var(--border-100);
+  color: var(--text-300);
+  padding: 5px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: var(--font-ui);
+  transition: color 0.15s;
+}
+.ul-refresh-btn:hover { color: var(--text-000); }
+.ul-refresh-btn.ul-loading { opacity: 0.5; pointer-events: none; }
+
+.ul-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+/* ── Cards ─────────────────────────────────────────────────────────────────── */
+
+.ul-card {
+  background: var(--bg-100);
+  border: 1px solid var(--border-100);
+  border-radius: 12px;
+  padding: 20px;
+  position: relative;
+  overflow: hidden;
+  transition: opacity 0.15s;
+  --accent: var(--text-400);
+}
+
+.ul-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+  background: var(--accent);
+}
+
+.ul-card-claude    { --accent: var(--color-claude); }
+.ul-card-cursor    { --accent: var(--color-cursor); }
+.ul-card-codex     { --accent: hsl(160, 60%, 45%); }
+.ul-card-opencode  { --accent: var(--color-opencode); }
+.ul-card-gemini    { --accent: hsl(215, 70%, 60%); }
+.ul-card-antigravity { --accent: var(--color-antigravity); }
+.ul-refreshing     { opacity: 0.5; }
+
+.ul-card-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.ul-card-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.ul-card-title    { font-size: 14px; font-weight: 600; color: var(--text-000); }
+.ul-card-subtitle { font-size: 11px; color: var(--text-400); margin-top: 2px; }
+
+/* ── Bars ───────────────────────────────────────────────────────────────────── */
+
+.ul-bar-wrap  { margin: 10px 0; }
+.ul-bar-label { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-400); margin-bottom: 5px; }
+.ul-bar-track { height: 5px; background: var(--bg-300); border-radius: 99px; overflow: hidden; }
+.ul-bar-fill  { height: 100%; border-radius: 99px; background: var(--accent); transition: width 0.5s ease; }
+.ul-bar-fill.warn   { background: hsl(38, 92%, 50%); }
+.ul-bar-fill.danger { background: hsl(0, 78%, 60%); }
+
+/* ── Stats ──────────────────────────────────────────────────────────────────── */
+
+.ul-stat-row  { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+.ul-stat-label { font-size: 12px; color: var(--text-400); }
+.ul-stat-value { font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--text-100); }
+
+/* ── Error / hint ───────────────────────────────────────────────────────────── */
+
+.ul-error { font-size: 12px; color: var(--text-400); padding: 4px 0; }
+.ul-hint  { font-size: 11px; color: var(--text-400); padding: 4px 0; font-style: italic; }
+
+/* ── TODO cards ─────────────────────────────────────────────────────────────── */
+
+.ul-todo { display: flex; flex-direction: column; gap: 10px; }
+.ul-todo-badge {
+  display: inline-flex;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 600;
+  background: transparent;
+  color: var(--text-400);
+  border: 1px dashed var(--border-100);
+  width: fit-content;
+}
+.ul-todo-items { display: flex; flex-direction: column; gap: 5px; }
+.ul-todo-item {
+  font-size: 12px;
+  color: var(--text-400);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ul-todo-item::before { content: '○'; color: var(--accent); opacity: 0.4; }

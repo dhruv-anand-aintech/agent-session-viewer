@@ -7,12 +7,12 @@
  */
 
 import { createReadStream, existsSync, mkdirSync, openSync, readSync, closeSync, readdirSync, readFileSync, realpathSync, statSync, watch, writeFileSync } from "fs"
-import { homedir } from "os"
+import { homedir, tmpdir } from "os"
 import { basename, dirname, extname, join, sep } from "path"
 import http from "http"
 import { fileURLToPath } from "url"
 import { Worker } from "worker_threads"
-import { exec } from "child_process"
+import { exec, execSync } from "child_process"
 import { stripXml, trimProjectsByRecentSessionCount, countSessionsInProjects } from "./shared-utils.mjs"
 import { loadSessionMessages } from "./lib/session-message-loader.mjs"
 import { isOnDemandSessionPlatform } from "./lib/session-platform-routing.mjs"
@@ -1301,6 +1301,185 @@ async function triggerBackgroundIndexer() {
 
 // --- HTTP server ---
 
+// ── Usage limits fetcher ──────────────────────────────────────────────────────
+
+function readCursorAuth() {
+  const vscdb = join(homedir(), "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb")
+  if (existsSync(vscdb)) {
+    try {
+      const tmpScript = join(tmpdir(), "_cursor_auth.py")
+      writeFileSync(tmpScript, [
+        "import sqlite3,base64,json",
+        `con=sqlite3.connect(${JSON.stringify(vscdb)})`,
+        `row=con.execute("SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken'").fetchone()`,
+        "t=row[0] if row else ''",
+        "parts=t.split('.')",
+        "p=json.loads(base64.urlsafe_b64decode(parts[1]+'===')) if len(parts)>1 else {}",
+        "print(json.dumps({'token':t,'userId':p.get('sub','')}))",
+      ].join("\n"))
+      const out = execSync(`python3 "${tmpScript}"`, { encoding: "utf8" }).trim()
+      const { token, userId } = JSON.parse(out)
+      if (token && userId) return { token, userId }
+    } catch {}
+  }
+  const token  = process.env.CURSOR_ACCESS_TOKEN ?? ""
+  const userId = process.env.CURSOR_USER_ID ?? ""
+  if (token && userId) return { token, userId }
+  return null
+}
+
+function decodeJwtPayload(token) {
+  try {
+    const payload = token.split(".")[1] + "==="
+    return JSON.parse(Buffer.from(payload, "base64url").toString())
+  } catch { return {} }
+}
+
+async function fetchCursorUsage() {
+  const auth = readCursorAuth()
+  if (!auth) return { error: "No Cursor auth found" }
+  const { token, userId } = auth
+  const sessionCookie = `WorkosCursorSessionToken=${userId}%3A%3A${token}`
+  const cookieHeaders = { Cookie: sessionCookie, "User-Agent": "cursor-usage-tracker/1.1", Accept: "application/json" }
+  const [uR, sR, cpR] = await Promise.allSettled([
+    fetch(`https://cursor.com/api/usage?user=${userId}`, { headers: cookieHeaders }),
+    fetch("https://cursor.com/api/auth/stripe", { headers: cookieHeaders }),
+    fetch("https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Connect-Protocol-Version": "1", "Content-Type": "application/json" },
+      body: "{}",
+    }),
+  ])
+  return {
+    usage:         uR.status  === "fulfilled" && uR.value.ok  ? await uR.value.json()  : null,
+    stripe:        sR.status  === "fulfilled" && sR.value.ok  ? await sR.value.json()  : null,
+    currentPeriod: cpR.status === "fulfilled" && cpR.value.ok ? await cpR.value.json() : null,
+    fetchedAt: Date.now(),
+  }
+}
+
+async function fetchCodexUsage() {
+  const authFile = join(homedir(), ".codex", "auth.json")
+  if (!existsSync(authFile)) return { error: "~/.codex/auth.json not found" }
+  let auth
+  try { auth = JSON.parse(readFileSync(authFile, "utf8")) } catch { return { error: "Could not parse ~/.codex/auth.json" } }
+  const tokens = auth?.tokens ?? {}
+  const accessToken = tokens.access_token ?? ""
+  const accountId   = tokens.account_id   ?? ""
+  const idToken     = tokens.id_token     ?? ""
+  let plan = "", activeUntil = ""
+  if (idToken) {
+    const decoded = decodeJwtPayload(idToken)
+    const chatgptAuth = decoded["https://api.openai.com/auth"] ?? {}
+    plan        = chatgptAuth.chatgpt_plan_type ?? ""
+    activeUntil = chatgptAuth.chatgpt_subscription_active_until ?? ""
+  }
+  let sessionCount = 0, historyCount = 0
+  try {
+    const walk = (dir) => {
+      if (!existsSync(dir)) return
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.isDirectory()) walk(join(dir, e.name))
+        else if (e.name.endsWith(".jsonl")) sessionCount++
+      }
+    }
+    walk(join(homedir(), ".codex"))
+    historyCount = readFileSync(join(homedir(), ".codex", "history.jsonl"), "utf8").split("\n").filter(Boolean).length
+  } catch {}
+  let wham = {}
+  if (accessToken && accountId) {
+    try {
+      const wR = await fetch("https://chatgpt.com/backend-api/wham/usage", {
+        headers: {
+          Authorization: `Bearer ${accessToken}`, Accept: "application/json",
+          "ChatGPT-Account-Id": accountId, Origin: "https://chatgpt.com",
+          Referer: "https://chatgpt.com/", "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+        },
+      })
+      if (wR.ok) wham = await wR.json()
+    } catch {}
+  }
+  return { plan, active_until: activeUntil, sessionCount, historyCount, wham }
+}
+
+async function fetchClaudeUsage() {
+  const statsFile = join(homedir(), ".claude", "stats-cache.json")
+  let stats = {}
+  try { stats = JSON.parse(readFileSync(statsFile, "utf8")) } catch {}
+  const sessionKey = process.env.CLAUDE_SESSION_KEY ?? ""
+  if (!sessionKey) return { ...stats, _hint: "Set CLAUDE_SESSION_KEY env var for 5h/7d limits" }
+  try {
+    const orgsR = await fetch("https://claude.ai/api/organizations", {
+      headers: { Cookie: `sessionKey=${sessionKey}`, Accept: "application/json", "User-Agent": "Mozilla/5.0" },
+    })
+    if (!orgsR.ok) return { ...stats, error: `claude.ai organizations: ${orgsR.status}` }
+    const orgs = await orgsR.json()
+    const org = Array.isArray(orgs)
+      ? (orgs.find(o => o.capabilities?.includes("chat")) ?? orgs[0])
+      : null
+    if (!org?.uuid) return { ...stats, error: "Could not find org ID" }
+    const usageR = await fetch(`https://claude.ai/api/organizations/${org.uuid}/usage`, {
+      headers: { Cookie: `sessionKey=${sessionKey}`, Accept: "application/json", "User-Agent": "Mozilla/5.0" },
+    })
+    if (!usageR.ok) return { ...stats, error: `claude.ai usage: ${usageR.status}` }
+    return { ...stats, org_id: org.uuid, usage: await usageR.json() }
+  } catch (e) {
+    return { ...stats, error: e.message }
+  }
+}
+
+async function fetchOpenCodeUsage() {
+  const pkgFile = join(homedir(), ".opencode", "package.json")
+  if (!existsSync(pkgFile)) return { error: "OpenCode not installed" }
+  const providers = []
+  try {
+    const cfFile = join(homedir(), ".opencode", "config.json")
+    if (existsSync(cfFile)) {
+      const d = JSON.parse(readFileSync(cfFile, "utf8"))
+      for (const [k, v] of Object.entries(d.providers ?? {})) {
+        providers.push({ name: k, model: typeof v === "object" ? (v.model ?? "") : "" })
+      }
+    }
+  } catch {}
+  const sessions = []
+  const walkOC = (dir) => {
+    if (!existsSync(dir)) return
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, e.name)
+      if (e.isDirectory()) walkOC(full)
+      else if (e.isFile() && e.name.endsWith(".json")) {
+        try {
+          const d = JSON.parse(readFileSync(full, "utf8"))
+          if (typeof d === "object" && ("cost" in d || "tokens" in d || "usage" in d)) {
+            sessions.push({
+              cost:   d.cost   ?? (typeof d.usage === "object" ? d.usage?.cost          : 0) ?? 0,
+              tokens: d.tokens ?? (typeof d.usage === "object" ? d.usage?.total_tokens  : 0) ?? 0,
+            })
+          }
+        } catch {}
+      }
+    }
+  }
+  walkOC(join(homedir(), ".opencode", "sessions"))
+  return { providers, recentSessions: sessions }
+}
+
+async function fetchAllUsage() {
+  const [cursor, codex, claude, opencode] = await Promise.allSettled([
+    fetchCursorUsage(),
+    fetchCodexUsage(),
+    fetchClaudeUsage(),
+    fetchOpenCodeUsage(),
+  ])
+  return {
+    cursor:   cursor.status   === "fulfilled" ? cursor.value   : { error: String(cursor.reason) },
+    codex:    codex.status    === "fulfilled" ? codex.value    : { error: String(codex.reason) },
+    claude:   claude.status   === "fulfilled" ? claude.value   : { error: String(claude.reason) },
+    opencode: opencode.status === "fulfilled" ? opencode.value : { error: String(opencode.reason) },
+    fetchedAt: Date.now(),
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*")
   res.setHeader("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS")
@@ -1884,6 +2063,12 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       json({ error: err.message }, 404)
     }
+    return
+  }
+
+  // GET /api/usage — live usage data for all AI services
+  if (url.pathname === "/api/usage" && req.method === "GET") {
+    json(await fetchAllUsage())
     return
   }
 
