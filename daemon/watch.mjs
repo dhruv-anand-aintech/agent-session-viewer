@@ -24,6 +24,7 @@ import { homedir } from "node:os"
 import { execFileSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import { stripXml } from "../shared-utils.mjs"
+import { pollUsageLimits } from "./usage-limits.mjs"
 import {
   normProjectDir as _normProjectDir,
   readCodexSessions,
@@ -1323,3 +1324,12 @@ if (fs.existsSync(TODOS_DIR)) {
   })
   log(`Watching todos at ${TODOS_DIR}`)
 }
+
+// ── Usage limits polling ──────────────────────────────────────────────────────
+// Polls Claude/Codex/Cursor/OpenCode usage APIs and syncs to agent-usage-limits
+// Worker. Also fires WEBHOOK_URL if any limit exceeds LIMIT_THRESHOLD (default 80%).
+
+const USAGE_POLL_MS = 5 * 60 * 1000  // 5 minutes
+await pollUsageLimits().catch(e => log(`usage-limits initial poll error: ${e.message}`))
+setInterval(() => pollUsageLimits().catch(e => log(`usage-limits poll error: ${e.message}`)), USAGE_POLL_MS)
+log(`Usage limits polling every ${USAGE_POLL_MS / 60_000}m`)
