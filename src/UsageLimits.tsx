@@ -6,6 +6,8 @@ interface UsageData {
   codex?: CodexData
   claude?: ClaudeData
   opencode?: OpenCodeData
+  gemini?: GeminiData
+  antigravity?: AntigravityData
   fetchedAt?: number
   error?: string
 }
@@ -42,6 +44,23 @@ interface ClaudeData {
   }
   numSessions?: number
   _hint?: string
+  error?: string
+}
+
+interface GeminiData {
+  email?: string
+  sessionCount?: number
+  totalTokens?: { input: number; output: number; cached: number; thoughts: number }
+  topModel?: string
+  recentSessions?: { startTime?: string; input: number; output: number; model: string }[]
+  error?: string
+}
+
+interface AntigravityData {
+  sessionCount?: number
+  conversationCount?: number
+  model?: string
+  recentSessions?: { id: string; title: string; doneCount: number; totalCount: number }[]
   error?: string
 }
 
@@ -207,30 +226,49 @@ function OpenCodeCard({ data, loading }: { data?: OpenCodeData; loading?: boolea
   )
 }
 
-function GeminiCard() {
+function fmtTokens(n: number) {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`
+  return String(n)
+}
+
+function GeminiCard({ data, loading }: { data?: GeminiData; loading?: boolean }) {
+  const t = data?.totalTokens
   return (
-    <CardShell id="gemini" title="Gemini CLI" icon="◆">
-      <div className="ul-todo">
-        <span className="ul-todo-badge">Coming soon</span>
-        <div className="ul-todo-items">
-          <div className="ul-todo-item">Live usage via Gemini API</div>
-          <div className="ul-todo-item">Rate limit tracking</div>
-        </div>
-      </div>
+    <CardShell id="gemini" title="Gemini CLI" subtitle={data?.email ?? undefined} icon="◆" loading={loading}>
+      {data?.error && <div className="ul-error">{data.error}</div>}
+      {data?.sessionCount != null && <StatRow label="Sessions" value={String(data.sessionCount)} />}
+      {t && t.input + t.output > 0 && <>
+        <StatRow label="Input tokens"    value={fmtTokens(t.input)} />
+        <StatRow label="Output tokens"   value={fmtTokens(t.output)} />
+        {t.cached > 0 && <StatRow label="Cached tokens"  value={fmtTokens(t.cached)} />}
+        {t.thoughts > 0 && <StatRow label="Thought tokens" value={fmtTokens(t.thoughts)} />}
+      </>}
+      {data?.topModel && <StatRow label="Model" value={data.topModel} />}
+      {!data && !loading && <div className="ul-error">No data</div>}
     </CardShell>
   )
 }
 
-function AntigravityCard() {
+function AntigravityCard({ data, loading }: { data?: AntigravityData; loading?: boolean }) {
+  const sessions = data?.recentSessions ?? []
   return (
-    <CardShell id="antigravity" title="Antigravity" icon="⟡">
-      <div className="ul-todo">
-        <span className="ul-todo-badge">Coming soon</span>
-        <div className="ul-todo-items">
-          <div className="ul-todo-item">Usage tracking via local DB</div>
-          <div className="ul-todo-item">Session cost aggregation</div>
-        </div>
-      </div>
+    <CardShell id="antigravity" title="Antigravity" subtitle={data?.model || undefined} icon="⟡" loading={loading}>
+      {data?.error && <div className="ul-error">{data.error}</div>}
+      {data?.sessionCount != null && <StatRow label="Brain sessions" value={String(data.sessionCount)} />}
+      {data?.conversationCount != null && <StatRow label="Conversations" value={String(data.conversationCount)} />}
+      {sessions.length > 0 && <>
+        <div className="ul-section-label">Recent tasks</div>
+        {sessions.map(s => (
+          <div key={s.id} className="ul-ag-task">
+            <span className="ul-ag-task-title">{s.title}</span>
+            {s.totalCount > 0 && (
+              <span className="ul-ag-task-prog">{s.doneCount}/{s.totalCount}</span>
+            )}
+          </div>
+        ))}
+      </>}
+      {!data && !loading && <div className="ul-error">No data</div>}
     </CardShell>
   )
 }
@@ -274,8 +312,8 @@ export function UsageLimits() {
         <CursorCard   data={data?.cursor}   loading={loading && !data?.cursor} />
         <CodexCard    data={data?.codex}    loading={loading && !data?.codex} />
         <OpenCodeCard data={data?.opencode} loading={loading && !data?.opencode} />
-        <GeminiCard />
-        <AntigravityCard />
+        <GeminiCard      data={data?.gemini}      loading={loading && !data?.gemini} />
+        <AntigravityCard data={data?.antigravity} loading={loading && !data?.antigravity} />
       </div>
     </div>
   )

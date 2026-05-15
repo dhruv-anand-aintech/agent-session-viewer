@@ -111,6 +111,24 @@
 .ul-error { font-size: 12px; color: var(--text-400); padding: 4px 0; }
 .ul-hint  { font-size: 11px; color: var(--text-400); padding: 4px 0; font-style: italic; }
 
+/* ── Section label ──────────────────────────────────────────────────────────── */
+
+.ul-section-label {
+  font-size: 10px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--text-400);
+  margin: 10px 0 6px;
+}
+
+/* ── Antigravity task list ───────────────────────────────────────────────────── */
+
+.ul-ag-task {
+  display: flex; justify-content: space-between; align-items: baseline;
+  padding: 3px 0; border-bottom: 1px solid var(--border-200);
+}
+.ul-ag-task:last-child { border-bottom: none; }
+.ul-ag-task-title { font-size: 12px; color: var(--text-200); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ul-ag-task-prog  { font-size: 11px; color: var(--text-400); flex-shrink: 0; margin-left: 8px; font-variant-numeric: tabular-nums; }
+
 /* ── TODO cards ─────────────────────────────────────────────────────────────── */
 
 .ul-todo { display: flex; flex-direction: column; gap: 10px; }

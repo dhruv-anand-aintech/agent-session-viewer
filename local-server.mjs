@@ -1464,18 +1464,141 @@ async function fetchOpenCodeUsage() {
   return { providers, recentSessions: sessions }
 }
 
+function fetchGeminiUsage() {
+  const tmpRoot = join(homedir(), ".gemini", "tmp")
+  if (!existsSync(tmpRoot)) return { error: "Gemini CLI not installed" }
+
+  const credsFile = join(homedir(), ".gemini", "oauth_creds.json")
+  let email = ""
+  try {
+    const accounts = JSON.parse(readFileSync(join(homedir(), ".gemini", "google_accounts.json"), "utf8"))
+    email = accounts.active ?? ""
+  } catch {}
+
+  // Aggregate tokens across all session jsonl files
+  let totalInput = 0, totalOutput = 0, totalCached = 0, totalThoughts = 0, sessionCount = 0
+  const modelCounts = {}
+  const recentSessions = []
+
+  const walkGemini = (dir, depth = 0) => {
+    if (!existsSync(dir) || depth > 3) return
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, e.name)
+      if (e.isDirectory()) { walkGemini(full, depth + 1); continue }
+      if (!e.name.endsWith(".jsonl")) continue
+      let sessInput = 0, sessOutput = 0, model = ""
+      try {
+        const lines = readFileSync(full, "utf8").split("\n").filter(Boolean)
+        let startTime = null
+        for (const line of lines) {
+          try {
+            const msg = JSON.parse(line)
+            if (msg.startTime) startTime = msg.startTime
+            if (msg.tokens) {
+              totalInput    += msg.tokens.input    ?? 0
+              totalOutput   += msg.tokens.output   ?? 0
+              totalCached   += msg.tokens.cached   ?? 0
+              totalThoughts += msg.tokens.thoughts ?? 0
+              sessInput  += msg.tokens.input  ?? 0
+              sessOutput += msg.tokens.output ?? 0
+            }
+            if (msg.model) { model = msg.model; modelCounts[msg.model] = (modelCounts[msg.model] ?? 0) + 1 }
+          } catch {}
+        }
+        sessionCount++
+        if (sessInput + sessOutput > 0) {
+          recentSessions.push({ startTime, input: sessInput, output: sessOutput, model })
+        }
+      } catch {}
+    }
+  }
+  walkGemini(tmpRoot)
+
+  // Sort recent sessions newest-first, keep last 10
+  recentSessions.sort((a, b) => (b.startTime ?? "").localeCompare(a.startTime ?? ""))
+
+  const topModel = Object.entries(modelCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? ""
+
+  return {
+    email,
+    sessionCount,
+    totalTokens: { input: totalInput, output: totalOutput, cached: totalCached, thoughts: totalThoughts },
+    topModel,
+    recentSessions: recentSessions.slice(0, 10),
+  }
+}
+
+function fetchAntigravityUsage() {
+  const brainDir = join(homedir(), ".gemini", "antigravity", "brain")
+  if (!existsSync(brainDir)) return { error: "Antigravity not installed" }
+
+  const conversationsDir = join(homedir(), ".gemini", "antigravity", "conversations")
+
+  // Count brain sessions and read task titles
+  const sessionDirs = existsSync(brainDir)
+    ? readdirSync(brainDir, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => e.name)
+    : []
+
+  const sessions = []
+  for (const id of sessionDirs.slice(-20)) {  // last 20
+    const taskFile = join(brainDir, id, "task.md")
+    if (!existsSync(taskFile)) continue
+    try {
+      const content = readFileSync(taskFile, "utf8")
+      const titleMatch = content.match(/^#\s+(.+)/m)
+      const title = titleMatch?.[1]?.replace(/^Task:\s*/i, "").trim() ?? id.slice(0, 8)
+      const doneCount = (content.match(/\[x\]/gi) ?? []).length
+      const totalCount = (content.match(/\[[x ]\]/gi) ?? []).length
+      sessions.push({ id, title, doneCount, totalCount })
+    } catch {}
+  }
+
+  const conversationCount = existsSync(conversationsDir)
+    ? readdirSync(conversationsDir).filter(f => f.endsWith(".pb")).length
+    : 0
+
+  // Read model info from state DB
+  let model = ""
+  const stateDb = join(homedir(), "Library", "Application Support", "Antigravity", "User", "globalStorage", "state.vscdb")
+  if (existsSync(stateDb)) {
+    try {
+      const tmpScript = join(tmpdir(), "_ag_state.py")
+      writeFileSync(tmpScript, [
+        "import sqlite3,json",
+        `con=sqlite3.connect(${JSON.stringify(stateDb)})`,
+        `row=con.execute("SELECT value FROM ItemTable WHERE key='Anthropic.claude-code'").fetchone()`,
+        "print(row[0] if row else '{}')",
+      ].join("\n"))
+      const raw = execSync(`python3 "${tmpScript}"`, { encoding: "utf8" }).trim()
+      const d = JSON.parse(raw)
+      model = d.model ?? d.defaultModel ?? ""
+    } catch {}
+  }
+
+  return {
+    sessionCount: sessionDirs.length,
+    conversationCount,
+    model,
+    recentSessions: sessions.slice(-5).reverse(),
+  }
+}
+
 async function fetchAllUsage() {
-  const [cursor, codex, claude, opencode] = await Promise.allSettled([
+  const [cursor, codex, claude, opencode, gemini, antigravity] = await Promise.allSettled([
     fetchCursorUsage(),
     fetchCodexUsage(),
     fetchClaudeUsage(),
     fetchOpenCodeUsage(),
+    Promise.resolve(fetchGeminiUsage()),
+    Promise.resolve(fetchAntigravityUsage()),
   ])
   return {
-    cursor:   cursor.status   === "fulfilled" ? cursor.value   : { error: String(cursor.reason) },
-    codex:    codex.status    === "fulfilled" ? codex.value    : { error: String(codex.reason) },
-    claude:   claude.status   === "fulfilled" ? claude.value   : { error: String(claude.reason) },
-    opencode: opencode.status === "fulfilled" ? opencode.value : { error: String(opencode.reason) },
+    cursor:      cursor.status      === "fulfilled" ? cursor.value      : { error: String(cursor.reason) },
+    codex:       codex.status       === "fulfilled" ? codex.value       : { error: String(codex.reason) },
+    claude:      claude.status      === "fulfilled" ? claude.value      : { error: String(claude.reason) },
+    opencode:    opencode.status    === "fulfilled" ? opencode.value    : { error: String(opencode.reason) },
+    gemini:      gemini.status      === "fulfilled" ? gemini.value      : { error: String(gemini.reason) },
+    antigravity: antigravity.status === "fulfilled" ? antigravity.value : { error: String(antigravity.reason) },
     fetchedAt: Date.now(),
   }
 }
