@@ -1,0 +1,11 @@
+name = "agent-usage-limits"
+main = "worker/usage-limits.ts"
+compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "USAGE_KV"
+id = "647e1b5015414017a162ed1efba61d71"
+
+[[routes]]
+pattern = "usage.ainorthstar.tech"
+custom_domain = true
