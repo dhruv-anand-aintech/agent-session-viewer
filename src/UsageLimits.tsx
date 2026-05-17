@@ -13,6 +13,18 @@ interface UsageData {
 }
 
 interface CursorData {
+  // New /api/usage-summary shape
+  usageSummary?: {
+    membershipType?: string
+    limitType?: string
+    isUnlimited?: boolean
+    billingCycleStart?: string
+    billingCycleEnd?: string
+    plan?: { autoPercentUsed?: number; apiPercentUsed?: number; totalPercentUsed?: number; used?: number; limit?: number; remaining?: number } | null
+    onDemand?: { enabled?: boolean; used?: number; limit?: number; remaining?: number } | null
+  }
+  me?: { email?: string; name?: string; sub?: string }
+  // Legacy shape (fallback)
   usage?: Record<string, { numRequests?: number; numRequestsTotal?: number; maxRequestUsage?: number }>
   stripe?: { membershipType?: string; daysRemainingOnTrial?: number }
   currentPeriod?: { completedRequests?: number; startOfCurrentPeriod?: string }
@@ -21,6 +33,7 @@ interface CursorData {
 
 interface CodexData {
   plan?: string
+  email?: string
   active_until?: string
   sessionCount?: number
   historyCount?: number
@@ -42,6 +55,12 @@ interface ClaudeData {
     seven_day?: { utilization?: number; resets_at?: string }
     seven_day_opus?: { utilization?: number; resets_at?: string }
   }
+  cliUsage?: {
+    sessionPct?: number
+    weeklyPct?: number
+    sessionResetsAt?: string
+    weeklyResetsAt?: string
+  }
   numSessions?: number
   _hint?: string
   error?: string
@@ -53,6 +72,7 @@ interface GeminiData {
   totalTokens?: { input: number; output: number; cached: number; thoughts: number }
   topModel?: string
   recentSessions?: { startTime?: string; input: number; output: number; model: string }[]
+  quotaStatus?: string
   error?: string
 }
 
@@ -60,13 +80,38 @@ interface AntigravityData {
   sessionCount?: number
   conversationCount?: number
   model?: string
+  quota?: {
+    source?: string
+    email?: string
+    planType?: string
+    promptCredits?: {
+      available: number
+      monthly: number
+      used: number
+      remainingPercentage?: number | null
+      usedPercentage?: number | null
+    } | null
+    models?: {
+      modelId: string
+      label: string
+      remainingPercentage?: number | null
+      usedPercentage?: number | null
+      isExhausted?: boolean
+      resetTime?: string | null
+    }[]
+  } | null
+  quotaError?: string
   recentSessions?: { id: string; title: string; doneCount: number; totalCount: number }[]
   error?: string
 }
 
 interface OpenCodeData {
-  providers?: { name: string; model: string }[]
-  recentSessions?: { cost: number; tokens: number }[]
+  sessionCount?: number
+  totalCost?: number
+  totalTokensIn?: number
+  totalTokensOut?: number
+  providers?: string[]
+  topModel?: string
   error?: string
 }
 
@@ -128,12 +173,14 @@ function ClaudeCard({ data, loading }: { data?: ClaudeData; loading?: boolean })
   const usage = data?.usage
   const fiveH = usage?.five_hour
   const sevenD = usage?.seven_day
+  const cli = data?.cliUsage
   const subtitle = data?.org_id ? "claude.ai" : undefined
 
   return (
     <CardShell id="claude" title="Claude Code" subtitle={subtitle} icon="✦" loading={loading}>
       {data?.error && <div className="ul-error">{data.error}</div>}
-      {data?._hint && !usage && <div className="ul-hint">{data._hint}</div>}
+      {data?._hint && !usage && !cli && <div className="ul-hint">{data._hint}</div>}
+      {/* API limits (5h/7d from claude.ai) */}
       {fiveH && (
         <Bar pct={(fiveH.utilization ?? 0) * 100} label="5-hour limit"
           sublabel={`${((fiveH.utilization ?? 0) * 100).toFixed(0)}% · ${fmtDate(fiveH.resets_at)}`} />
@@ -142,6 +189,15 @@ function ClaudeCard({ data, loading }: { data?: ClaudeData; loading?: boolean })
         <Bar pct={(sevenD.utilization ?? 0) * 100} label="7-day limit"
           sublabel={`${((sevenD.utilization ?? 0) * 100).toFixed(0)}% · resets ${fmtDate(sevenD.resets_at)}`} />
       )}
+      {/* CLI limits (from `claude /usage` TUI) */}
+      {!fiveH && cli?.sessionPct != null && (
+        <Bar pct={cli.sessionPct} label="Session limit"
+          sublabel={`${cli.sessionPct}%${cli.sessionResetsAt ? ` · resets ${cli.sessionResetsAt}` : ""}`} />
+      )}
+      {!sevenD && cli?.weeklyPct != null && (
+        <Bar pct={cli.weeklyPct} label="Weekly limit"
+          sublabel={`${cli.weeklyPct}%${cli.weeklyResetsAt ? ` · resets ${cli.weeklyResetsAt}` : ""}`} />
+      )}
       {data?.numSessions != null && <StatRow label="Sessions" value={String(data.numSessions)} />}
       {!data && !loading && <div className="ul-error">No data</div>}
     </CardShell>
@@ -149,33 +205,41 @@ function ClaudeCard({ data, loading }: { data?: ClaudeData; loading?: boolean })
 }
 
 function CursorCard({ data, loading }: { data?: CursorData; loading?: boolean }) {
-  const stripe = data?.stripe
-  const usage = data?.usage
-  const cp = data?.currentPeriod
-  const plan = stripe?.membershipType ?? "–"
+  const summary = data?.usageSummary
+  const plan = summary?.plan
+  const onDemand = summary?.onDemand
+  const membershipType = summary?.membershipType ?? data?.stripe?.membershipType
+  const subtitle = data?.me?.email ?? (membershipType ?? undefined)
 
-  // Find fast/premium request entries
-  const fastEntry  = usage?.["gpt-4"] ?? usage?.["fast"] ?? null
-  const totalEntry = usage?.["gpt-3.5-turbo-unlimited"] ?? usage?.["slow"] ?? null
+  // Legacy fallback
+  const legacyUsage = data?.usage
+  const cp = data?.currentPeriod
+  const fastEntry  = legacyUsage?.["gpt-4"] ?? legacyUsage?.["fast"] ?? null
   const fastUsed  = fastEntry?.numRequestsTotal ?? fastEntry?.numRequests ?? 0
   const fastMax   = fastEntry?.maxRequestUsage ?? 0
   const fastPct   = fastMax > 0 ? (fastUsed / fastMax) * 100 : 0
 
   return (
-    <CardShell id="cursor" title="Cursor" subtitle={plan !== "–" ? plan : undefined} icon="⬡" loading={loading}>
+    <CardShell id="cursor" title="Cursor" subtitle={subtitle} icon="⬡" loading={loading}>
       {data?.error && <div className="ul-error">{data.error}</div>}
-      {fastMax > 0 && <Bar pct={fastPct} label="Fast requests" sublabel={`${fastUsed} / ${fastMax}`} />}
-      {cp?.completedRequests != null && (
+      {plan?.totalPercentUsed != null && (
+        <Bar pct={plan.totalPercentUsed} label="Plan usage"
+          sublabel={`${plan.totalPercentUsed.toFixed(0)}%${summary?.billingCycleEnd ? ` · resets ${fmtDate(summary.billingCycleEnd)}` : ""}`} />
+      )}
+      {plan?.autoPercentUsed != null && plan.autoPercentUsed !== plan.totalPercentUsed && (
+        <Bar pct={plan.autoPercentUsed} label="Auto (composer)" sublabel={`${plan.autoPercentUsed.toFixed(0)}%`} />
+      )}
+      {plan?.apiPercentUsed != null && (
+        <Bar pct={plan.apiPercentUsed} label="API (named model)" sublabel={`${plan.apiPercentUsed.toFixed(0)}%`} />
+      )}
+      {onDemand?.enabled && onDemand.used != null && (
+        <StatRow label="On-demand spend" value={`$${(onDemand.used / 100).toFixed(2)}${onDemand.limit != null ? ` / $${(onDemand.limit / 100).toFixed(2)}` : ""}`} />
+      )}
+      {membershipType && <StatRow label="Plan" value={membershipType} />}
+      {/* Legacy fallback rows */}
+      {!summary && fastMax > 0 && <Bar pct={fastPct} label="Fast requests" sublabel={`${fastUsed} / ${fastMax}`} />}
+      {!summary && cp?.completedRequests != null && (
         <StatRow label="Requests this period" value={String(cp.completedRequests)} />
-      )}
-      {cp?.startOfCurrentPeriod && (
-        <StatRow label="Period start" value={fmtDate(cp.startOfCurrentPeriod)} />
-      )}
-      {stripe?.daysRemainingOnTrial != null && stripe.daysRemainingOnTrial > 0 && (
-        <StatRow label="Trial days left" value={String(stripe.daysRemainingOnTrial)} />
-      )}
-      {totalEntry && (
-        <StatRow label="Slow requests" value={String(totalEntry.numRequests ?? totalEntry.numRequestsTotal ?? 0)} />
       )}
       {!data && !loading && <div className="ul-error">No data</div>}
     </CardShell>
@@ -187,8 +251,9 @@ function CodexCard({ data, loading }: { data?: CodexData; loading?: boolean }) {
   const primary   = wham?.rate_limit?.primary_window
   const secondary = wham?.rate_limit?.secondary_window
 
+  const subtitle = [data?.email, data?.plan].filter(Boolean).join(" · ") || undefined
   return (
-    <CardShell id="codex" title="Codex" subtitle={data?.plan ?? undefined} icon="◈" loading={loading}>
+    <CardShell id="codex" title="Codex" subtitle={subtitle} icon="◈" loading={loading}>
       {data?.error && <div className="ul-error">{data.error}</div>}
       {primary?.used_percent != null && (
         <Bar pct={primary.used_percent} label="5-hour limit" sublabel={`${primary.used_percent.toFixed(0)}% · ${fmtReset(primary.reset_after_seconds)}`} />
@@ -207,20 +272,15 @@ function CodexCard({ data, loading }: { data?: CodexData; loading?: boolean }) {
 }
 
 function OpenCodeCard({ data, loading }: { data?: OpenCodeData; loading?: boolean }) {
-  const sessions = data?.recentSessions ?? []
-  const totalCost   = sessions.reduce((s, r) => s + (r.cost ?? 0), 0)
-  const totalTokens = sessions.reduce((s, r) => s + (r.tokens ?? 0), 0)
-  const providers   = data?.providers ?? []
-
+  const subtitle = data?.providers?.join(", ") || data?.topModel || undefined
   return (
-    <CardShell id="opencode" title="OpenCode" subtitle={providers.map(p => p.name).join(", ") || undefined} icon="◇" loading={loading}>
+    <CardShell id="opencode" title="OpenCode" subtitle={subtitle} icon="◇" loading={loading}>
       {data?.error && <div className="ul-error">{data.error}</div>}
-      {totalCost > 0 && <StatRow label="Total cost" value={`$${totalCost.toFixed(4)}`} />}
-      {totalTokens > 0 && <StatRow label="Total tokens" value={totalTokens.toLocaleString()} />}
-      {sessions.length > 0 && <StatRow label="Sessions" value={String(sessions.length)} />}
-      {providers.map(p => (
-        <StatRow key={p.name} label={p.name} value={p.model || "–"} />
-      ))}
+      {data?.sessionCount != null && <StatRow label="Sessions" value={String(data.sessionCount)} />}
+      {data?.totalCost != null && data.totalCost > 0 && <StatRow label="Total cost" value={`$${data.totalCost.toFixed(4)}`} />}
+      {data?.totalTokensIn != null && <StatRow label="Input tokens" value={fmtTokens(data.totalTokensIn)} />}
+      {data?.totalTokensOut != null && <StatRow label="Output tokens" value={fmtTokens(data.totalTokensOut)} />}
+      {data?.topModel && <StatRow label="Top model" value={data.topModel} />}
       {!data && !loading && <div className="ul-error">No data</div>}
     </CardShell>
   )
@@ -237,6 +297,7 @@ function GeminiCard({ data, loading }: { data?: GeminiData; loading?: boolean })
   return (
     <CardShell id="gemini" title="Gemini CLI" subtitle={data?.email ?? undefined} icon="◆" loading={loading}>
       {data?.error && <div className="ul-error">{data.error}</div>}
+      {data?.quotaStatus && <div className="ul-hint">{data.quotaStatus}</div>}
       {data?.sessionCount != null && <StatRow label="Sessions" value={String(data.sessionCount)} />}
       {t && t.input + t.output > 0 && <>
         <StatRow label="Input tokens"    value={fmtTokens(t.input)} />
@@ -252,9 +313,29 @@ function GeminiCard({ data, loading }: { data?: GeminiData; loading?: boolean })
 
 function AntigravityCard({ data, loading }: { data?: AntigravityData; loading?: boolean }) {
   const sessions = data?.recentSessions ?? []
+  const quota = data?.quota
+  const credits = quota?.promptCredits
+  const models = (quota?.models ?? []).filter(m => m.remainingPercentage != null).slice(0, 6)
   return (
-    <CardShell id="antigravity" title="Antigravity" subtitle={data?.model || undefined} icon="⟡" loading={loading}>
+    <CardShell id="antigravity" title="Antigravity" subtitle={quota?.email || data?.model || undefined} icon="⟡" loading={loading}>
       {data?.error && <div className="ul-error">{data.error}</div>}
+      {data?.quotaError && <div className="ul-hint">Quota unavailable: {data.quotaError}</div>}
+      {credits?.usedPercentage != null && (
+        <Bar
+          pct={credits.usedPercentage * 100}
+          label="Prompt credits"
+          sublabel={`${credits.used.toLocaleString()} / ${credits.monthly.toLocaleString()}`}
+        />
+      )}
+      {models.map(m => (
+        <Bar
+          key={m.modelId}
+          pct={(m.usedPercentage ?? 0) * 100}
+          label={m.label}
+          sublabel={m.isExhausted ? "exhausted" : `${Math.round((m.remainingPercentage ?? 0) * 100)}% left`}
+        />
+      ))}
+      {quota?.source && <StatRow label="Quota source" value={quota.source} />}
       {data?.sessionCount != null && <StatRow label="Brain sessions" value={String(data.sessionCount)} />}
       {data?.conversationCount != null && <StatRow label="Conversations" value={String(data.conversationCount)} />}
       {sessions.length > 0 && <>
@@ -277,15 +358,18 @@ export function UsageLimits() {
   const [data, setData] = useState<UsageData | null>(null)
   const [loading, setLoading] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
     try {
       const r = await fetch("/api/usage")
-      if (r.ok) {
-        setData(await r.json())
-        setLastUpdated(new Date())
-      }
+      if (!r.ok) throw new Error(`/api/usage returned HTTP ${r.status}`)
+      setData(await r.json())
+      setLastUpdated(new Date())
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
     } finally {
       if (!silent) setLoading(false)
     }
@@ -307,6 +391,7 @@ export function UsageLimits() {
           {loading ? "Refreshing…" : "↻ Refresh"}
         </button>
       </div>
+      {error && <div className="ul-page-error">Usage data failed to load: {error}</div>}
       <div className="ul-grid">
         <ClaudeCard   data={data?.claude}   loading={loading && !data?.claude} />
         <CursorCard   data={data?.cursor}   loading={loading && !data?.cursor} />
