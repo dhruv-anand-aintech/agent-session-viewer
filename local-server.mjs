@@ -10,12 +10,14 @@ import { createReadStream, existsSync, mkdirSync, openSync, readSync, closeSync,
 import { homedir, tmpdir } from "os"
 import { basename, dirname, extname, join, sep } from "path"
 import http from "http"
+import https from "https"
 import { fileURLToPath } from "url"
 import { Worker } from "worker_threads"
-import { exec, execSync } from "child_process"
+import { exec, execSync, spawnSync } from "child_process"
 import { stripXml, trimProjectsByRecentSessionCount, countSessionsInProjects } from "./shared-utils.mjs"
 import { loadSessionMessages } from "./lib/session-message-loader.mjs"
 import { isOnDemandSessionPlatform } from "./lib/session-platform-routing.mjs"
+import { normalizeCodexRateLimit } from "./lib/usage-window-normalizer.mjs"
 import {
   readCodexSessions,
   CODEX_SESSIONS_ROOT,
@@ -53,6 +55,18 @@ import { startBackgroundIndexer, indexOneSession as lanceIndexOne, removeOne as 
 import { getIndexStats } from "./lib/lancedb-search.mjs"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
+
+// Load .env file from project root (if not already set in environment)
+try {
+  const envFile = join(__dirname, ".env")
+  if (existsSync(envFile)) {
+    for (const line of readFileSync(envFile, "utf8").split("\n")) {
+      const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/)
+      if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, "")
+    }
+  }
+} catch {}
+
 const PLATFORM_LOADER_WORKER = join(__dirname, "lib", "platform-loader-worker.mjs")
 
 const CLAUDE_DIR = join(homedir(), ".claude", "projects")
@@ -1335,27 +1349,102 @@ function decodeJwtPayload(token) {
   } catch { return {} }
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...options, signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function settleUsage(name, promise, timeoutMs = 10000) {
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`${name} usage timed out`)), timeoutMs)),
+    ])
+  } catch (e) {
+    return { error: e?.message ?? String(e) }
+  }
+}
+
 async function fetchCursorUsage() {
   const auth = readCursorAuth()
   if (!auth) return { error: "No Cursor auth found" }
+
   const { token, userId } = auth
-  const sessionCookie = `WorkosCursorSessionToken=${userId}%3A%3A${token}`
-  const cookieHeaders = { Cookie: sessionCookie, "User-Agent": "cursor-usage-tracker/1.1", Accept: "application/json" }
-  const [uR, sR, cpR] = await Promise.allSettled([
-    fetch(`https://cursor.com/api/usage?user=${userId}`, { headers: cookieHeaders }),
-    fetch("https://cursor.com/api/auth/stripe", { headers: cookieHeaders }),
-    fetch("https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Connect-Protocol-Version": "1", "Content-Type": "application/json" },
-      body: "{}",
-    }),
+  const baseHeaders = { "User-Agent": "cursor-usage-tracker/1.1", Accept: "application/json" }
+  const authHeaders = { ...baseHeaders, Cookie: `WorkosCursorSessionToken=${userId}%3A%3A${token}` }
+
+  // /api/usage-summary is the primary endpoint (richer than /api/usage)
+  const [summaryR, meR] = await Promise.allSettled([
+    fetchWithTimeout("https://cursor.com/api/usage-summary", { headers: authHeaders }),
+    fetchWithTimeout("https://cursor.com/api/auth/me", { headers: authHeaders }),
   ])
-  return {
-    usage:         uR.status  === "fulfilled" && uR.value.ok  ? await uR.value.json()  : null,
-    stripe:        sR.status  === "fulfilled" && sR.value.ok  ? await sR.value.json()  : null,
-    currentPeriod: cpR.status === "fulfilled" && cpR.value.ok ? await cpR.value.json() : null,
-    fetchedAt: Date.now(),
+
+  const result = { fetchedAt: Date.now() }
+
+  if (summaryR.status === "fulfilled" && summaryR.value.ok) {
+    const s = await summaryR.value.json().catch(() => null)
+    if (s) {
+      result.usageSummary = {
+        membershipType: s.membershipType,
+        limitType: s.limitType,
+        isUnlimited: s.isUnlimited,
+        billingCycleStart: s.billingCycleStart,
+        billingCycleEnd: s.billingCycleEnd,
+        plan: s.individualUsage?.plan ? {
+          autoPercentUsed: s.individualUsage.plan.autoPercentUsed,
+          apiPercentUsed: s.individualUsage.plan.apiPercentUsed,
+          totalPercentUsed: s.individualUsage.plan.totalPercentUsed,
+          used: s.individualUsage.plan.used,
+          limit: s.individualUsage.plan.limit,
+          remaining: s.individualUsage.plan.remaining,
+        } : null,
+        onDemand: s.individualUsage?.onDemand ? {
+          enabled: s.individualUsage.onDemand.enabled,
+          used: s.individualUsage.onDemand.used,
+          limit: s.individualUsage.onDemand.limit,
+          remaining: s.individualUsage.onDemand.remaining,
+        } : null,
+      }
+      // Also populate legacy `stripe` shape for backward compat with CursorCard
+      result.stripe = { membershipType: s.membershipType }
+    }
+  } else {
+    // Fallback: legacy endpoints
+    const [uR, sR, cpR] = await Promise.allSettled([
+      fetchWithTimeout(`https://cursor.com/api/usage?user=${userId}`, { headers: authHeaders }),
+      fetchWithTimeout("https://cursor.com/api/auth/stripe", { headers: authHeaders }),
+      fetchWithTimeout("https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Connect-Protocol-Version": "1", "Content-Type": "application/json" },
+        body: "{}",
+      }),
+    ])
+    result.usage  = uR.status === "fulfilled" && uR.value.ok ? await uR.value.json() : null
+    result.stripe = sR.status === "fulfilled" && sR.value.ok ? await sR.value.json() : null
+    if (cpR.status === "fulfilled" && cpR.value.ok) {
+      const cp = await cpR.value.json().catch(() => null)
+      if (cp) result.currentPeriod = {
+        completedRequests: cp.completedRequests,
+        startOfCurrentPeriod: cp.startOfCurrentPeriod,
+        planUsage: cp.planUsage ?? null,
+      }
+    }
+    if (!result.usage && !result.stripe) {
+      result.error = summaryR.reason?.message ?? "Failed to fetch Cursor usage"
+    }
   }
+
+  if (meR.status === "fulfilled" && meR.value.ok) {
+    const me = await meR.value.json().catch(() => null)
+    if (me) result.me = { email: me.email, name: me.name, sub: me.sub }
+  }
+
+  return result
 }
 
 async function fetchCodexUsage() {
@@ -1389,7 +1478,7 @@ async function fetchCodexUsage() {
   let wham = {}
   if (accessToken && accountId) {
     try {
-      const wR = await fetch("https://chatgpt.com/backend-api/wham/usage", {
+      const wR = await fetchWithTimeout("https://chatgpt.com/backend-api/wham/usage", {
         headers: {
           Authorization: `Bearer ${accessToken}`, Accept: "application/json",
           "ChatGPT-Account-Id": accountId, Origin: "https://chatgpt.com",
@@ -1399,69 +1488,116 @@ async function fetchCodexUsage() {
       if (wR.ok) wham = await wR.json()
     } catch {}
   }
-  return { plan, active_until: activeUntil, sessionCount, historyCount, wham }
+  // Slim wham to only rate_limit + credits
+  const whamSlim = wham.rate_limit ? { rate_limit: wham.rate_limit, credits: wham.credits, plan_type: wham.plan_type } : {}
+  const email = wham.email ?? (idToken ? (decodeJwtPayload(idToken)?.email ?? "") : "")
+  const limits = normalizeCodexRateLimit(wham.rate_limit)
+  return { plan, active_until: activeUntil, sessionCount, historyCount, wham: whamSlim, limits, email }
+}
+
+function readFirefoxClaudeSessionKey() {
+  // Find Firefox's cookies SQLite for claude.ai sessionKey
+  const profilesDir = join(homedir(), "Library", "Application Support", "Firefox", "Profiles")
+  if (!existsSync(profilesDir)) return ""
+  for (const profile of readdirSync(profilesDir)) {
+    const cookiesDb = join(profilesDir, profile, "cookies.sqlite")
+    if (!existsSync(cookiesDb)) continue
+    try {
+      const tmpScript = join(tmpdir(), "_ff_cookie.py")
+      writeFileSync(tmpScript, [
+        "import sqlite3,sys",
+        `con=sqlite3.connect(${JSON.stringify(cookiesDb)})`,
+        `row=con.execute("SELECT value FROM moz_cookies WHERE host LIKE '%.claude.ai' AND name='sessionKey' ORDER BY lastAccessed DESC LIMIT 1").fetchone()`,
+        "print(row[0] if row else '')",
+      ].join("\n"))
+      const val = execSync(`python3 "${tmpScript}"`, { encoding: "utf8" }).trim()
+      if (val) return val
+    } catch {}
+  }
+  return ""
+}
+
+function parseClaudeCLIUsage() {
+  // Read from cache written by scripts/claude-usage-poller.sh (requires a real TTY to run)
+  const cacheFile = join(homedir(), ".config", "agent-session-viewer", "claude-usage-cache.json")
+  try {
+    if (!existsSync(cacheFile)) return null
+    const data = JSON.parse(readFileSync(cacheFile, "utf8"))
+    // Ignore stale cache (older than 30 minutes)
+    if (data.fetchedAt && Date.now() - data.fetchedAt > 30 * 60 * 1000) return null
+    return data
+  } catch {
+    return null
+  }
 }
 
 async function fetchClaudeUsage() {
   const statsFile = join(homedir(), ".claude", "stats-cache.json")
-  let stats = {}
-  try { stats = JSON.parse(readFileSync(statsFile, "utf8")) } catch {}
-  const sessionKey = process.env.CLAUDE_SESSION_KEY ?? ""
-  if (!sessionKey) return { ...stats, _hint: "Set CLAUDE_SESSION_KEY env var for 5h/7d limits" }
+  let slim = {}
   try {
-    const orgsR = await fetch("https://claude.ai/api/organizations", {
+    const stats = JSON.parse(readFileSync(statsFile, "utf8"))
+    slim = {
+      numSessions: stats.totalSessions,
+      totalMessages: stats.totalMessages,
+      firstSessionDate: stats.firstSessionDate,
+    }
+  } catch {}
+
+  // Parse CLI usage (session % / weekly %)
+  const cliUsage = parseClaudeCLIUsage()
+  if (cliUsage) slim = { ...slim, cliUsage }
+
+  let sessionKey = process.env.CLAUDE_SESSION_KEY ?? ""
+  if (!sessionKey) sessionKey = readFirefoxClaudeSessionKey()
+  if (!sessionKey) return { ...slim, _hint: "Could not find CLAUDE_SESSION_KEY — set it in .env or log into claude.ai in Firefox" }
+  try {
+    const orgsR = await fetchWithTimeout("https://claude.ai/api/organizations", {
       headers: { Cookie: `sessionKey=${sessionKey}`, Accept: "application/json", "User-Agent": "Mozilla/5.0" },
     })
-    if (!orgsR.ok) return { ...stats, error: `claude.ai organizations: ${orgsR.status}` }
+    if (!orgsR.ok) return { ...slim, error: `claude.ai organizations: ${orgsR.status}` }
     const orgs = await orgsR.json()
     const org = Array.isArray(orgs)
       ? (orgs.find(o => o.capabilities?.includes("chat")) ?? orgs[0])
       : null
-    if (!org?.uuid) return { ...stats, error: "Could not find org ID" }
-    const usageR = await fetch(`https://claude.ai/api/organizations/${org.uuid}/usage`, {
+    if (!org?.uuid) return { ...slim, error: "Could not find org ID" }
+    const usageR = await fetchWithTimeout(`https://claude.ai/api/organizations/${org.uuid}/usage`, {
       headers: { Cookie: `sessionKey=${sessionKey}`, Accept: "application/json", "User-Agent": "Mozilla/5.0" },
     })
-    if (!usageR.ok) return { ...stats, error: `claude.ai usage: ${usageR.status}` }
-    return { ...stats, org_id: org.uuid, usage: await usageR.json() }
+    if (!usageR.ok) return { ...slim, error: `claude.ai usage: ${usageR.status}` }
+    return { ...slim, usage: await usageR.json() }
   } catch (e) {
-    return { ...stats, error: e.message }
+    return { ...slim, error: e.message }
   }
 }
 
 async function fetchOpenCodeUsage() {
-  const pkgFile = join(homedir(), ".opencode", "package.json")
-  if (!existsSync(pkgFile)) return { error: "OpenCode not installed" }
-  const providers = []
+  const dbFile = join(homedir(), ".local", "share", "opencode", "opencode.db")
+  if (!existsSync(dbFile)) return { error: "OpenCode not installed (~/.local/share/opencode/opencode.db not found)" }
   try {
-    const cfFile = join(homedir(), ".opencode", "config.json")
-    if (existsSync(cfFile)) {
-      const d = JSON.parse(readFileSync(cfFile, "utf8"))
-      for (const [k, v] of Object.entries(d.providers ?? {})) {
-        providers.push({ name: k, model: typeof v === "object" ? (v.model ?? "") : "" })
-      }
-    }
-  } catch {}
-  const sessions = []
-  const walkOC = (dir) => {
-    if (!existsSync(dir)) return
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      const full = join(dir, e.name)
-      if (e.isDirectory()) walkOC(full)
-      else if (e.isFile() && e.name.endsWith(".json")) {
-        try {
-          const d = JSON.parse(readFileSync(full, "utf8"))
-          if (typeof d === "object" && ("cost" in d || "tokens" in d || "usage" in d)) {
-            sessions.push({
-              cost:   d.cost   ?? (typeof d.usage === "object" ? d.usage?.cost          : 0) ?? 0,
-              tokens: d.tokens ?? (typeof d.usage === "object" ? d.usage?.total_tokens  : 0) ?? 0,
-            })
-          }
-        } catch {}
-      }
-    }
+    const tmpScript = join(tmpdir(), "_opencode_usage.py")
+    writeFileSync(tmpScript, [
+      "import sqlite3, json",
+      `db = sqlite3.connect(${JSON.stringify(dbFile)})`,
+      "sessions = db.execute('SELECT model, cost, tokens_input, tokens_output FROM session WHERE time_archived IS NULL ORDER BY time_updated DESC LIMIT 100').fetchall()",
+      "total_cost = sum(r[1] or 0 for r in sessions)",
+      "total_in = sum(r[2] or 0 for r in sessions)",
+      "total_out = sum(r[3] or 0 for r in sessions)",
+      "import json as _json",
+      "top_models = {}",
+      "for r in sessions:",
+      "    raw = r[0] or ''",
+      "    try: obj = _json.loads(raw); m = obj.get('providerID','') or obj.get('id','')",
+      "    except: m = raw.split('/')[0]",
+      "    if m: top_models[m] = top_models.get(m, 0) + 1",
+      "providers = list(top_models.keys())",
+      "top_model = max(top_models, key=top_models.get) if top_models else ''",
+      "print(json.dumps({'sessionCount': len(sessions), 'totalCost': total_cost, 'totalTokensIn': total_in, 'totalTokensOut': total_out, 'providers': providers, 'topModel': top_model}))",
+    ].join("\n"))
+    const out = execSync(`python3 "${tmpScript}"`, { encoding: "utf8" }).trim()
+    return JSON.parse(out)
+  } catch (e) {
+    return { error: e.message }
   }
-  walkOC(join(homedir(), ".opencode", "sessions"))
-  return { providers, recentSessions: sessions }
 }
 
 function fetchGeminiUsage() {
@@ -1524,11 +1660,171 @@ function fetchGeminiUsage() {
     sessionCount,
     totalTokens: { input: totalInput, output: totalOutput, cached: totalCached, thoughts: totalThoughts },
     topModel,
-    recentSessions: recentSessions.slice(0, 10),
+    quotaStatus: "Gemini CLI /stats is interactive-only here; showing local transcript token totals, not enforced backend quota.",
   }
 }
 
-function fetchAntigravityUsage() {
+function extractCommandArgument(commandLine, argName) {
+  const eq = commandLine.match(new RegExp(`${argName}=([^\\s"']+|"[^"]*"|'[^']*')`, "i"))
+  if (eq) return eq[1].replace(/^["']|["']$/g, "")
+  const spaced = commandLine.match(new RegExp(`${argName}\\s+([^\\s"']+|"[^"]*"|'[^']*')`, "i"))
+  return spaced ? spaced[1].replace(/^["']|["']$/g, "") : ""
+}
+
+function detectAntigravityLanguageServer() {
+  try {
+    const stdout = execSync("ps aux", { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 })
+    for (const line of stdout.split("\n")) {
+      const lower = line.toLowerCase()
+      if (!lower.includes("antigravity")) continue
+      const hasSignal =
+        line.includes("language-server") ||
+        line.includes("lsp") ||
+        line.includes("--csrf_token") ||
+        line.includes("--extension_server_port") ||
+        line.includes("exa.language_server_pb")
+      if (!hasSignal) continue
+      const parts = line.trim().split(/\s+/)
+      const pid = Number(parts[1])
+      if (!Number.isFinite(pid)) continue
+      const commandLine = parts.slice(10).join(" ")
+      return {
+        pid,
+        csrfToken: extractCommandArgument(commandLine, "--csrf_token"),
+        extensionServerPort: Number(extractCommandArgument(commandLine, "--extension_server_port")) || null,
+      }
+    }
+  } catch {}
+  return null
+}
+
+function antigravityListeningPorts(pid) {
+  const ports = []
+  try {
+    const stdout = execSync(`lsof -nP -iTCP -sTCP:LISTEN -a -p ${pid}`, { encoding: "utf8" })
+    for (const line of stdout.split("\n")) {
+      const match = line.match(/:(\d+)\s+\(LISTEN\)/)
+      if (match) ports.push(Number(match[1]))
+    }
+  } catch {}
+  return [...new Set(ports)].filter(Number.isFinite)
+}
+
+function connectRpcRequest(baseUrl, path, csrfToken, body, timeoutMs = 3000) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(path, baseUrl)
+    const client = url.protocol === "https:" ? https : http
+    const req = client.request({
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname,
+      method: "POST",
+      timeout: timeoutMs,
+      rejectUnauthorized: false,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "Connect-Protocol-Version": "1",
+        ...(csrfToken ? { "X-Codeium-Csrf-Token": csrfToken } : {}),
+      },
+    }, res => {
+      let data = ""
+      res.on("data", chunk => { data += chunk })
+      res.on("end", () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try { resolve(JSON.parse(data)) } catch { resolve(data) }
+        } else {
+          reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`))
+        }
+      })
+    })
+    req.on("error", reject)
+    req.on("timeout", () => {
+      req.destroy()
+      reject(new Error("Request timed out"))
+    })
+    req.write(JSON.stringify(body ?? { wrapper_data: {} }))
+    req.end()
+  })
+}
+
+async function probeAntigravityConnectPort(port, csrfToken) {
+  const path = "/exa.language_server_pb.LanguageServerService/GetUnleashData"
+  for (const protocol of ["https", "http"]) {
+    const baseUrl = `${protocol}://127.0.0.1:${port}`
+    try {
+      await connectRpcRequest(baseUrl, path, csrfToken, { wrapper_data: {} }, 700)
+      return baseUrl
+    } catch (e) {
+      const msg = String(e?.message ?? e).toLowerCase()
+      if (msg.includes("http 401")) return baseUrl
+    }
+  }
+  return null
+}
+
+function parseAntigravityQuota(userStatusResponse) {
+  const userStatus = userStatusResponse?.userStatus ?? userStatusResponse ?? {}
+  const planStatus = userStatus.planStatus ?? {}
+  const planInfo = planStatus.planInfo ?? {}
+  const available = planStatus.availablePromptCredits
+  const monthly = planInfo.monthlyPromptCredits
+  const promptCredits = typeof available === "number" && typeof monthly === "number"
+    ? {
+        available,
+        monthly,
+        used: monthly - available,
+        remainingPercentage: monthly > 0 ? available / monthly : null,
+        usedPercentage: monthly > 0 ? (monthly - available) / monthly : null,
+      }
+    : null
+  const clientModelConfigs = userStatus.cascadeModelConfigData?.clientModelConfigs
+  const models = Array.isArray(clientModelConfigs)
+    ? clientModelConfigs.flatMap(model => {
+        const modelId = model?.modelOrAlias?.model
+        const quotaInfo = model?.quotaInfo
+        if (!modelId || !quotaInfo) return []
+        return [{
+          modelId,
+          label: model.label ?? modelId,
+          remainingPercentage: typeof quotaInfo.remainingFraction === "number" ? quotaInfo.remainingFraction : null,
+          usedPercentage: typeof quotaInfo.remainingFraction === "number" ? 1 - quotaInfo.remainingFraction : null,
+          isExhausted: Boolean(quotaInfo.isExhausted) || quotaInfo.remainingFraction === 0,
+          resetTime: quotaInfo.resetTime ?? null,
+        }]
+      })
+    : []
+  return {
+    email: userStatus.email,
+    planType: planInfo.planType,
+    promptCredits,
+    models,
+  }
+}
+
+async function fetchAntigravityLocalQuota() {
+  const processInfo = detectAntigravityLanguageServer()
+  if (!processInfo) throw new Error("Antigravity language server is not running")
+  const ports = antigravityListeningPorts(processInfo.pid)
+  if (processInfo.extensionServerPort) ports.push(processInfo.extensionServerPort)
+  const uniquePorts = [...new Set(ports)].filter(Number.isFinite)
+  if (!uniquePorts.length) throw new Error("Could not detect Antigravity language-server port")
+  for (const port of uniquePorts) {
+    const baseUrl = await probeAntigravityConnectPort(port, processInfo.csrfToken)
+    if (!baseUrl) continue
+    const raw = await connectRpcRequest(
+      baseUrl,
+      "/exa.language_server_pb.LanguageServerService/GetUserStatus",
+      processInfo.csrfToken,
+      { metadata: { ideName: "antigravity", extensionName: "antigravity", locale: "en" } },
+      5000,
+    )
+    return { source: "local-language-server", port, ...parseAntigravityQuota(raw) }
+  }
+  throw new Error("Could not connect to Antigravity quota endpoint")
+}
+
+async function fetchAntigravityUsage() {
   const brainDir = join(homedir(), ".gemini", "antigravity", "brain")
   if (!existsSync(brainDir)) return { error: "Antigravity not installed" }
 
@@ -1575,32 +1871,48 @@ function fetchAntigravityUsage() {
     } catch {}
   }
 
+  let quota = null
+  let quotaError = ""
+  try {
+    quota = await fetchAntigravityLocalQuota()
+  } catch (e) {
+    quotaError = e?.message ?? String(e)
+  }
+
   return {
     sessionCount: sessionDirs.length,
     conversationCount,
-    model,
+    model: quota?.models?.[0]?.label ?? model,
+    quota,
+    quotaError,
     recentSessions: sessions.slice(-5).reverse(),
   }
 }
 
 async function fetchAllUsage() {
-  const [cursor, codex, claude, opencode, gemini, antigravity] = await Promise.allSettled([
-    fetchCursorUsage(),
-    fetchCodexUsage(),
-    fetchClaudeUsage(),
-    fetchOpenCodeUsage(),
-    Promise.resolve(fetchGeminiUsage()),
-    Promise.resolve(fetchAntigravityUsage()),
+  const [cursor, codex, claude, opencode, gemini, antigravity] = await Promise.all([
+    settleUsage("Cursor", fetchCursorUsage()),
+    settleUsage("Codex", fetchCodexUsage()),
+    settleUsage("Claude", fetchClaudeUsage()),
+    settleUsage("OpenCode", fetchOpenCodeUsage()),
+    settleUsage("Gemini", Promise.resolve(fetchGeminiUsage())),
+    settleUsage("Antigravity", fetchAntigravityUsage()),
   ])
-  return {
-    cursor:      cursor.status      === "fulfilled" ? cursor.value      : { error: String(cursor.reason) },
-    codex:       codex.status       === "fulfilled" ? codex.value       : { error: String(codex.reason) },
-    claude:      claude.status      === "fulfilled" ? claude.value      : { error: String(claude.reason) },
-    opencode:    opencode.status    === "fulfilled" ? opencode.value    : { error: String(opencode.reason) },
-    gemini:      gemini.status      === "fulfilled" ? gemini.value      : { error: String(gemini.reason) },
-    antigravity: antigravity.status === "fulfilled" ? antigravity.value : { error: String(antigravity.reason) },
-    fetchedAt: Date.now(),
-  }
+  const snapshot = { cursor, codex, claude, opencode, gemini, antigravity, fetchedAt: Date.now() }
+  pushUsageSnapshot(snapshot)
+  return snapshot
+}
+
+function pushUsageSnapshot(snapshot) {
+  const workerUrl = process.env.USAGE_WORKER_URL
+  const secret    = process.env.USAGE_SYNC_SECRET
+  if (!workerUrl || !secret) return
+  const ingestUrl = workerUrl.replace(/\/$/, "") + "/ingest"
+  fetch(ingestUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Sync-Secret": secret },
+    body: JSON.stringify(snapshot),
+  }).catch(e => console.warn("[usage-push] Failed to push to worker:", e?.message))
 }
 
 const server = http.createServer(async (req, res) => {
@@ -1684,6 +1996,13 @@ const server = http.createServer(async (req, res) => {
     if (!checkHeaderAuth(req)) { json({ error: "Unauthorized" }, 401); return }
     broadcastProjects()
     json({ ok: true })
+    return
+  }
+
+  // GET /api/usage — cookie or header auth (daemon/CLI uses header)
+  if (url.pathname === "/api/usage" && req.method === "GET") {
+    if (!checkCookieAuth(req) && !checkHeaderAuth(req)) { json({ error: "Unauthorized" }, 401); return }
+    json(await fetchAllUsage())
     return
   }
 
@@ -2189,11 +2508,6 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  // GET /api/usage — live usage data for all AI services
-  if (url.pathname === "/api/usage" && req.method === "GET") {
-    json(await fetchAllUsage())
-    return
-  }
 
   // POST /api/open — open any local file/path in the OS default viewer
   if (url.pathname === "/api/open" && req.method === "POST") {
