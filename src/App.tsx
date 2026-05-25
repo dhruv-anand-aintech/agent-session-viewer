@@ -145,36 +145,34 @@ export default function App() {
       </header>
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
       <div className="main">
-        {tab === "usage"
-          ? <UsageLimits />
-          : <>
-              <Sidebar
-                projects={projects}
-                projectsLoading={projectsLoading}
-                totalSessions={totalSessions}
-                listMode={listMode}
-                sessionsTruncated={sessionsTruncated}
-                onLoadAllSessions={loadAllSessions}
-                activeSessionId={activeSessionId}
-                onSelect={(p, s) => setSelected({ project: p, session: s })}
-                width={sidebarWidth}
-                onDragStart={onDragStart}
-                mobileOpen={mobileSidebarOpen}
-                onMobileClose={() => setMobileSidebarOpen(false)}
-              />
-              <div className="content">
-                {effectiveMeta && effectiveProjectPath
-                  ? <SessionPane
-                      key={effectiveMeta.id}
-                      projectDir={effectiveProjectPath}
-                      sessionMeta={effectiveMeta}
-                      onBack={() => setMobileSidebarOpen(true)}
-                      capabilities={capabilities}
-                    />
-                  : <div className="empty-state">Select a session from the sidebar</div>}
-              </div>
-            </>
-        }
+        <UsageLimits visible={tab === "usage"} />
+        <div className="sessions-layout" style={{ display: tab === "sessions" ? "flex" : "none", flex: 1, overflow: "hidden" }}>
+          <Sidebar
+            projects={projects}
+            projectsLoading={projectsLoading}
+            totalSessions={totalSessions}
+            listMode={listMode}
+            sessionsTruncated={sessionsTruncated}
+            onLoadAllSessions={loadAllSessions}
+            activeSessionId={activeSessionId}
+            onSelect={(p, s) => setSelected({ project: p, session: s })}
+            width={sidebarWidth}
+            onDragStart={onDragStart}
+            mobileOpen={mobileSidebarOpen}
+            onMobileClose={() => setMobileSidebarOpen(false)}
+          />
+          <div className="content">
+            {effectiveMeta && effectiveProjectPath
+              ? <SessionPane
+                  key={effectiveMeta.id}
+                  projectDir={effectiveProjectPath}
+                  sessionMeta={effectiveMeta}
+                  onBack={() => setMobileSidebarOpen(true)}
+                  capabilities={capabilities}
+                />
+              : <div className="empty-state">Select a session from the sidebar</div>}
+          </div>
+        </div>
       </div>
     </div>
   )

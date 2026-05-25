@@ -6,7 +6,6 @@ interface UsageData {
   codex?: CodexData
   claude?: ClaudeData
   opencode?: OpenCodeData
-  gemini?: GeminiData
   antigravity?: AntigravityData
   fetchedAt?: number
   error?: string
@@ -76,22 +75,6 @@ interface ClaudeData {
   }
   numSessions?: number
   _hint?: string
-  error?: string
-}
-
-interface GeminiData {
-  email?: string
-  sessionCount?: number
-  totalTokens?: { input: number; output: number; cached: number; thoughts: number }
-  topModel?: string
-  limits?: {
-    primary?: RateWindow | null
-    secondary?: RateWindow | null
-    tertiary?: RateWindow | null
-    models?: { modelId: string; percentLeft: number; usedPercent: number; resetsAt?: string | null; resetDescription?: string }[]
-  }
-  recentSessions?: { startTime?: string; input: number; output: number; model: string }[]
-  quotaStatus?: string
   error?: string
 }
 
@@ -358,29 +341,6 @@ function fmtTokens(n: number) {
   return String(n)
 }
 
-function GeminiCard({ data, loading }: { data?: GeminiData; loading?: boolean }) {
-  const t = data?.totalTokens
-  const limits = data?.limits
-  return (
-    <CardShell id="gemini" title="Gemini CLI" subtitle={data?.email ?? undefined} icon="◆" loading={loading}>
-      {data?.error && <div className="ul-error">{data.error}</div>}
-      {data?.quotaStatus && <div className="ul-hint">{data.quotaStatus}</div>}
-      {limits?.primary && <Bar pct={limits.primary.usedPercent ?? 0} label="Pro" sublabel={windowSublabel(limits.primary)} />}
-      {limits?.secondary && <Bar pct={limits.secondary.usedPercent ?? 0} label="Flash" sublabel={windowSublabel(limits.secondary)} />}
-      {limits?.tertiary && <Bar pct={limits.tertiary.usedPercent ?? 0} label="Flash Lite" sublabel={windowSublabel(limits.tertiary)} />}
-      {data?.sessionCount != null && <StatRow label="Sessions" value={String(data.sessionCount)} />}
-      {t && t.input + t.output > 0 && <>
-        <StatRow label="Input tokens"    value={fmtTokens(t.input)} />
-        <StatRow label="Output tokens"   value={fmtTokens(t.output)} />
-        {t.cached > 0 && <StatRow label="Cached tokens"  value={fmtTokens(t.cached)} />}
-        {t.thoughts > 0 && <StatRow label="Thought tokens" value={fmtTokens(t.thoughts)} />}
-      </>}
-      {data?.topModel && <StatRow label="Model" value={data.topModel} />}
-      {!data && !loading && <div className="ul-error">No data</div>}
-    </CardShell>
-  )
-}
-
 function AntigravityCard({ data, loading }: { data?: AntigravityData; loading?: boolean }) {
   const sessions = data?.recentSessions ?? []
   const quota = data?.quota
@@ -424,7 +384,7 @@ function AntigravityCard({ data, loading }: { data?: AntigravityData; loading?: 
   )
 }
 
-export function UsageLimits() {
+export function UsageLimits({ visible }: { visible: boolean }) {
   const [data, setData] = useState<UsageData | null>(null)
   const [loading, setLoading] = useState(false)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
@@ -452,7 +412,7 @@ export function UsageLimits() {
   }, [refresh])
 
   return (
-    <div className="ul-root">
+    <div className="ul-root" style={{ display: visible ? undefined : "none" }}>
       <div className="ul-toolbar">
         <span className="ul-toolbar-label">
           {lastUpdated ? `Updated ${lastUpdated.toLocaleTimeString()}` : "Loading…"}
@@ -467,7 +427,6 @@ export function UsageLimits() {
         <CursorCard   data={data?.cursor}   loading={loading && !data?.cursor} />
         <CodexCard    data={data?.codex}    loading={loading && !data?.codex} />
         <OpenCodeCard data={data?.opencode} loading={loading && !data?.opencode} />
-        <GeminiCard      data={data?.gemini}      loading={loading && !data?.gemini} />
         <AntigravityCard data={data?.antigravity} loading={loading && !data?.antigravity} />
       </div>
     </div>

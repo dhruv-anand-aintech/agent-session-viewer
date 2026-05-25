@@ -1686,142 +1686,6 @@ async function fetchOpenCodeUsage() {
   }
 }
 
-async function fetchGeminiUsage() {
-  const tmpRoot = join(homedir(), ".gemini", "tmp")
-  if (!existsSync(tmpRoot)) return { error: "Gemini CLI not installed" }
-
-  const credsFile = join(homedir(), ".gemini", "oauth_creds.json")
-  let email = ""
-  try {
-    const accounts = JSON.parse(readFileSync(join(homedir(), ".gemini", "google_accounts.json"), "utf8"))
-    email = accounts.active ?? ""
-  } catch {}
-
-  // Aggregate tokens across all session jsonl files
-  let totalInput = 0, totalOutput = 0, totalCached = 0, totalThoughts = 0, sessionCount = 0
-  const modelCounts = {}
-  const recentSessions = []
-
-  const walkGemini = (dir, depth = 0) => {
-    if (!existsSync(dir) || depth > 3) return
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      const full = join(dir, e.name)
-      if (e.isDirectory()) { walkGemini(full, depth + 1); continue }
-      if (!e.name.endsWith(".jsonl")) continue
-      let sessInput = 0, sessOutput = 0, model = ""
-      try {
-        const lines = readFileSync(full, "utf8").split("\n").filter(Boolean)
-        let startTime = null
-        for (const line of lines) {
-          try {
-            const msg = JSON.parse(line)
-            if (msg.startTime) startTime = msg.startTime
-            if (msg.tokens) {
-              totalInput    += msg.tokens.input    ?? 0
-              totalOutput   += msg.tokens.output   ?? 0
-              totalCached   += msg.tokens.cached   ?? 0
-              totalThoughts += msg.tokens.thoughts ?? 0
-              sessInput  += msg.tokens.input  ?? 0
-              sessOutput += msg.tokens.output ?? 0
-            }
-            if (msg.model) { model = msg.model; modelCounts[msg.model] = (modelCounts[msg.model] ?? 0) + 1 }
-          } catch {}
-        }
-        sessionCount++
-        if (sessInput + sessOutput > 0) {
-          recentSessions.push({ startTime, input: sessInput, output: sessOutput, model })
-        }
-      } catch {}
-    }
-  }
-  walkGemini(tmpRoot)
-
-  // Sort recent sessions newest-first, keep last 10
-  recentSessions.sort((a, b) => (b.startTime ?? "").localeCompare(a.startTime ?? ""))
-
-  const topModel = Object.entries(modelCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? ""
-
-  const quota = await fetchGeminiQuota()
-  return {
-    email,
-    sessionCount,
-    totalTokens: { input: totalInput, output: totalOutput, cached: totalCached, thoughts: totalThoughts },
-    topModel,
-    ...(quota.limits ? { limits: quota.limits } : {}),
-    quotaStatus: quota.error ?? "Gemini quota from Cloud Code Assist API.",
-  }
-}
-
-async function fetchGeminiQuota() {
-  const credsFile = join(homedir(), ".gemini", "oauth_creds.json")
-  if (!existsSync(credsFile)) return { error: "Gemini quota unavailable: ~/.gemini/oauth_creds.json not found." }
-  try {
-    const creds = JSON.parse(readFileSync(credsFile, "utf8"))
-    const accessToken = creds.access_token
-    if (!accessToken) return { error: "Gemini quota unavailable: access token missing." }
-    const quotaR = await fetchWithTimeout("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: "{}",
-    }, 20000)
-    if (!quotaR.ok) return { error: `Gemini quota unavailable: HTTP ${quotaR.status}` }
-    const body = await quotaR.json()
-    const modelMap = new Map()
-    for (const bucket of body.buckets ?? []) {
-      if (!bucket?.modelId || typeof bucket.remainingFraction !== "number") continue
-      const current = modelMap.get(bucket.modelId)
-      if (!current || bucket.remainingFraction < current.remainingFraction) {
-        modelMap.set(bucket.modelId, bucket)
-      }
-    }
-    const models = [...modelMap.values()].map(bucket => {
-      const percentLeft = Math.max(0, Math.min(100, bucket.remainingFraction * 100))
-      const resetsAt = normalizeResetTime(bucket.resetTime)
-      return {
-        modelId: bucket.modelId,
-        percentLeft,
-        usedPercent: 100 - percentLeft,
-        resetsAt,
-        resetDescription: resetDescription(resetsAt),
-      }
-    }).sort((a, b) => a.modelId.localeCompare(b.modelId))
-    const pick = (matcher) => models.filter(matcher).sort((a, b) => a.percentLeft - b.percentLeft)[0] ?? null
-    const pro = pick(m => /\bpro\b/.test(m.modelId))
-    const flashLite = pick(m => m.modelId.includes("flash-lite"))
-    const flash = pick(m => m.modelId.includes("flash") && !m.modelId.includes("flash-lite"))
-    return {
-      limits: {
-        primary: pro ? modelToRateWindow(pro) : null,
-        secondary: flash ? modelToRateWindow(flash) : null,
-        tertiary: flashLite ? modelToRateWindow(flashLite) : null,
-        models,
-      },
-    }
-  } catch (e) {
-    return { error: `Gemini quota unavailable: ${e?.message ?? String(e)}` }
-  }
-}
-
-function modelToRateWindow(model) {
-  return {
-    usedPercent: model.usedPercent,
-    remainingPercent: model.percentLeft,
-    windowMinutes: 24 * 60,
-    resetsAt: model.resetsAt,
-    resetDescription: model.resetDescription,
-  }
-}
-
-function extractCommandArgument(commandLine, argName) {
-  const eq = commandLine.match(new RegExp(`${argName}=([^\\s"']+|"[^"]*"|'[^']*')`, "i"))
-  if (eq) return eq[1].replace(/^["']|["']$/g, "")
-  const spaced = commandLine.match(new RegExp(`${argName}\\s+([^\\s"']+|"[^"]*"|'[^']*')`, "i"))
-  return spaced ? spaced[1].replace(/^["']|["']$/g, "") : ""
-}
-
 function detectAntigravityLanguageServer() {
   try {
     const stdout = execSync("ps aux", { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 })
@@ -2041,15 +1905,14 @@ async function fetchAntigravityUsage() {
 }
 
 async function fetchAllUsage() {
-  const [cursor, codex, claude, opencode, gemini, antigravity] = await Promise.all([
+  const [cursor, codex, claude, opencode, antigravity] = await Promise.all([
     settleUsage("Cursor", fetchCursorUsage()),
     settleUsage("Codex", fetchCodexUsage()),
     settleUsage("Claude", fetchClaudeUsage()),
     settleUsage("OpenCode", fetchOpenCodeUsage()),
-    settleUsage("Gemini", fetchGeminiUsage()),
     settleUsage("Antigravity", fetchAntigravityUsage()),
   ])
-  const snapshot = { cursor, codex, claude, opencode, gemini, antigravity, fetchedAt: Date.now() }
+  const snapshot = { cursor, codex, claude, opencode, antigravity, fetchedAt: Date.now() }
   pushUsageSnapshot(snapshot)
   return snapshot
 }
