@@ -80,7 +80,7 @@ To access from other devices on your network (e.g. phone):
 
   npm run local -- --host
 
-For Cloudflare Worker deployment (remote access, daemon sync):
+For Cloudflare Worker deployment, optionally with a custom Cloudflare-managed hostname:
 
-  npm run setup:cloudflare
+  npm run setup:cloudflare -- --domain sessions.example.com
 `)

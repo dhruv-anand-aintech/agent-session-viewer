@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react"
+import { useLocation } from "wouter"
 import { canonicalizeSelectedProjectPath } from "./sessionPaneState"
 import { markAppInit, markSessionClick } from "./perf"
 import { useProjects, useCapabilities } from "./useProjects"
@@ -53,9 +54,8 @@ export default function App() {
   })
   const [showSettings, setShowSettings] = useState(false)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
-  const [tab, setTab] = useState<"sessions" | "usage">(() =>
-    window.location.hash === "#usage" ? "usage" : "sessions"
-  )
+  const [location, setLocation] = useLocation()
+  const tab = location === "/usage" ? "usage" : "sessions"
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = localStorage.getItem("sidebarWidth")
     return saved ? Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, Number(saved))) : SIDEBAR_DEFAULT
@@ -127,10 +127,7 @@ export default function App() {
       : null)
   const effectiveProjectPath = canonicalProjectPath ?? activeProjectPath
 
-  const switchTab = (t: "sessions" | "usage") => {
-    setTab(t)
-    history.replaceState(null, "", t === "usage" ? "#usage" : window.location.pathname + window.location.search)
-  }
+  const switchTab = (t: "sessions" | "usage") => setLocation(t === "usage" ? "/usage" : "/sessions")
 
   return (
     <div className="app">

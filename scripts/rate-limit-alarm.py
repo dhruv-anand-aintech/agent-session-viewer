@@ -125,6 +125,10 @@ WEEKDAY_RE = re.compile(
     re.I,
 )
 TIMEZONE_RE = re.compile(r"\((?P<tz>[A-Za-z_]+/[A-Za-z0-9_+./-]+)\)")
+UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.I,
+)
 
 
 def collect_strings(value: Any) -> Iterable[str]:
@@ -187,6 +191,10 @@ def extract_signal_text(data: Any) -> str:
             for item in value:
                 add(item)
         elif isinstance(value, dict):
+            # Skip tool_result blocks — they contain arbitrary third-party API
+            # responses and are a common source of false positives.
+            if value.get("type") == "tool_result":
+                return
             for key in ("content", "text", "message", "summary", "body", "error", "reason", "output"):
                 if key in value:
                     add(value[key])
@@ -264,16 +272,21 @@ def transcript_rate_limit_text(data: Any) -> str:
 
 
 def platform_resume_command(agent: str, session_id: str, cwd: str) -> list[str] | None:
+    session_uuid = UUID_RE.search(session_id).group(0) if UUID_RE.search(session_id) else session_id
     if agent == "Claude" and session_id:
         return ["claude", "--resume", session_id]
     if agent == "Codex" and session_id:
-        return ["codex", "resume", session_id]
+        return ["codex", "resume", session_uuid]
     if agent == "Gemini":
         return ["gemini", "--resume", "latest"]
     if agent == "Cursor":
         return ["cursor", "--chat"]
     if agent == "OpenCode" and session_id:
-        return ["opencode", "--continue", "--session", session_id]
+        return ["opencode", "--session", session_id]
+    if agent == "Hermes" and session_id:
+        return ["hermes", "--resume", session_id]
+    if agent == "OpenClaw" and session_id:
+        return ["openclaw", "tui", "--local", "--session", session_uuid]
     return None
 
 
@@ -346,24 +359,43 @@ def looks_like_rate_limit(text: str) -> bool:
     return bool(LIMIT_SIGNAL_RE.search(lowered)) or any(keyword in lowered for keyword in KEYWORDS)
 
 
-def has_explicit_limit_signal(data: Any, text: str) -> bool:
-    lowered = text.lower()
-    if LIMIT_SIGNAL_RE.search(lowered):
+def has_structural_limit_signal(data: Any) -> bool:
+    """Return True only when structured fields (not body text) indicate a rate limit."""
+    if not isinstance(data, dict):
+        return False
+    if data.get("error") == "rate_limit":
         return True
-    if isinstance(data, dict):
-        if data.get("error") == "rate_limit":
+    message = data.get("message")
+    if isinstance(message, str) and LIMIT_SIGNAL_RE.search(message.lower()):
+        return True
+    rate_limits = _find_rate_limits(data)
+    if isinstance(rate_limits, dict):
+        if rate_limits.get("rate_limit_reached_type"):
             return True
-        rate_limits = _find_rate_limits(data)
-        if isinstance(rate_limits, dict):
-            if rate_limits.get("rate_limit_reached_type"):
+        if rate_limits.get("primary") is None and rate_limits.get("secondary") is None:
+            credits = rate_limits.get("credits")
+            if isinstance(credits, dict) and not credits.get("has_credits", True):
                 return True
-            if rate_limits.get("primary") is None and rate_limits.get("secondary") is None:
-                credits = rate_limits.get("credits")
-                if isinstance(credits, dict) and not credits.get("has_credits", True):
-                    return True
-    for value in collect_strings(data):
-        if isinstance(value, str) and value.strip().lower() == "rate_limit":
+    for key in ("error", "type", "subtype", "reason", "code"):
+        value = data.get(key)
+        if not isinstance(value, str):
+            continue
+        lowered = value.strip().lower()
+        if lowered == "rate_limit":
             return True
+        if key in {"error", "reason", "code"} and LIMIT_SIGNAL_RE.search(lowered):
+            return True
+    return False
+
+
+def has_explicit_limit_signal(data: Any, text: str) -> bool:
+    if has_structural_limit_signal(data):
+        return True
+    # Text matching alone is not sufficient — it fires on discussions about rate
+    # limits (e.g. link titles). Only fall back to regex when no data dict is
+    # provided (transcript path passes a synthetic {"error":"rate_limit"} dict).
+    if not isinstance(data, dict):
+        return bool(LIMIT_SIGNAL_RE.search(text.lower()))
     return False
 
 
@@ -673,12 +705,16 @@ def launch_alert_applet(title: str, body: str) -> None:
             "quit",
         ]
     )
-    subprocess.run(
-        ["/usr/bin/osacompile", "-o", os.fspath(app_path), "-e", script],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        subprocess.run(
+            ["/usr/bin/osacompile", "-o", os.fspath(app_path), "-e", script],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return
     if app_path.exists():
         subprocess.Popen(
             ["/usr/bin/open", os.fspath(app_path)],
@@ -720,22 +756,29 @@ def prompt_applet_choice(title: str, body: str, buttons: list[str], default_butt
             "quit",
         ]
     )
-    compiled = subprocess.run(
-        ["/usr/bin/osacompile", "-o", os.fspath(app_path), "-e", script],
-        check=False,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        compiled = subprocess.run(
+            ["/usr/bin/osacompile", "-o", os.fspath(app_path), "-e", script],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return cancel_button
     if compiled.returncode != 0 or not app_path.exists():
         return cancel_button
-    subprocess.Popen(
-        ["/usr/bin/open", os.fspath(app_path)],
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        close_fds=True,
-    )
+    try:
+        subprocess.Popen(
+            ["/usr/bin/open", os.fspath(app_path)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError:
+        return cancel_button
     deadline = time.time() + 300
     while time.time() < deadline:
         if choice_path.exists():

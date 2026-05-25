@@ -55,6 +55,9 @@
     "setup": "node setup-local.mjs",
     "setup:cloudflare": "node setup.mjs",
     "deploy": "node deploy.mjs",
+    "publish:studies": "node scripts/publish-studies.mjs",
+    "configure:directory": "node scripts/configure-worker-directory.mjs",
+    "deploy:directory": "npx wrangler deploy --config wrangler.directory.toml",
     "daemon": "node daemon/watch.mjs",
     "daemon:launchd-install": "bash scripts/install-launchd-daemon.sh",
     "daemon:launchd-uninstall": "bash scripts/uninstall-launchd-daemon.sh",
@@ -66,15 +69,17 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
+    "@inquirer/prompts": "^8.4.3",
     "@lancedb/lancedb": "^0.27.2",
     "@ngrok/ngrok": "^1.7.0",
     "better-sqlite3": "^12.9.0",
     "fuse.js": "^7.3.0",
-    "localtunnel": "^2.0.2",
     "marked": "^17.0.5",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "untun": "^0.1.3"
+    "smol-toml": "^1.6.1",
+    "untun": "^0.1.3",
+    "wouter": "^3.9.0"
   },
   "devDependencies": {
     "@cloudflare/kv-asset-handler": "^0.4.2",

@@ -1,5 +1,6 @@
 import { StrictMode, useState, useEffect } from "react"
 import { createRoot } from "react-dom/client"
+import { Router, Redirect } from "wouter"
 import PinGate from "./PinGate"
 import App from "./App"
 
@@ -47,7 +48,13 @@ function Root() {
     )
   }
   if (!authed) return <PinGate onAuth={() => setAuthed(true)} />
-  return <App />
+  return (
+    <Router>
+      {/* Redirect bare / to /sessions */}
+      {window.location.pathname === "/" && <Redirect to="/sessions" />}
+      <App />
+    </Router>
+  )
 }
 
 createRoot(document.getElementById("root")!).render(

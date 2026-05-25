@@ -15,6 +15,8 @@ import { execFileSync, execSync } from "node:child_process"
 import { readFileSync, writeFileSync } from "node:fs"
 import { createInterface } from "node:readline"
 
+const args = process.argv.slice(2)
+
 function run(cmd, args, opts = {}) {
   return execFileSync(cmd, args, { encoding: "utf8", stdio: ["pipe", "pipe", "inherit"], ...opts })
 }
@@ -22,6 +24,44 @@ function run(cmd, args, opts = {}) {
 function prompt(question) {
   const rl = createInterface({ input: process.stdin, output: process.stdout })
   return new Promise(resolve => rl.question(question, ans => { rl.close(); resolve(ans.trim()) }))
+}
+
+function argValue(...names) {
+  for (const name of names) {
+    const eq = args.find(arg => arg.startsWith(`${name}=`))
+    if (eq) return eq.slice(name.length + 1).trim()
+    const index = args.indexOf(name)
+    if (index !== -1 && args[index + 1]) return args[index + 1].trim()
+  }
+  return ""
+}
+
+function validateHostname(hostname) {
+  if (!hostname) return ""
+  if (hostname.includes("://") || hostname.includes("/") || hostname.includes("*")) {
+    throw new Error(`Custom domain must be a hostname like sessions.example.com, got: ${hostname}`)
+  }
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i.test(hostname)) {
+    throw new Error(`Custom domain is not a valid hostname: ${hostname}`)
+  }
+  return hostname.toLowerCase()
+}
+
+function withCustomDomainRoute(toml, hostname) {
+  if (!hostname) return toml
+  const routeBlock = [
+    "",
+    "# Cloudflare custom domain for Agent Session Viewer.",
+    "# The zone must already be active on Cloudflare nameservers.",
+    "[[routes]]",
+    `pattern = "${hostname}"`,
+    "custom_domain = true",
+    "",
+  ].join("\n")
+  const withoutExistingCustomDomain = toml
+    .replace(/\n# Cloudflare custom domain for Agent Session Viewer\.[\s\S]*?(?=\n(?:\[\[|\[|# Remote access|name\s*=)|\s*$)/, "\n")
+    .trimEnd()
+  return `${withoutExistingCustomDomain}${routeBlock}`
 }
 
 console.log("🚀  Agent Session Viewer — Cloudflare setup\n")
@@ -52,6 +92,9 @@ let toml = readFileSync("wrangler.toml", "utf8")
 toml = toml
   .replace(/id\s*=\s*"PLACEHOLDER_KV_ID"/, `id = "${kvId}"`)
   .replace(/preview_id\s*=\s*"PLACEHOLDER_KV_PREVIEW_ID"/, `preview_id = "${kvPrevId}"`)
+const promptedDomain = argValue("--domain", "--custom-domain") || await prompt("\nCustom domain/subdomain (optional, must already be an active Cloudflare zone): ")
+const customDomain = validateHostname(promptedDomain)
+toml = withCustomDomainRoute(toml, customDomain)
 writeFileSync("wrangler.toml", toml)
 console.log("  ✓ wrangler.toml updated")
 
@@ -74,17 +117,20 @@ console.log("\nBuilding and deploying…")
 execSync("npm run build && npx wrangler deploy", { stdio: "inherit" })
 
 // ── Done ───────────────────────────────────────────────────────────────────────
-const workerName = JSON.parse(readFileSync("wrangler.toml", "utf8").replace(/\[.*?\]\n/g, "")).name
-  ?? "agent-session-viewer"
+const workerName = readFileSync("wrangler.toml", "utf8").match(/^\s*name\s*=\s*"([^"]+)"/m)?.[1]
+  || "agent-session-viewer"
+const publicUrl = customDomain
+  ? `https://${customDomain}`
+  : `https://${workerName}.<your-subdomain>.workers.dev`
 
 console.log(`
 ✅  Setup complete!
 
-Your viewer is live at: https://${workerName}.<your-subdomain>.workers.dev
+Your viewer is live at: ${publicUrl}
 
 To start syncing your sessions to the Worker, run:
 
-  WORKER_URL=https://${workerName}.<your-subdomain>.workers.dev AUTH_PIN=${pin} npm run daemon
+  WORKER_URL=${publicUrl} AUTH_PIN=${pin} npm run daemon
 
 Or pass them as flags:
 

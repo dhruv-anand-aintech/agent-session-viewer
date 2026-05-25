@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import runpy
 import time
 from pathlib import Path
@@ -16,6 +17,10 @@ DEFAULT_ALARM_SCRIPT = Path(__file__).resolve().parent / "rate-limit-alarm.py"
 ALARM_SCRIPT = Path(os.environ.get("AGENT_SESSION_VIEWER_RATE_LIMIT_ALARM_SCRIPT", os.fspath(DEFAULT_ALARM_SCRIPT)))
 POLL_INTERVAL = 1.5
 STARTUP_LOOKBACK_SECONDS = 30 * 60
+UUID_RE = re.compile(
+    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+    re.I,
+)
 
 WATCH_SPECS = [
     {
@@ -138,12 +143,21 @@ def infer_session_id(entry: Any, path: Path) -> str:
             value = entry.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
+        payload = entry.get("payload")
+        if isinstance(payload, dict):
+            for key in ("session_id", "sessionId", "id", "traceId", "chatId"):
+                value = payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
         session = entry.get("session")
         if isinstance(session, dict):
             for key in ("id", "sessionId", "session_id"):
                 value = session.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
+    match = UUID_RE.search(path.stem)
+    if match:
+        return match.group(0)
     return path.stem
 
 

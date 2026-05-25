@@ -19,6 +19,16 @@
   color: var(--text-400);
 }
 
+.ul-page-error {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, hsl(0, 78%, 60%) 38%, var(--border-100));
+  border-radius: 8px;
+  background: color-mix(in srgb, hsl(0, 78%, 60%) 10%, transparent);
+  color: var(--text-100);
+  font-size: 12px;
+}
+
 .ul-refresh-btn {
   background: var(--bg-000);
   border: 1px solid var(--border-100);
@@ -96,9 +106,11 @@
 .ul-bar-wrap  { margin: 10px 0; }
 .ul-bar-label { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-400); margin-bottom: 5px; }
 .ul-bar-track { height: 5px; background: var(--bg-300); border-radius: 99px; overflow: hidden; }
-.ul-bar-fill  { height: 100%; border-radius: 99px; background: var(--accent); transition: width 0.5s ease; }
-.ul-bar-fill.warn   { background: hsl(38, 92%, 50%); }
-.ul-bar-fill.danger { background: hsl(0, 78%, 60%); }
+.ul-bar-fill  { height: 100%; border-radius: 99px; transition: width 0.5s ease; }
+.ul-bar-fill.low       { background: hsl(145, 63%, 43%); }
+.ul-bar-fill.medium    { background: hsl(48, 94%, 50%); }
+.ul-bar-fill.high      { background: hsl(28, 92%, 52%); }
+.ul-bar-fill.exhausted { background: hsl(0, 78%, 58%); }
 
 /* ── Stats ──────────────────────────────────────────────────────────────────── */
 

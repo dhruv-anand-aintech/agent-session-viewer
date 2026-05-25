@@ -17,6 +17,54 @@ import { fileURLToPath } from "node:url"
 import path from "node:path"
 
 const root = path.dirname(fileURLToPath(import.meta.url))
+const args = process.argv.slice(2)
+
+function argValue(...names) {
+  for (const name of names) {
+    const eq = args.find(arg => arg.startsWith(`${name}=`))
+    if (eq) return eq.slice(name.length + 1).trim()
+    const index = args.indexOf(name)
+    if (index !== -1 && args[index + 1]) return args[index + 1].trim()
+  }
+  return ""
+}
+
+function customDomainFromEnvOrArgs() {
+  return (
+    argValue("--domain", "--custom-domain") ||
+    process.env.CUSTOM_DOMAIN ||
+    process.env.AGENT_SESSION_VIEWER_DOMAIN ||
+    ""
+  ).trim()
+}
+
+function validateHostname(hostname) {
+  if (!hostname) return ""
+  if (hostname.includes("://") || hostname.includes("/") || hostname.includes("*")) {
+    throw new Error(`CUSTOM_DOMAIN must be a hostname like sessions.example.com, got: ${hostname}`)
+  }
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i.test(hostname)) {
+    throw new Error(`CUSTOM_DOMAIN is not a valid hostname: ${hostname}`)
+  }
+  return hostname.toLowerCase()
+}
+
+function withCustomDomainRoute(toml, hostname) {
+  if (!hostname) return toml
+  const routeBlock = [
+    "",
+    "# Cloudflare custom domain for Agent Session Viewer.",
+    "# The zone must already be active on Cloudflare nameservers.",
+    "[[routes]]",
+    `pattern = "${hostname}"`,
+    "custom_domain = true",
+    "",
+  ].join("\n")
+  const withoutExistingCustomDomain = toml
+    .replace(/\n# Cloudflare custom domain for Agent Session Viewer\.[\s\S]*?(?=\n(?:\[\[|\[|# Remote access|name\s*=)|\s*$)/, "\n")
+    .trimEnd()
+  return `${withoutExistingCustomDomain}${routeBlock}`
+}
 
 // Load .env file if present (simple KEY=VALUE parser, no dependencies needed)
 const envPath = path.join(root, ".env")
@@ -55,10 +103,13 @@ const original = readFileSync(tomlPath, "utf8")
 const patched = original
   .replace("PLACEHOLDER_KV_ID", kvId)
   .replace("PLACEHOLDER_KV_PREVIEW_ID", kvPreviewId)
+const domain = validateHostname(customDomainFromEnvOrArgs())
+const deployConfig = withCustomDomainRoute(patched, domain)
 
-writeFileSync(tomlPath, patched)
+writeFileSync(tomlPath, deployConfig)
 
 try {
+  if (domain) console.log(`\nDeploying with Cloudflare custom domain: https://${domain}`)
   execSync("npx wrangler deploy", { stdio: "inherit", cwd: root })
 } finally {
   writeFileSync(tomlPath, original)

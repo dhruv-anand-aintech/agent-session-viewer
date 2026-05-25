@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Purpose
 
-A **multi-platform** web UI for browsing AI coding assistant sessions locally: **Claude Code** (JSONL), **Cursor**, **OpenCode**, **Antigravity**, **Hermes**, plus **claw**-style bots (nanoclaw, openclaw, …). Runs entirely on localhost — no cloud account needed. Remote access is via ngrok/localtunnel tunnels built into the CLI.
+A **multi-platform** web UI for browsing AI coding assistant sessions locally: **Claude Code** (JSONL), **Cursor**, **OpenCode**, **Antigravity**, **Hermes**, plus **claw**-style bots (nanoclaw, openclaw, …). Runs entirely on localhost — no cloud account needed. Remote access is via LAN, Cloudflare quick tunnel, or ngrok modes built into the CLI.
 
 > **Note:** `worker/index.ts` and the Cloudflare/KV/daemon architecture are **deprecated**. The Worker returns HTTP 410. Do not add new features there.
 
@@ -17,7 +17,7 @@ A **multi-platform** web UI for browsing AI coding assistant sessions locally: *
 | `src/` | React app (`App.tsx` main shell; `pretty/` = Pretty mode markdown + tool cards) |
 | `local-server.mjs` | HTTP server: reads platform dirs directly, SSE `/api/stream`, same API shape used by the frontend |
 | `platform-readers.mjs` | **Single source of truth** for reading non-JSONL platforms (Cursor, OpenCode, Antigravity, Hermes). Used by `local-server.mjs` and `build-cache.mjs`. |
-| `bin/agent-session-viewer.mjs` | npx CLI entry point — TUI menu, sharing modes (local/LAN/tunnel/ngrok), port selection |
+| `bin/agent-session-viewer.mjs` | npx CLI entry point — TUI menu, sharing modes (local/LAN/Cloudflare quick tunnel/ngrok), port selection |
 | `build-cache.mjs` | Pre-builds the sidebar session cache on first run |
 | `shared-utils.mjs` | Shared helpers (e.g. XML strip) |
 | `lib/chunker.mjs` | Session chunking utilities |
@@ -45,10 +45,10 @@ The CLI (`bin/agent-session-viewer.mjs`) presents a TUI menu at startup:
 |------|-----|
 | local | `http://localhost:PORT` (default) |
 | LAN | binds to `0.0.0.0`, prints LAN IP |
-| tunnel | localtunnel (`loca.lt`) — URL changes on restart |
+| Cloudflare quick tunnel | temporary `trycloudflare.com` URL, no account required |
 | ngrok | permanent URL, requires free ngrok account |
 
-Flags skip the menu: `--lan`, `--tunnel`, `--ngrok`, `--port`, `--open`, `--skip-cache`.
+Flags skip the menu: `--lan`, `--cf`, `--ngrok`, `--port`, `--open`, `--skip-cache`.
 
 ## Platform readers (`platform-readers.mjs`)
 

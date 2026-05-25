@@ -33,6 +33,7 @@ interface CursorData {
 
 interface CodexData {
   plan?: string
+  auth_plan?: string
   email?: string
   active_until?: string
   sessionCount?: number
@@ -42,10 +43,22 @@ interface CodexData {
       primary_window?: { used_percent?: number; reset_after_seconds?: number }
       secondary_window?: { used_percent?: number; reset_after_seconds?: number }
     }
-    credits?: { balance?: number }
+    credits?: { balance?: number | string }
     plan_type?: string
   }
+  limits?: {
+    primary?: RateWindow | null
+    secondary?: RateWindow | null
+  }
   error?: string
+}
+
+interface RateWindow {
+  usedPercent?: number
+  remainingPercent?: number
+  windowMinutes?: number | null
+  resetsAt?: string | null
+  resetDescription?: string
 }
 
 interface ClaudeData {
@@ -71,6 +84,12 @@ interface GeminiData {
   sessionCount?: number
   totalTokens?: { input: number; output: number; cached: number; thoughts: number }
   topModel?: string
+  limits?: {
+    primary?: RateWindow | null
+    secondary?: RateWindow | null
+    tertiary?: RateWindow | null
+    models?: { modelId: string; percentLeft: number; usedPercent: number; resetsAt?: string | null; resetDescription?: string }[]
+  }
   recentSessions?: { startTime?: string; input: number; output: number; model: string }[]
   quotaStatus?: string
   error?: string
@@ -116,15 +135,16 @@ interface OpenCodeData {
 }
 
 function Bar({ pct, label, sublabel }: { pct: number; label: string; sublabel?: string }) {
-  const cls = pct >= 90 ? "danger" : pct >= 70 ? "warn" : ""
+  const safePct = Math.min(100, Math.max(0, Number.isFinite(pct) ? pct : 0))
+  const cls = safePct >= 99 ? "exhausted" : safePct >= 80 ? "high" : safePct >= 50 ? "medium" : "low"
   return (
     <div className="ul-bar-wrap">
       <div className="ul-bar-label">
         <span>{label}</span>
-        <span>{sublabel ?? `${pct.toFixed(0)}%`}</span>
+        <span>{sublabel ?? `${safePct.toFixed(0)}%`}</span>
       </div>
       <div className="ul-bar-track">
-        <div className={`ul-bar-fill ${cls}`} style={{ width: `${Math.min(100, pct)}%` }} />
+        <div className={`ul-bar-fill ${cls}`} style={{ width: `${safePct}%` }} />
       </div>
     </div>
   )
@@ -147,9 +167,40 @@ function fmtReset(seconds?: number) {
   return `resets in ${m}m`
 }
 
+function fmtWindowReset(window?: RateWindow | null) {
+  if (!window) return ""
+  if (window.resetDescription) return window.resetDescription
+  if (window.resetsAt) {
+    const parsed = Date.parse(window.resetsAt)
+    if (Number.isFinite(parsed)) return `resets ${new Date(parsed).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`
+    return `resets ${window.resetsAt}`
+  }
+  return ""
+}
+
+function windowSublabel(window: RateWindow) {
+  const pct = Math.round(window.usedPercent ?? 0)
+  const reset = fmtWindowReset(window)
+  return reset ? `${pct}% · ${reset}` : `${pct}%`
+}
+
+function utilizationPct(value?: number) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0
+  return value <= 1 ? value * 100 : value
+}
+
 function fmtDate(iso?: string) {
   if (!iso) return "–"
   try { return new Date(iso).toLocaleDateString() } catch { return iso }
+}
+
+function fmtDateTime(iso?: string) {
+  if (!iso) return "–"
+  try {
+    return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })
+  } catch {
+    return iso
+  }
 }
 
 function CardShell({ id, title, subtitle, icon, children, loading }: {
@@ -182,12 +233,12 @@ function ClaudeCard({ data, loading }: { data?: ClaudeData; loading?: boolean })
       {data?._hint && !usage && !cli && <div className="ul-hint">{data._hint}</div>}
       {/* API limits (5h/7d from claude.ai) */}
       {fiveH && (
-        <Bar pct={(fiveH.utilization ?? 0) * 100} label="5-hour limit"
-          sublabel={`${((fiveH.utilization ?? 0) * 100).toFixed(0)}% · ${fmtDate(fiveH.resets_at)}`} />
+        <Bar pct={utilizationPct(fiveH.utilization)} label="5-hour limit"
+          sublabel={`${utilizationPct(fiveH.utilization).toFixed(0)}% · resets ${fmtDateTime(fiveH.resets_at)}`} />
       )}
       {sevenD && (
-        <Bar pct={(sevenD.utilization ?? 0) * 100} label="7-day limit"
-          sublabel={`${((sevenD.utilization ?? 0) * 100).toFixed(0)}% · resets ${fmtDate(sevenD.resets_at)}`} />
+        <Bar pct={utilizationPct(sevenD.utilization)} label="7-day limit"
+          sublabel={`${utilizationPct(sevenD.utilization).toFixed(0)}% · resets ${fmtDateTime(sevenD.resets_at)}`} />
       )}
       {/* CLI limits (from `claude /usage` TUI) */}
       {!fiveH && cli?.sessionPct != null && (
@@ -224,7 +275,7 @@ function CursorCard({ data, loading }: { data?: CursorData; loading?: boolean })
       {data?.error && <div className="ul-error">{data.error}</div>}
       {plan?.totalPercentUsed != null && (
         <Bar pct={plan.totalPercentUsed} label="Plan usage"
-          sublabel={`${plan.totalPercentUsed.toFixed(0)}%${summary?.billingCycleEnd ? ` · resets ${fmtDate(summary.billingCycleEnd)}` : ""}`} />
+          sublabel={`${plan.totalPercentUsed.toFixed(0)}%${summary?.billingCycleEnd ? ` · resets ${fmtDateTime(summary.billingCycleEnd)}` : ""}`} />
       )}
       {plan?.autoPercentUsed != null && plan.autoPercentUsed !== plan.totalPercentUsed && (
         <Bar pct={plan.autoPercentUsed} label="Auto (composer)" sublabel={`${plan.autoPercentUsed.toFixed(0)}%`} />
@@ -250,25 +301,40 @@ function CodexCard({ data, loading }: { data?: CodexData; loading?: boolean }) {
   const wham = data?.wham
   const primary   = wham?.rate_limit?.primary_window
   const secondary = wham?.rate_limit?.secondary_window
+  const primaryLimit = data?.limits?.primary
+  const secondaryLimit = data?.limits?.secondary
 
-  const subtitle = [data?.email, data?.plan].filter(Boolean).join(" · ") || undefined
+  const displayPlan = formatCodexPlan(data?.wham?.plan_type ?? data?.plan)
+  const subtitle = [data?.email, displayPlan].filter(Boolean).join(" · ") || undefined
   return (
     <CardShell id="codex" title="Codex" subtitle={subtitle} icon="◈" loading={loading}>
       {data?.error && <div className="ul-error">{data.error}</div>}
-      {primary?.used_percent != null && (
+      {primaryLimit ? (
+        <Bar pct={primaryLimit.usedPercent ?? 0} label="5-hour limit" sublabel={windowSublabel(primaryLimit)} />
+      ) : primary?.used_percent != null && (
         <Bar pct={primary.used_percent} label="5-hour limit" sublabel={`${primary.used_percent.toFixed(0)}% · ${fmtReset(primary.reset_after_seconds)}`} />
       )}
-      {secondary?.used_percent != null && (
+      {secondaryLimit ? (
+        <Bar pct={secondaryLimit.usedPercent ?? 0} label="Weekly limit" sublabel={windowSublabel(secondaryLimit)} />
+      ) : secondary?.used_percent != null && (
         <Bar pct={secondary.used_percent} label="Weekly limit" sublabel={`${secondary.used_percent.toFixed(0)}% · ${fmtReset(secondary.reset_after_seconds)}`} />
       )}
-      {wham?.credits?.balance != null && (
-        <StatRow label="Credits" value={`$${wham.credits.balance.toFixed(2)}`} />
+      {wham?.credits?.balance != null && Number.isFinite(Number(wham.credits.balance)) && (
+        <StatRow label="Credits" value={`$${Number(wham.credits.balance).toFixed(2)}`} />
       )}
       {data?.sessionCount != null && <StatRow label="Local sessions" value={String(data.sessionCount)} />}
       {data?.active_until && <StatRow label="Active until" value={fmtDate(data.active_until)} />}
       {!data && !loading && <div className="ul-error">No data</div>}
     </CardShell>
   )
+}
+
+function formatCodexPlan(plan?: string) {
+  if (!plan) return ""
+  const normalized = plan.toLowerCase()
+  if (normalized === "prolite" || normalized === "pro") return "pro"
+  if (normalized === "plus") return "plus"
+  return plan
 }
 
 function OpenCodeCard({ data, loading }: { data?: OpenCodeData; loading?: boolean }) {
@@ -294,10 +360,14 @@ function fmtTokens(n: number) {
 
 function GeminiCard({ data, loading }: { data?: GeminiData; loading?: boolean }) {
   const t = data?.totalTokens
+  const limits = data?.limits
   return (
     <CardShell id="gemini" title="Gemini CLI" subtitle={data?.email ?? undefined} icon="◆" loading={loading}>
       {data?.error && <div className="ul-error">{data.error}</div>}
       {data?.quotaStatus && <div className="ul-hint">{data.quotaStatus}</div>}
+      {limits?.primary && <Bar pct={limits.primary.usedPercent ?? 0} label="Pro" sublabel={windowSublabel(limits.primary)} />}
+      {limits?.secondary && <Bar pct={limits.secondary.usedPercent ?? 0} label="Flash" sublabel={windowSublabel(limits.secondary)} />}
+      {limits?.tertiary && <Bar pct={limits.tertiary.usedPercent ?? 0} label="Flash Lite" sublabel={windowSublabel(limits.tertiary)} />}
       {data?.sessionCount != null && <StatRow label="Sessions" value={String(data.sessionCount)} />}
       {t && t.input + t.output > 0 && <>
         <StatRow label="Input tokens"    value={fmtTokens(t.input)} />

@@ -16,7 +16,6 @@ Downloads and runs directly. Builds the sidebar cache on first run, then opens a
 
 ```bash
 npx agent-session-viewer@latest --lan         # LAN access (phone, tablet)
-npx agent-session-viewer@latest --tunnel      # internet URL via localtunnel
 npx agent-session-viewer@latest --ngrok       # permanent internet URL via ngrok
 npx agent-session-viewer@latest --open        # auto-open browser
 npx agent-session-viewer@latest --port 4000
@@ -136,12 +135,22 @@ If your installation is in a non-standard location, configure the path in the Se
 The CLI includes built-in sharing options — no cloud account needed:
 
 ```bash
-npx agent-session-viewer@latest --tunnel   # internet URL via localtunnel (changes on restart)
 npx agent-session-viewer@latest --ngrok    # permanent URL via ngrok (free account required)
 npx agent-session-viewer@latest --lan      # local network only (same WiFi)
 ```
 
 Or omit flags to get an interactive menu at startup.
+
+## Cloudflare custom domain deploy
+
+For a deployed Worker URL on a Cloudflare-managed hostname, pass a subdomain on setup or deploy:
+
+```bash
+npm run setup:cloudflare -- --domain sessions.example.com
+npm run deploy -- --domain sessions.example.com
+```
+
+This writes a Wrangler `[[routes]]` entry with `custom_domain = true`, so Cloudflare manages DNS and SSL for the active zone.
 
 ## Other commands
 
@@ -170,5 +179,5 @@ npm run lint          # eslint
          ▼
   Browser (React + Vite)  (src/)
          │
-  bin/agent-session-viewer.mjs  (CLI: TUI menu, LAN/tunnel/ngrok sharing)
+  bin/agent-session-viewer.mjs  (CLI: TUI menu, LAN/ngrok sharing)
 ```
