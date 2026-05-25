@@ -774,8 +774,12 @@ async function streamRecentSidebarInitial(res, maxSessions) {
   // Emit cached sidebar state and signal bootstrap done immediately — UI is interactive from the start.
   const cachedState = loadCachedSidebarState()
   if (cachedState?.length) {
-    sseWrite(res, "projects", mergeProjectsInto([], cachedState))
-    const cachedTotal = cachedState.reduce((s, p) => s + p.sessions.length, 0)
+    const merged = mergeProjectsInto([], cachedState)
+    const cachedTotal = countSessionsInProjects(merged)
+    const trimmed = maxSessions > 0 && cachedTotal > maxSessions
+      ? trimProjectsByRecentSessionCount(merged, maxSessions)
+      : merged
+    sseWrite(res, "projects", trimmed)
     sseWrite(res, "projects_meta", { total: cachedTotal })
   }
   sseWrite(res, "bootstrap_done", {})
@@ -788,6 +792,16 @@ async function streamRecentSidebarInitial(res, maxSessions) {
     /** @type {Map<string, { fp: string, stat: import('fs').Stats }>} */
     const fileBySessKey = new Map()
     let acc = []
+
+    // Helper: emit projects trimmed to maxSessions, with full total in meta
+    const emitProjects = (projects) => {
+      const total = countSessionsInProjects(projects)
+      const payload = maxSessions > 0 && total > maxSessions
+        ? trimProjectsByRecentSessionCount(projects, maxSessions)
+        : projects
+      sseWrite(res, "projects", payload)
+      sseWrite(res, "projects_meta", { total })
+    }
 
     // Launch all platform workers immediately so they run concurrently with the Claude scan.
     const PLATFORMS = ["codex", "gemini", "opencode", "hermes", "openclaw", "cursor", "cursor-agent", "antigravity"]
@@ -811,9 +825,7 @@ async function streamRecentSidebarInitial(res, maxSessions) {
           if (!projects.length) return
           flushSidebarCacheFromProjects(projects, null)
           acc = mergeProjectsInto(acc, projects)
-          sseWrite(res, "projects", sortProjectGroups(acc))
-          const total = countSessionsInProjects(acc)
-          sseWrite(res, "projects_meta", { total })
+          emitProjects(sortProjectGroups(acc))
         })
       }
     }
@@ -829,7 +841,7 @@ async function streamRecentSidebarInitial(res, maxSessions) {
         const chunk = scanOneClaudeFolder(root, label, dir, names, fileBySessKey)
         if (!chunk) continue
         acc = mergeProjectsInto(acc, [chunk])
-        sseWrite(res, "projects", sortProjectGroups(acc))
+        emitProjects(sortProjectGroups(acc))
         await yieldEventLoopTick()
       }
     }
@@ -846,8 +858,7 @@ async function streamRecentSidebarInitial(res, maxSessions) {
       if (!projects.length) continue
       flushSidebarCacheFromProjects(projects, null)
       acc = mergeProjectsInto(acc, projects)
-      sseWrite(res, "projects", sortProjectGroups(acc))
-      sseWrite(res, "projects_meta", { total: countSessionsInProjects(acc) })
+      emitProjects(sortProjectGroups(acc))
       await yieldEventLoopTick()
     }
 
@@ -870,7 +881,7 @@ async function streamRecentSidebarInitial(res, maxSessions) {
         if (as && s.messageCount != null) as.messageCount = s.messageCount
       }
     }
-    if (!res.destroyed) sseWrite(res, "projects", sortProjectGroups(acc))
+    if (!res.destroyed) emitProjects(sortProjectGroups(acc))
 
     scheduleClaudeJsonlIndexing(fileBySessKey, names)
   }) // end setImmediate
