@@ -13,11 +13,11 @@ import http from "http"
 import https from "https"
 import { fileURLToPath } from "url"
 import { Worker } from "worker_threads"
-import { exec, execSync, spawnSync } from "child_process"
+import { exec, execFileSync, execSync, spawnSync } from "child_process"
 import { stripXml, trimProjectsByRecentSessionCount, countSessionsInProjects } from "./shared-utils.mjs"
 import { loadSessionMessages } from "./lib/session-message-loader.mjs"
 import { isOnDemandSessionPlatform } from "./lib/session-platform-routing.mjs"
-import { normalizeCodexRateLimit } from "./lib/usage-window-normalizer.mjs"
+import { normalizeCodexRateLimit, normalizeResetTime, resetDescription } from "./lib/usage-window-normalizer.mjs"
 import {
   readCodexSessions,
   CODEX_SESSIONS_ROOT,
@@ -277,6 +277,7 @@ function loadCachedSidebarState() {
       customName: names[`${e.projectPath}/${e.id}`] ?? e.customName ?? null,
       source: e.source ?? "claude",
       isActive: false,
+      ...(e.isSidechain ? { isSidechain: true, parentSessionId: e.parentSessionId, agentType: e.agentType } : {}),
     })
   }
   return Array.from(projectMap.values())
@@ -296,7 +297,7 @@ function applySidebarCache(sessions) {
 }
 
 /** Upsert a cache entry. Returns true if anything changed. */
-function updateSidebarCacheEntry(sessionId, { projectPath, projectDisplayName, source, messageCount, userMessageCount, firstName, lastActivity, mtime, customName }) {
+function updateSidebarCacheEntry(sessionId, { projectPath, projectDisplayName, source, messageCount, userMessageCount, firstName, lastActivity, mtime, customName, isSidechain, parentSessionId, agentType }) {
   const cache = loadSidebarCache()
   const mtimeStr = typeof mtime === "number" ? String(mtime) : String(mtime)
   const existing = cache._map.get(sessionId)
@@ -316,6 +317,7 @@ function updateSidebarCacheEntry(sessionId, { projectPath, projectDisplayName, s
     lastActivity: lastActivity ?? existing?.lastActivity ?? new Date(Number(mtimeStr)).toISOString(),
     mtime: mtimeStr,
     customName: customName ?? existing?.customName ?? null,
+    ...(isSidechain ? { isSidechain: true, parentSessionId, agentType } : {}),
   }
   if (existing) {
     Object.assign(existing, entry)
@@ -1135,15 +1137,20 @@ function loadOpenclawSessions() {
 
 // --- Auth ---
 
+function isLocalRequest(req) {
+  const host = (req.headers.host ?? "").replace(/:\d+$/, "")
+  return host === "localhost" || host === "127.0.0.1" || host === "::1"
+}
+
 function checkCookieAuth(req) {
-  if (!AUTH_PIN) return true
+  if (!AUTH_PIN || isLocalRequest(req)) return true
   const cookie = req.headers.cookie ?? ""
   const match = cookie.match(/(?:^|;\s*)auth_pin=([^;]+)/)
   return match?.[1] === AUTH_PIN
 }
 
 function checkHeaderAuth(req) {
-  if (!AUTH_PIN) return true
+  if (!AUTH_PIN || isLocalRequest(req)) return true
   return (req.headers["x-auth-pin"] ?? "") === AUTH_PIN
 }
 
@@ -1349,7 +1356,7 @@ function decodeJwtPayload(token) {
   } catch { return {} }
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
@@ -1359,7 +1366,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
   }
 }
 
-async function settleUsage(name, promise, timeoutMs = 10000) {
+async function settleUsage(name, promise, timeoutMs = 30000) {
   try {
     return await Promise.race([
       promise,
@@ -1492,7 +1499,8 @@ async function fetchCodexUsage() {
   const whamSlim = wham.rate_limit ? { rate_limit: wham.rate_limit, credits: wham.credits, plan_type: wham.plan_type } : {}
   const email = wham.email ?? (idToken ? (decodeJwtPayload(idToken)?.email ?? "") : "")
   const limits = normalizeCodexRateLimit(wham.rate_limit)
-  return { plan, active_until: activeUntil, sessionCount, historyCount, wham: whamSlim, limits, email }
+  const quotaPlan = wham.plan_type || plan
+  return { plan: quotaPlan, auth_plan: plan, active_until: activeUntil, sessionCount, historyCount, wham: whamSlim, limits, email }
 }
 
 function readFirefoxClaudeSessionKey() {
@@ -1515,6 +1523,68 @@ function readFirefoxClaudeSessionKey() {
     } catch {}
   }
   return ""
+}
+
+function readClaudeOAuthCredentials() {
+  const envToken = process.env.CLAUDE_OAUTH_ACCESS_TOKEN ?? ""
+  if (envToken) return { accessToken: envToken, subscriptionType: process.env.CLAUDE_SUBSCRIPTION_TYPE ?? "" }
+  try {
+    const out = execFileSync("/usr/bin/security", [
+      "find-generic-password",
+      "-s",
+      "Claude Code-credentials",
+      "-w",
+    ], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).trim()
+    if (!out) return null
+    const parsed = JSON.parse(out)
+    const oauth = parsed?.claudeAiOauth ?? {}
+    if (!oauth.accessToken) return null
+    return {
+      accessToken: oauth.accessToken,
+      subscriptionType: oauth.subscriptionType ?? "",
+      rateLimitTier: oauth.rateLimitTier ?? "",
+      scopes: Array.isArray(oauth.scopes) ? oauth.scopes : [],
+      expiresAt: oauth.expiresAt ?? null,
+    }
+  } catch {
+    return null
+  }
+}
+
+function mapClaudeOAuthWindow(window) {
+  if (!window || typeof window.utilization !== "number") return null
+  return {
+    utilization: window.utilization,
+    resets_at: window.resets_at ?? null,
+  }
+}
+
+async function fetchClaudeOAuthUsage() {
+  const credentials = readClaudeOAuthCredentials()
+  if (!credentials?.accessToken) return null
+  const usageR = await fetchWithTimeout("https://api.anthropic.com/api/oauth/usage", {
+    headers: {
+      Authorization: `Bearer ${credentials.accessToken}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "anthropic-beta": "oauth-2025-04-20",
+      "User-Agent": "claude-code/2.1.143",
+    },
+  })
+  if (!usageR.ok) {
+    return { error: `Claude OAuth usage: ${usageR.status}` }
+  }
+  const usage = await usageR.json()
+  return {
+    source: "claude-code-oauth",
+    subscriptionType: credentials.subscriptionType,
+    rateLimitTier: credentials.rateLimitTier,
+    usage: {
+      five_hour: mapClaudeOAuthWindow(usage.five_hour),
+      seven_day: mapClaudeOAuthWindow(usage.seven_day),
+      seven_day_opus: mapClaudeOAuthWindow(usage.seven_day_opus ?? usage.seven_day_sonnet),
+    },
+  }
 }
 
 function parseClaudeCLIUsage() {
@@ -1546,6 +1616,11 @@ async function fetchClaudeUsage() {
   // Parse CLI usage (session % / weekly %)
   const cliUsage = parseClaudeCLIUsage()
   if (cliUsage) slim = { ...slim, cliUsage }
+
+  const oauthUsage = await fetchClaudeOAuthUsage()
+  if (oauthUsage?.usage) {
+    return { ...slim, ...oauthUsage }
+  }
 
   let sessionKey = process.env.CLAUDE_SESSION_KEY ?? ""
   if (!sessionKey) sessionKey = readFirefoxClaudeSessionKey()
@@ -1600,7 +1675,7 @@ async function fetchOpenCodeUsage() {
   }
 }
 
-function fetchGeminiUsage() {
+async function fetchGeminiUsage() {
   const tmpRoot = join(homedir(), ".gemini", "tmp")
   if (!existsSync(tmpRoot)) return { error: "Gemini CLI not installed" }
 
@@ -1655,12 +1730,77 @@ function fetchGeminiUsage() {
 
   const topModel = Object.entries(modelCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? ""
 
+  const quota = await fetchGeminiQuota()
   return {
     email,
     sessionCount,
     totalTokens: { input: totalInput, output: totalOutput, cached: totalCached, thoughts: totalThoughts },
     topModel,
-    quotaStatus: "Gemini CLI /stats is interactive-only here; showing local transcript token totals, not enforced backend quota.",
+    ...(quota.limits ? { limits: quota.limits } : {}),
+    quotaStatus: quota.error ?? "Gemini quota from Cloud Code Assist API.",
+  }
+}
+
+async function fetchGeminiQuota() {
+  const credsFile = join(homedir(), ".gemini", "oauth_creds.json")
+  if (!existsSync(credsFile)) return { error: "Gemini quota unavailable: ~/.gemini/oauth_creds.json not found." }
+  try {
+    const creds = JSON.parse(readFileSync(credsFile, "utf8"))
+    const accessToken = creds.access_token
+    if (!accessToken) return { error: "Gemini quota unavailable: access token missing." }
+    const quotaR = await fetchWithTimeout("https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    }, 20000)
+    if (!quotaR.ok) return { error: `Gemini quota unavailable: HTTP ${quotaR.status}` }
+    const body = await quotaR.json()
+    const modelMap = new Map()
+    for (const bucket of body.buckets ?? []) {
+      if (!bucket?.modelId || typeof bucket.remainingFraction !== "number") continue
+      const current = modelMap.get(bucket.modelId)
+      if (!current || bucket.remainingFraction < current.remainingFraction) {
+        modelMap.set(bucket.modelId, bucket)
+      }
+    }
+    const models = [...modelMap.values()].map(bucket => {
+      const percentLeft = Math.max(0, Math.min(100, bucket.remainingFraction * 100))
+      const resetsAt = normalizeResetTime(bucket.resetTime)
+      return {
+        modelId: bucket.modelId,
+        percentLeft,
+        usedPercent: 100 - percentLeft,
+        resetsAt,
+        resetDescription: resetDescription(resetsAt),
+      }
+    }).sort((a, b) => a.modelId.localeCompare(b.modelId))
+    const pick = (matcher) => models.filter(matcher).sort((a, b) => a.percentLeft - b.percentLeft)[0] ?? null
+    const pro = pick(m => /\bpro\b/.test(m.modelId))
+    const flashLite = pick(m => m.modelId.includes("flash-lite"))
+    const flash = pick(m => m.modelId.includes("flash") && !m.modelId.includes("flash-lite"))
+    return {
+      limits: {
+        primary: pro ? modelToRateWindow(pro) : null,
+        secondary: flash ? modelToRateWindow(flash) : null,
+        tertiary: flashLite ? modelToRateWindow(flashLite) : null,
+        models,
+      },
+    }
+  } catch (e) {
+    return { error: `Gemini quota unavailable: ${e?.message ?? String(e)}` }
+  }
+}
+
+function modelToRateWindow(model) {
+  return {
+    usedPercent: model.usedPercent,
+    remainingPercent: model.percentLeft,
+    windowMinutes: 24 * 60,
+    resetsAt: model.resetsAt,
+    resetDescription: model.resetDescription,
   }
 }
 
@@ -1895,7 +2035,7 @@ async function fetchAllUsage() {
     settleUsage("Codex", fetchCodexUsage()),
     settleUsage("Claude", fetchClaudeUsage()),
     settleUsage("OpenCode", fetchOpenCodeUsage()),
-    settleUsage("Gemini", Promise.resolve(fetchGeminiUsage())),
+    settleUsage("Gemini", fetchGeminiUsage()),
     settleUsage("Antigravity", fetchAntigravityUsage()),
   ])
   const snapshot = { cursor, codex, claude, opencode, gemini, antigravity, fetchedAt: Date.now() }
@@ -1961,12 +2101,11 @@ const server = http.createServer(async (req, res) => {
 
   // GET /api/capabilities — public bootstrap for SPA (must stay before cookie gate)
   if (url.pathname === "/api/capabilities") {
-    const pinRequired = Boolean(AUTH_PIN)
+    const pinRequired = Boolean(AUTH_PIN) && !isLocalRequest(req)
     json({
       openPath: true,
       debugStream: true,
       pinRequired,
-      // Include auth result so SPA can skip the /api/projects probe round-trip
       authed: pinRequired ? checkCookieAuth(req) : true,
       homeDir: homedir(),
     })

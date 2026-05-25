@@ -1205,10 +1205,14 @@ function pushCodexToolResults(out, sessionId, seq, ts, blocks) {
 function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
   if (!rows.length) return null
 
-  const sessionMeta = rows.find(r => r.type === "session_meta")?.payload ?? {}
+  const sessionMetaRows = rows.filter(r => r.type === "session_meta")
+  const sessionMeta = sessionMetaRows[0]?.payload ?? {}
   const turnContext = rows.find(r => r.type === "turn_context")?.payload ?? {}
   const sessionId = sessionMeta.id ?? path.basename(filePath, ".jsonl")
   if (!sessionId) return null
+
+  const isSubagent = typeof sessionMeta.source === "object" && sessionMeta.source?.subagent != null
+  const parentSessionId = sessionMeta.forked_from_id ?? sessionMeta.source?.subagent?.thread_spawn?.parent_thread_id ?? null
 
   const cwd = sessionMeta.cwd ?? turnContext.cwd ?? ""
   const projectDir = cwd ? normProjectDir(cwd) : "codex-global"
@@ -1368,6 +1372,7 @@ function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
       source: "codex",
       version: sessionMeta.cli_version ?? null,
       lastUsedModel: turnContext.model ?? null,
+      ...(isSubagent ? { isSidechain: true, parentSessionId, agentType: "subagent" } : {}),
     },
     msgs: out,
   }

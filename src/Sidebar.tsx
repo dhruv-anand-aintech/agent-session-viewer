@@ -496,20 +496,60 @@ export function Sidebar({ projects, projectsLoading, totalSessions, listMode, se
                   sessions: project.sessions.filter(s => platformFilter === "all" || (s.source ?? "claude") === platformFilter),
                 }))
                 .filter(p => p.sessions.length > 0)
-                .map(project => (
-                  <div key={project.path} className="sidebar-project">
-                    <div className="sidebar-project-name" data-tooltip={project.groupPath ?? project.path}>{project.displayName}</div>
-                    {project.sessions.map(s => (
-                      <SessionItem
-                        key={`${project.path}/${s.id}`}
-                        s={s}
-                        projectPath={s.projectPath || project.path}
-                        isSelected={activeSessionIdProp === s.id}
-                        onSelect={() => handleSelect(s.projectPath || project.path, s.id)}
-                      />
-                    ))}
-                  </div>
-                ))
+                .map(project => {
+                  const projSubagents = new Map<string, SessionMeta[]>()
+                  const projTopLevel: SessionMeta[] = []
+                  for (const s of project.sessions) {
+                    if (s.isSidechain && s.parentSessionId) {
+                      const arr = projSubagents.get(s.parentSessionId) ?? []
+                      arr.push(s)
+                      projSubagents.set(s.parentSessionId, arr)
+                    } else {
+                      projTopLevel.push(s)
+                    }
+                  }
+                  const projOrphans = project.sessions.filter(s => s.isSidechain && (!s.parentSessionId || !projTopLevel.find(t => t.id === s.parentSessionId)))
+                  return (
+                    <div key={project.path} className="sidebar-project">
+                      <div className="sidebar-project-name" data-tooltip={project.groupPath ?? project.path}>{project.displayName}</div>
+                      {projTopLevel.map(s => {
+                        const children = projSubagents.get(s.id) ?? []
+                        const expanded = expandedParents.has(s.id)
+                        return (
+                          <div key={`${project.path}/${s.id}`}>
+                            <SessionItem
+                              s={s}
+                              projectPath={s.projectPath || project.path}
+                              isSelected={activeSessionIdProp === s.id}
+                              onSelect={() => handleSelect(s.projectPath || project.path, s.id)}
+                              subagentCount={children.length}
+                              subagentsExpanded={expanded}
+                              onToggleSubagents={children.length > 0 ? () => toggleParent(s.id) : undefined}
+                            />
+                            {expanded && children.map(cs => (
+                              <SessionItem
+                                key={`${project.path}/${cs.id}`}
+                                s={cs}
+                                projectPath={cs.projectPath || project.path}
+                                isSelected={activeSessionIdProp === cs.id}
+                                onSelect={() => handleSelect(cs.projectPath || project.path, cs.id)}
+                              />
+                            ))}
+                          </div>
+                        )
+                      })}
+                      {projOrphans.map(s => (
+                        <SessionItem
+                          key={`${project.path}/${s.id}`}
+                          s={s}
+                          projectPath={s.projectPath || project.path}
+                          isSelected={activeSessionIdProp === s.id}
+                          onSelect={() => handleSelect(s.projectPath || project.path, s.id)}
+                        />
+                      ))}
+                    </div>
+                  )
+                })
             ) : (
               <>
                 {topLevel.map(({ s, projectPath }) => {

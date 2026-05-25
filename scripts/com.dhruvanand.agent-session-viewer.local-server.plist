@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.dhruvanand.agent-session-viewer.local-server</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>ROOT_PLACEHOLDER/scripts/run-local-server.sh</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>ROOT_PLACEHOLDER</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<key>StandardOutPath</key>
+	<string>LOG_PLACEHOLDER/agent-session-viewer-local-server.log</string>
+	<key>StandardErrorPath</key>
+	<string>LOG_PLACEHOLDER/agent-session-viewer-local-server.err.log</string>
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>

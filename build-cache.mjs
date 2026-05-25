@@ -177,6 +177,7 @@ function ingestResults(results, platformPrefix, label) {
         lastActivity: meta.lastActivity ?? new Date().toISOString(),
         mtime,
         customName: null,
+        ...(meta.isSidechain ? { isSidechain: true, parentSessionId: meta.parentSessionId, agentType: meta.agentType } : {}),
       })
     }
     n++
