@@ -3,20 +3,36 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import runpy
+import sqlite3
 import time
 from pathlib import Path
 from typing import Any, Iterable
 
+try:
+    from watchdog.events import FileSystemEvent, FileSystemEventHandler
+    from watchdog.observers import Observer
+except Exception:
+    FileSystemEvent = None
+    FileSystemEventHandler = object
+    Observer = None
+
 
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))) / "agent-session-viewer-rate-limit"
 WATCH_STATE = STATE_DIR / "watch-state.json"
+WATCH_STATE_DB = STATE_DIR / "watch-state.sqlite"
 APP_CONFIG_FILE = Path.home() / ".config" / "agent-session-viewer" / "config.json"
 DEFAULT_ALARM_SCRIPT = Path(__file__).resolve().parent / "rate-limit-alarm.py"
 ALARM_SCRIPT = Path(os.environ.get("AGENT_SESSION_VIEWER_RATE_LIMIT_ALARM_SCRIPT", os.fspath(DEFAULT_ALARM_SCRIPT)))
 POLL_INTERVAL = 1.5
+FULL_RESCAN_INTERVAL = 5 * 60
 STARTUP_LOOKBACK_SECONDS = 30 * 60
+MAX_JSON_BYTES = 2 * 1024 * 1024
+MAX_JSONL_READ_BYTES = 8 * 1024 * 1024
+EXCLUDED_DIR_NAMES = {".git", ".hg", ".svn", "__pycache__", "cache", "caches", "node_modules", "tmp", "temp"}
+EXCLUDED_PATH_PARTS = {"logs", "cache", "caches", "shell_snapshots"}
 UUID_RE = re.compile(
     r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
     re.I,
@@ -94,29 +110,79 @@ def rate_limit_alerts_enabled() -> bool:
     return True
 
 
-def load_state() -> dict[str, dict[str, int]]:
-    if not WATCH_STATE.exists():
-        return {}
-    try:
-        data = json.loads(WATCH_STATE.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    files = data.get("files")
-    if not isinstance(files, dict):
-        return {}
-    state: dict[str, dict[str, int]] = {}
-    for key, value in files.items():
-        if isinstance(value, dict):
-            state[str(key)] = {
-                "offset": int(value.get("offset", 0)),
-                "mtime_ns": int(value.get("mtime_ns", 0)),
-            }
-    return state
+class StateStore:
+    def __init__(self, path: Path) -> None:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(os.fspath(path))
+        self.conn.execute("PRAGMA journal_mode=TRUNCATE")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS file_state (
+                key TEXT PRIMARY KEY,
+                agent TEXT NOT NULL,
+                path TEXT NOT NULL,
+                offset INTEGER NOT NULL,
+                mtime_ns INTEGER NOT NULL,
+                backfilled INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        self.conn.commit()
+        self._migrate_json_state()
+        self._in_transaction = False
 
+    def _migrate_json_state(self) -> None:
+        if not WATCH_STATE.exists():
+            return
+        try:
+            if self.conn.execute("SELECT 1 FROM file_state LIMIT 1").fetchone():
+                return
+            data = json.loads(WATCH_STATE.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        files = data.get("files")
+        if not isinstance(files, dict):
+            return
+        rows = []
+        for key, value in files.items():
+            if not isinstance(value, dict):
+                continue
+            agent, _, path = str(key).partition("::")
+            rows.append((str(key), agent or "Unknown", path, int(value.get("offset", 0)), int(value.get("mtime_ns", 0)), int(value.get("backfilled", 0))))
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO file_state (key, agent, path, offset, mtime_ns, backfilled) VALUES (?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        self.conn.commit()
 
-def save_state(state: dict[str, dict[str, int]]) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    WATCH_STATE.write_text(json.dumps({"files": state}, indent=2, sort_keys=True), encoding="utf-8")
+    def get(self, key: str) -> dict[str, int] | None:
+        row = self.conn.execute("SELECT offset, mtime_ns, backfilled FROM file_state WHERE key = ?", (key,)).fetchone()
+        if row is None:
+            return None
+        return {"offset": int(row[0]), "mtime_ns": int(row[1]), "backfilled": int(row[2])}
+
+    def begin(self) -> None:
+        if not self._in_transaction:
+            self.conn.execute("BEGIN")
+            self._in_transaction = True
+
+    def commit(self) -> None:
+        if self._in_transaction:
+            self.conn.commit()
+            self._in_transaction = False
+
+    def set(self, key: str, agent: str, path: Path, offset: int, mtime_ns: int, backfilled: int = 0) -> bool:
+        prev = self.get(key)
+        if prev and prev["offset"] == offset and prev["mtime_ns"] == mtime_ns and prev.get("backfilled", 0) == backfilled:
+            return False
+        self.conn.execute(
+            "INSERT OR REPLACE INTO file_state (key, agent, path, offset, mtime_ns, backfilled) VALUES (?, ?, ?, ?, ?, ?)",
+            (key, agent, os.fspath(path), offset, mtime_ns, backfilled),
+        )
+        if not self._in_transaction:
+            self.conn.commit()
+        return True
 
 
 def collect_strings(value: Any) -> Iterable[str]:
@@ -197,12 +263,14 @@ def file_kind(path: Path) -> str | None:
 
 
 def should_scan(path: Path, spec: dict[str, Any]) -> bool:
+    lowered_parts = {part.lower() for part in path.parts}
+    if lowered_parts & EXCLUDED_PATH_PARTS:
+        return False
     kind = file_kind(path)
     if kind not in spec["kinds"]:
         return False
-    parts = {part.lower() for part in path.parts}
     for needle in spec["path_contains"]:
-        if needle.lower() not in parts and needle.lower() not in str(path).lower():
+        if needle.lower() not in lowered_parts and needle.lower() not in str(path).lower():
             return False
     return True
 
@@ -226,23 +294,27 @@ def state_key(agent: str, path: Path) -> str:
     return f"{agent}::{path}"
 
 
-def scan_jsonl_file(api: dict[str, Any], agent: str, path: Path, state: dict[str, dict[str, int]], initial: bool = False) -> None:
+def scan_jsonl_file(api: dict[str, Any], agent: str, path: Path, state: StateStore, initial: bool = False) -> bool:
     try:
         stat = path.stat()
     except FileNotFoundError:
-        return
+        return False
 
     key = state_key(agent, path)
-    prev = state.get(key, {"offset": 0, "mtime_ns": 0})
+    prev = state.get(key) or {"offset": 0, "mtime_ns": 0}
     offset = prev["offset"]
     if initial or stat.st_size < offset:
         offset = 0
     if not initial and stat.st_size == offset and stat.st_mtime_ns == prev["mtime_ns"]:
-        return
+        return False
+    if stat.st_size - offset > MAX_JSONL_READ_BYTES:
+        offset = max(0, stat.st_size - MAX_JSONL_READ_BYTES)
 
     try:
         with path.open("r", encoding="utf-8") as fh:
             fh.seek(offset)
+            if offset:
+                fh.readline()
             while True:
                 line = fh.readline()
                 if not line:
@@ -255,83 +327,164 @@ def scan_jsonl_file(api: dict[str, Any], agent: str, path: Path, state: dict[str
                 except json.JSONDecodeError:
                     continue
                 process_hit(api, agent, path, entry)
-            state[key] = {"offset": fh.tell(), "mtime_ns": stat.st_mtime_ns}
+            return state.set(key, agent, path, fh.tell(), stat.st_mtime_ns)
     except OSError:
-        return
+        return False
 
 
-def scan_json_file(api: dict[str, Any], agent: str, path: Path, state: dict[str, dict[str, int]], initial: bool = False) -> None:
+def scan_json_file(api: dict[str, Any], agent: str, path: Path, state: StateStore, initial: bool = False) -> bool:
     try:
         stat = path.stat()
     except FileNotFoundError:
-        return
+        return False
+    if stat.st_size > MAX_JSON_BYTES:
+        return False
 
     key = state_key(agent, path)
-    prev = state.get(key, {"offset": 0, "mtime_ns": 0})
+    prev = state.get(key) or {"offset": 0, "mtime_ns": 0}
     if not initial and stat.st_size == prev["offset"] and stat.st_mtime_ns == prev["mtime_ns"]:
-        return
+        return False
 
     try:
         raw = path.read_text(encoding="utf-8")
     except OSError:
-        return
+        return False
     try:
         entry = json.loads(raw)
     except json.JSONDecodeError:
-        return
+        return False
     process_hit(api, agent, path, entry)
-    state[key] = {"offset": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+    return state.set(key, agent, path, stat.st_size, stat.st_mtime_ns)
 
 
-def scan_path(api: dict[str, Any], spec: dict[str, Any], path: Path, state: dict[str, dict[str, int]], initial: bool = False) -> None:
+def scan_path(api: dict[str, Any], spec: dict[str, Any], path: Path, state: StateStore, initial: bool = False) -> bool:
     kind = file_kind(path)
     if kind == "jsonl":
-        scan_jsonl_file(api, spec["agent"], path, state, initial=initial)
+        return scan_jsonl_file(api, spec["agent"], path, state, initial=initial)
     elif kind == "json":
-        scan_json_file(api, spec["agent"], path, state, initial=initial)
+        return scan_json_file(api, spec["agent"], path, state, initial=initial)
+    return False
 
 
 def file_age_seconds(stat: os.stat_result) -> float:
     return max(0.0, time.time() - stat.st_mtime)
 
 
-def reconcile_startup_state(state: dict[str, dict[str, int]]) -> None:
+def iter_watch_files(root: Path, spec: dict[str, Any]) -> Iterable[Path]:
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name.lower() not in EXCLUDED_DIR_NAMES]
+        for filename in filenames:
+            path = Path(dirpath) / filename
+            if should_scan(path, spec):
+                yield path
+
+
+def matching_spec(path: Path) -> dict[str, Any] | None:
+    for spec in WATCH_SPECS:
+        for root in spec["paths"]:
+            try:
+                path.relative_to(root)
+            except ValueError:
+                continue
+            if path.is_file() and should_scan(path, spec):
+                return spec
+            if path.is_dir():
+                return spec
+    return None
+
+
+def reconcile_startup_state(state: StateStore) -> None:
+    state.begin()
     for spec in WATCH_SPECS:
         for root in spec["paths"]:
             if not root.exists():
                 continue
-            for path in root.rglob("*"):
-                if not path.is_file():
-                    continue
-                if not should_scan(path, spec):
-                    continue
+            for path in iter_watch_files(root, spec):
                 try:
                     stat = path.stat()
                 except FileNotFoundError:
                     continue
                 key = state_key(spec["agent"], path)
-                prev = state.get(key)
                 recent = file_age_seconds(stat) <= STARTUP_LOOKBACK_SECONDS
-                if prev is None:
-                    state[key] = {
-                        "offset": 0 if recent else stat.st_size,
-                        "mtime_ns": stat.st_mtime_ns,
-                        "backfilled": 1 if recent else 0,
-                    }
+                if not recent:
                     continue
+                prev = state.get(key)
+                if prev is None:
+                    state.set(key, spec["agent"], path, 0 if recent else stat.st_size, stat.st_mtime_ns, 1 if recent else 0)
+    state.commit()
 
 
-def scan_once(api: dict[str, Any], state: dict[str, dict[str, int]], initial: bool = False) -> None:
+def scan_once(api: dict[str, Any], state: StateStore, initial: bool = False) -> bool:
+    did_work = False
     for spec in WATCH_SPECS:
         for root in spec["paths"]:
             if not root.exists():
                 continue
-            for path in root.rglob("*"):
-                if not path.is_file():
-                    continue
-                if not should_scan(path, spec):
-                    continue
-                scan_path(api, spec, path, state, initial=initial)
+            for path in iter_watch_files(root, spec):
+                did_work = scan_path(api, spec, path, state, initial=initial) or did_work
+    return did_work
+
+
+def scan_changed_path(api: dict[str, Any], state: StateStore, path: Path) -> bool:
+    spec = matching_spec(path)
+    if spec is None:
+        return False
+    if path.is_file():
+        return scan_path(api, spec, path, state)
+    did_work = False
+    if path.is_dir():
+        for candidate in iter_watch_files(path, spec):
+            did_work = scan_path(api, spec, candidate, state) or did_work
+    return did_work
+
+
+class TranscriptEventHandler(FileSystemEventHandler):  # type: ignore[misc, valid-type]
+    def __init__(self, changed_paths: "queue.Queue[Path]") -> None:
+        super().__init__()
+        self.changed_paths = changed_paths
+
+    def _queue_path(self, path: str) -> None:
+        self.changed_paths.put(Path(path))
+
+    def on_created(self, event: Any) -> None:
+        self._queue_path(str(event.src_path))
+
+    def on_modified(self, event: Any) -> None:
+        if not event.is_directory:
+            self._queue_path(str(event.src_path))
+
+    def on_moved(self, event: Any) -> None:
+        self._queue_path(str(event.dest_path))
+
+    def on_closed(self, event: Any) -> None:
+        if not event.is_directory:
+            self._queue_path(str(event.src_path))
+
+
+class WatchdogWatcher:
+    def __init__(self) -> None:
+        if Observer is None:
+            raise RuntimeError("watchdog is not available")
+        self.changed_paths: queue.Queue[Path] = queue.Queue()
+        self.observer = Observer()
+        self.handler = TranscriptEventHandler(self.changed_paths)
+        for spec in WATCH_SPECS:
+            for root in spec["paths"]:
+                if root.exists():
+                    self.observer.schedule(self.handler, os.fspath(root), recursive=True)
+        self.observer.start()
+
+    def changed_paths_now(self, timeout_seconds: float) -> list[Path]:
+        paths: list[Path] = []
+        try:
+            paths.append(self.changed_paths.get(timeout=timeout_seconds))
+        except queue.Empty:
+            return paths
+        while True:
+            try:
+                paths.append(self.changed_paths.get_nowait())
+            except queue.Empty:
+                return paths
 
 
 def load_alarm_api_with_mtime() -> tuple[dict[str, Any], int]:
@@ -345,9 +498,13 @@ def load_alarm_api_with_mtime() -> tuple[dict[str, Any], int]:
 
 def main() -> int:
     api, alarm_mtime_ns = load_alarm_api_with_mtime()
-    state = load_state()
-    reconcile_startup_state(state)
-    save_state(state)
+    state = StateStore(WATCH_STATE_DB)
+    watcher: WatchdogWatcher | None = None
+    try:
+        watcher = WatchdogWatcher()
+    except Exception:
+        watcher = None
+    next_full_rescan = time.monotonic() + FULL_RESCAN_INTERVAL
     while True:
         if not rate_limit_alerts_enabled():
             time.sleep(POLL_INTERVAL)
@@ -358,9 +515,18 @@ def main() -> int:
             current_mtime_ns = 0
         if current_mtime_ns != alarm_mtime_ns:
             api, alarm_mtime_ns = load_alarm_api_with_mtime()
-        scan_once(api, state)
-        save_state(state)
-        time.sleep(POLL_INTERVAL)
+        if watcher is None:
+            scan_once(api, state)
+            time.sleep(POLL_INTERVAL)
+            continue
+        timeout = max(0.0, min(POLL_INTERVAL, next_full_rescan - time.monotonic()))
+        changed_paths = watcher.changed_paths_now(timeout)
+        did_work = False
+        for path in set(changed_paths):
+            did_work = scan_changed_path(api, state, path) or did_work
+        if time.monotonic() >= next_full_rescan:
+            did_work = scan_once(api, state) or did_work
+            next_full_rescan = time.monotonic() + FULL_RESCAN_INTERVAL
 
 
 if __name__ == "__main__":

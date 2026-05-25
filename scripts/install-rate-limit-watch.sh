@@ -15,13 +15,16 @@ LA_DIR="$HOME/Library/LaunchAgents"
 LA_PLIST="$LA_DIR/${LABEL}.plist"
 LOG_DIR="$HOME/Library/Logs"
 UID_NUM="$(id -u)"
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python3)}"
 
 mkdir -p "$RUNNER_DIR" "$LOG_DIR"
 install -m 755 "$ROOT/scripts/rate-limit-transcript-watcher.py" "$RUNNER_DIR/rate-limit-transcript-watcher.py"
 install -m 755 "$ROOT/scripts/rate-limit-alarm.py" "$RUNNER_DIR/rate-limit-alarm.py"
 install -m 755 "$ROOT/scripts/gemini-transcript-archive-hook.py" "$RUNNER_DIR/gemini-transcript-archive-hook.py"
-python3 "$ROOT/scripts/install-gemini-transcript-archive-hook.py"
-sed -e "s|RUNNER_DIR_PLACEHOLDER|$RUNNER_DIR|g" "$PLIST_SRC" | sed -e "s|LOG_PLACEHOLDER|$LOG_DIR|g" > "$LA_PLIST"
+"$PYTHON_BIN" "$ROOT/scripts/install-gemini-transcript-archive-hook.py"
+sed -e "s|RUNNER_DIR_PLACEHOLDER|$RUNNER_DIR|g" "$PLIST_SRC" \
+  | sed -e "s|LOG_PLACEHOLDER|$LOG_DIR|g" \
+  | sed -e "s|PYTHON_BIN_PLACEHOLDER|$PYTHON_BIN|g" > "$LA_PLIST"
 
 if launchctl print "gui/${UID_NUM}/${LABEL}" &>/dev/null; then
   launchctl bootout "gui/${UID_NUM}" "$LA_PLIST" 2>/dev/null || launchctl unload "$LA_PLIST" 2>/dev/null || true
@@ -33,6 +36,7 @@ launchctl enable "gui/${UID_NUM}/${LABEL}"
 
 echo "Installed: $LA_PLIST"
 echo "Runner: $RUNNER_DIR"
+echo "Python: $PYTHON_BIN"
 echo "Logs: $LOG_DIR/agent-session-viewer-rate-limit-watch.log"
 echo "Restart: launchctl kickstart -k gui/${UID_NUM}/${LABEL}"
 echo "Stop:    launchctl bootout gui/${UID_NUM} $LA_PLIST"

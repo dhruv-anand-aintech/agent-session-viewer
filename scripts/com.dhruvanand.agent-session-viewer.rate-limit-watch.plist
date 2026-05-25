@@ -6,8 +6,7 @@
 	<string>com.dhruvanand.agent-session-viewer.rate-limit-watch</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/usr/bin/env</string>
-		<string>python3</string>
+		<string>PYTHON_BIN_PLACEHOLDER</string>
 		<string>RUNNER_DIR_PLACEHOLDER/rate-limit-transcript-watcher.py</string>
 	</array>
 	<key>WorkingDirectory</key>
