@@ -52,6 +52,7 @@ import {
 import { buildSidebarSearchDoc, runSidebarSessionSearch, runThreadKeywordSearch } from "./lib/session-search-core.mjs"
 import { indexSession, removeSession, getSearchRows } from "./lib/search-index.mjs"
 import { rgGlobalSearch } from "./lib/rg-search.mjs"
+import { contentSearch } from "./lib/content-search.mjs"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -1057,6 +1058,240 @@ function getSessionMessagesAll(projectPath, sessionId) {
     : join(CLAUDE_DIR, projectPath, `${sessionId}.jsonl`)
   if (!existsSync(fp)) return null
   return parseJsonl(fp)
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;")
+}
+
+function estimateTokens(value) {
+  const text = typeof value === "string" ? value : JSON.stringify(value ?? "")
+  return Math.ceil(text.length / 4)
+}
+
+function contentText(content) {
+  if (typeof content === "string") return content
+  if (Array.isArray(content)) {
+    return content.map(block => {
+      if (typeof block === "string") return block
+      if (!block || typeof block !== "object") return ""
+      if (typeof block.text === "string") return block.text
+      if (typeof block.thinking === "string") return block.thinking
+      return JSON.stringify(block)
+    }).filter(Boolean).join("\n")
+  }
+  if (content == null) return ""
+  return JSON.stringify(content)
+}
+
+function addTokens(map, name, tokens, kind) {
+  if (!tokens) return
+  const existing = map.get(name) ?? { name, tokens: 0, kind }
+  existing.tokens += tokens
+  map.set(name, existing)
+}
+
+function buildGenericContextSnapshot(projectPath, sessionId, msgs) {
+  const components = new Map()
+  const source = projectPath.split(":")[0] || "claude"
+  let firstUser = ""
+  let lastActivity = ""
+  let messageCount = 0
+
+  for (const msg of msgs ?? []) {
+    if (!msg || msg.type === "file-history-snapshot") continue
+    messageCount += 1
+    if (msg.timestamp) lastActivity = String(msg.timestamp)
+
+    const role = msg.message?.role ?? (msg.type === "human" || msg.type === "user" ? "user" : msg.type)
+    const content = msg.message?.content ?? msg.data ?? msg.toolUseResult ?? msg
+    const text = contentText(content)
+    const tokens = estimateTokens(text)
+    if (!firstUser && (role === "user" || msg.type === "human")) firstUser = text.trim()
+
+    if (Array.isArray(msg.message?.content)) {
+      let toolTokens = 0
+      let thinkingTokens = 0
+      let textTokens = 0
+      for (const block of msg.message.content) {
+        if (block?.type === "tool_use" || block?.type === "tool_result") toolTokens += estimateTokens(block)
+        else if (block?.type === "thinking") thinkingTokens += estimateTokens(block)
+        else textTokens += estimateTokens(block)
+      }
+      if (role === "user") addTokens(components, "User Messages", textTokens || tokens, "conversation")
+      else if (role === "assistant") addTokens(components, "Assistant Text", textTokens || tokens, "conversation")
+      else addTokens(components, "Other Messages", textTokens || tokens, "metadata")
+      addTokens(components, "Tool Use + Results", toolTokens, "tools")
+      addTokens(components, "Thinking Blocks", thinkingTokens, "thinking")
+      continue
+    }
+
+    if (role === "user" || msg.type === "human") addTokens(components, "User Messages", tokens, "conversation")
+    else if (role === "assistant") addTokens(components, "Assistant Messages", tokens, "conversation")
+    else if (String(msg.type).includes("tool")) addTokens(components, "Tool Use + Results", tokens, "tools")
+    else if (msg.type === "progress" || msg.type === "system") addTokens(components, "Progress + System", tokens, "metadata")
+    else addTokens(components, "Other Messages", tokens, "metadata")
+  }
+
+  const list = [...components.values()].sort((a, b) => b.tokens - a.tokens)
+  const estimatedInput = list.reduce((sum, item) => sum + item.tokens, 0)
+  return {
+    platform: source,
+    projectPath,
+    sessionId,
+    title: firstUser ? firstUser.replace(/\s+/g, " ").slice(0, 110) : sessionId,
+    lastActivity,
+    messageCount,
+    modelContextWindow: null,
+    inputTokens: estimatedInput,
+    cachedInputTokens: null,
+    outputTokens: null,
+    reasoningTokens: null,
+    components: list,
+    basisLabel: "Estimated transcript tokens",
+    accuracyNote: "This platform does not expose Codex-style context-window counters in the local transcript. Values are transcript-token estimates using characters/4.",
+  }
+}
+
+function classifyCodexDeveloperBlock(text) {
+  if (text.startsWith("<skills_instructions>")) return "Skills Manifest"
+  if (text.startsWith("<apps_instructions>")) return "Apps Instructions"
+  if (text.startsWith("<plugins_instructions>")) return "Plugins Instructions"
+  if (text.startsWith("<permissions instructions>")) return "Permissions"
+  if (text.startsWith("<collaboration_mode>")) return "Collaboration Mode"
+  if (text.startsWith("## Memory")) return "Memory Policy"
+  if (text.startsWith("# Instructions") || text.slice(0, 300).includes("You are Codex")) return "Developer Runtime Rules"
+  return "Developer Other"
+}
+
+function buildCodexContextSnapshot(projectPath, sessionId) {
+  const fp = findCodexSessionFile(sessionId)
+  if (!fp) return null
+  const rows = parseJsonl(fp)
+  const components = new Map()
+  let lastTokenInfo = null
+  let firstUser = ""
+  let meta = {}
+  let messageCount = 0
+  let skillEntries = 0
+
+  for (const row of rows) {
+    const payload = row.payload ?? {}
+    if (row.type === "session_meta") {
+      meta = payload
+      const base = payload.base_instructions?.text ?? ""
+      addTokens(components, "Base Instructions", estimateTokens(base), "system")
+      continue
+    }
+    if (row.type === "event_msg" && payload.type === "token_count") {
+      lastTokenInfo = payload.info
+      continue
+    }
+    if (row.type !== "response_item") continue
+    if (payload.type === "message") {
+      messageCount += 1
+      const blocks = Array.isArray(payload.content) ? payload.content : []
+      const text = blocks.map(block => block?.text ?? "").filter(Boolean).join("\n")
+      if (payload.role === "developer") {
+        for (const block of blocks) {
+          const blockText = block?.text ?? ""
+          const label = classifyCodexDeveloperBlock(blockText)
+          addTokens(components, label, estimateTokens(blockText), "developer")
+          if (label === "Skills Manifest") {
+            skillEntries = blockText.split("\n").filter(line => line.startsWith("- ") && line.includes("(file:")).length
+          }
+        }
+      } else if (payload.role === "user") {
+        if (!firstUser && !text.trim().startsWith("# AGENTS.md instructions")) firstUser = text.trim()
+        addTokens(components, "User Messages", estimateTokens(text), "conversation")
+      } else if (payload.role === "assistant") {
+        addTokens(components, "Assistant Messages", estimateTokens(text), "conversation")
+      }
+    } else if (payload.type === "function_call" || payload.type === "function_call_output" || payload.type === "custom_tool_call") {
+      addTokens(components, "Tool Calls + Outputs", estimateTokens(payload), "tools")
+    } else if (payload.type === "reasoning") {
+      addTokens(components, "Reasoning Items", estimateTokens(payload.summary ?? payload.content ?? ""), "thinking")
+    }
+  }
+
+  const usage = lastTokenInfo?.last_token_usage ?? {}
+  const windowTokens = Number(lastTokenInfo?.model_context_window ?? 0) || null
+  const inputTokens = Number(usage.input_tokens ?? 0) || [...components.values()].reduce((sum, item) => sum + item.tokens, 0)
+  const list = [...components.values()].sort((a, b) => b.tokens - a.tokens)
+  return {
+    platform: "codex",
+    projectPath,
+    sessionId,
+    title: (firstUser || meta.cwd || sessionId).replace(/\s+/g, " ").slice(0, 110),
+    lastActivity: meta.timestamp ?? "",
+    messageCount,
+    modelContextWindow: windowTokens,
+    inputTokens,
+    cachedInputTokens: Number(usage.cached_input_tokens ?? 0) || null,
+    outputTokens: Number(usage.output_tokens ?? 0) || null,
+    reasoningTokens: Number(usage.reasoning_output_tokens ?? 0) || null,
+    components: list,
+    skillEntries,
+    skillTokens: list.find(item => item.name === "Skills Manifest")?.tokens ?? 0,
+    basisLabel: windowTokens ? "Recorded Codex context window" : "Estimated transcript tokens",
+    accuracyNote: windowTokens
+      ? "Codex input/window totals are taken from the latest token_count event. Component buckets are estimated from the visible transcript content."
+      : "No token_count event was found; values are estimated from transcript content.",
+  }
+}
+
+function buildContextSnapshot(projectPath, sessionId) {
+  if (projectPath.startsWith("codex:")) {
+    const codex = buildCodexContextSnapshot(projectPath, sessionId)
+    if (codex) return codex
+  }
+  const msgs = getSessionMessagesAll(projectPath, sessionId)
+  if (!Array.isArray(msgs)) return null
+  return buildGenericContextSnapshot(projectPath, sessionId, msgs)
+}
+
+function renderContextSnapshotHtml(snapshot) {
+  const basis = snapshot.modelContextWindow || snapshot.inputTokens || 1
+  const usedPct = snapshot.modelContextWindow ? (snapshot.inputTokens / snapshot.modelContextWindow) * 100 : 100
+  const remaining = snapshot.modelContextWindow ? Math.max(0, snapshot.modelContextWindow - snapshot.inputTokens) : null
+  const colors = { system: "#1e3a5f", developer: "#d97706", conversation: "#059669", tools: "#0f766e", thinking: "#be123c", metadata: "#64748b", remaining: "#d8d2c4" }
+  const rows = snapshot.components.map(c => {
+    const pctBasis = (c.tokens / basis) * 100
+    const pctInput = snapshot.inputTokens ? (c.tokens / snapshot.inputTokens) * 100 : 0
+    const color = colors[c.kind] ?? colors.metadata
+    return `<tr><td><span class="name"><span class="swatch" style="background:${color}"></span>${escapeHtml(c.name)}</span></td><td>${c.tokens.toLocaleString()}</td><td>${pctBasis.toFixed(pctBasis < 10 ? 2 : 1)}%</td><td>${pctInput.toFixed(pctInput < 10 ? 2 : 1)}%</td><td><div class="bar"><span style="width:${Math.min(100, pctInput)}%;background:${color}"></span></div></td></tr>`
+  }).join("")
+  const segments = snapshot.components.map(c => {
+    const width = Math.max(0.05, (c.tokens / basis) * 100)
+    const color = colors[c.kind] ?? colors.metadata
+    return `<span style="width:${width}%;background:${color}" title="${escapeHtml(c.name)}: ${c.tokens.toLocaleString()}"></span>`
+  }).join("") + (remaining != null ? `<span style="width:${Math.max(0, 100 - usedPct)}%;background:${colors.remaining}" title="Remaining"></span>` : "")
+  const skillBudget = snapshot.modelContextWindow ? Math.round(snapshot.modelContextWindow * 0.02) : null
+  const skillPct = skillBudget ? (snapshot.skillTokens ?? 0) / skillBudget * 100 : null
+
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${escapeHtml(snapshot.title)} - context snapshot</title>
+<style>
+:root{--bg:#f6f4ef;--surface:#fffdf8;--surface2:#ebe6da;--text:#1d2521;--dim:#66716b;--border:rgba(29,37,33,.13);--shadow:0 18px 50px rgba(29,37,33,.09)}
+*{box-sizing:border-box}body{margin:0;color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:linear-gradient(rgba(29,37,33,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(29,37,33,.035) 1px,transparent 1px),radial-gradient(circle at 8% 0%,rgba(217,119,6,.13),transparent 34rem),radial-gradient(circle at 92% 0%,rgba(5,150,105,.12),transparent 32rem),var(--bg);background-size:24px 24px,24px 24px,auto,auto,auto}
+main{width:min(1320px,calc(100vw - 32px));margin:0 auto;padding:28px 0 44px}.hero{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(320px,.9fr);gap:18px;margin-bottom:18px}.panel{background:color-mix(in srgb,var(--surface) 94%,transparent);border:1px solid var(--border);box-shadow:var(--shadow);border-radius:8px;padding:22px}.eyebrow{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:var(--dim);text-transform:uppercase}.title{font-size:clamp(32px,5vw,66px);line-height:.98;margin:12px 0 18px;letter-spacing:0}.sub{color:var(--dim);line-height:1.55;margin:0}.meter{height:28px;border-radius:999px;overflow:hidden;background:var(--surface2);border:1px solid var(--border);display:flex}.meter span{height:100%;min-width:1px}.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:18px}.kpi{border:1px solid var(--border);background:rgba(255,253,248,.72);border-radius:8px;padding:16px}.label{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--dim);text-transform:uppercase}.value{margin-top:8px;font-size:28px;font-weight:750}.grid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(320px,.75fr);gap:18px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{padding:12px 10px;border-bottom:1px solid var(--border);text-align:right;white-space:nowrap}th:first-child,td:first-child{text-align:left;white-space:normal}th{color:var(--dim);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;text-transform:uppercase}.name{display:flex;gap:8px;align-items:center;font-weight:650}.swatch{width:10px;height:10px;border-radius:3px;flex:0 0 auto}.bar{height:8px;border-radius:999px;background:var(--surface2);overflow:hidden;min-width:110px}.bar span{display:block;height:100%;border-radius:999px}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dim);font-size:12px;line-height:1.55;overflow-wrap:anywhere}.note{margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}@media(max-width:920px){.hero,.grid,.kpis{grid-template-columns:1fr}}
+</style></head><body><main>
+<section class="hero"><div class="panel"><div class="eyebrow">${escapeHtml(snapshot.platform)} context snapshot</div><h1 class="title">${escapeHtml(snapshot.title)}</h1><p class="sub">${escapeHtml(snapshot.basisLabel)} for ${escapeHtml(snapshot.projectPath)} / ${escapeHtml(snapshot.sessionId)}.</p></div><div class="panel"><div class="meter">${segments}</div><p class="mono note">${escapeHtml(snapshot.accuracyNote)}</p></div></section>
+<section class="kpis">
+<div class="kpi"><div class="label">${snapshot.modelContextWindow ? "Input Used" : "Estimated Tokens"}</div><div class="value">${snapshot.modelContextWindow ? `${usedPct.toFixed(1)}%` : snapshot.inputTokens.toLocaleString()}</div></div>
+<div class="kpi"><div class="label">Window</div><div class="value">${snapshot.modelContextWindow ? snapshot.modelContextWindow.toLocaleString() : "n/a"}</div></div>
+<div class="kpi"><div class="label">Remaining</div><div class="value">${remaining != null ? remaining.toLocaleString() : "n/a"}</div></div>
+<div class="kpi"><div class="label">Messages</div><div class="value">${snapshot.messageCount.toLocaleString()}</div></div>
+</section>
+<section class="grid"><div class="panel"><h2>Component Breakdown</h2><table><thead><tr><th>Component</th><th>Tokens</th><th>% Basis</th><th>% Input</th><th>Scale</th></tr></thead><tbody>${rows}</tbody></table></div>
+<aside class="panel"><h2>Details</h2><p class="mono">Input tokens: ${snapshot.inputTokens.toLocaleString()}<br>Cached input: ${snapshot.cachedInputTokens == null ? "n/a" : snapshot.cachedInputTokens.toLocaleString()}<br>Output tokens: ${snapshot.outputTokens == null ? "n/a" : snapshot.outputTokens.toLocaleString()}<br>Reasoning output: ${snapshot.reasoningTokens == null ? "n/a" : snapshot.reasoningTokens.toLocaleString()}<br>Skills budget: ${skillBudget == null ? "n/a" : `${(snapshot.skillTokens ?? 0).toLocaleString()} / ${skillBudget.toLocaleString()} (${skillPct.toFixed(1)}%)`}<br>Skill entries: ${snapshot.skillEntries ?? "n/a"}<br>Generated: ${escapeHtml(new Date().toISOString())}</p></aside></section>
+</main></body></html>`
 }
 
 function resultsToProjects(results, platformPrefix) {
@@ -2065,19 +2300,28 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  // GET /api/search/global?q= — rg-based full-text search across all file-based transcripts
+  // GET /api/search/global?q= — content-only search across all platforms
   if (url.pathname === "/api/search/global") {
     const q = url.searchParams.get("q")?.trim() ?? ""
-    if (!q) { json({ hits: [], source: "rg" }); return }
+    if (!q) { json({ hits: [], source: "content" }); return }
     const t0 = performance.now()
     try {
-      const hits = await rgGlobalSearch(q, { limit: 100 })
+      // content-search covers Claude+Codex JSONL (streaming) + Cursor/Hermes/OpenCode SQLite
+      // rg-search covers Antigravity .md files (clean text, no JSON noise)
+      const [contentHits, rgHits] = await Promise.all([
+        contentSearch(q, { limit: 100 }),
+        rgGlobalSearch(q, { limit: 100 }).catch(() => []),
+      ])
+      // Merge; deduplicate by sessionId (content-search takes precedence for shared platforms)
+      const seen = new Set(contentHits.map(h => h.sessionId))
+      const antigravityHits = (rgHits ?? []).filter(h => h.source === "antigravity" && !seen.has(h.sessionId))
+      const hits = [...contentHits, ...antigravityHits].slice(0, 100)
       const ms = (performance.now() - t0).toFixed(1)
-      console.log(`${ts()} [rg-search] q="${q}" hits=${hits.length} ms=${ms}`)
-      json({ hits, source: "rg", ms: Number(ms) })
+      console.log(`${ts()} [global-search] q="${q}" hits=${hits.length} ms=${ms}`)
+      json({ hits, source: "content", ms: Number(ms) })
     } catch (err) {
-      console.error(`${ts()} [rg-search] error q="${q}":`, err.message)
-      json({ hits: [], source: "rg", error: err.message })
+      console.error(`${ts()} [global-search] error q="${q}":`, err.message)
+      json({ hits: [], source: "content", error: err.message })
     }
     return
   }
@@ -2259,6 +2503,19 @@ const server = http.createServer(async (req, res) => {
       nextMsg: msgs[idx + 1] ?? null,
       prevMsg: idx > 0 ? msgs[idx - 1] : null,
     })
+    return
+  }
+
+  // GET /api/context-snapshot?project=...&session=...
+  // Opens a self-contained static HTML context/token breakdown for the selected thread.
+  if (url.pathname === "/api/context-snapshot") {
+    const projectPath = decodeURIComponent(url.searchParams.get("project") ?? "")
+    const sessionId = url.searchParams.get("session") ?? ""
+    if (!projectPath || !sessionId) { json({ error: "Missing project/session" }, 400); return }
+    const snapshot = buildContextSnapshot(projectPath, sessionId)
+    if (!snapshot) { json({ error: "Session not found" }, 404); return }
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" })
+    res.end(renderContextSnapshotHtml(snapshot))
     return
   }
 

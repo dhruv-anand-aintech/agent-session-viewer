@@ -472,6 +472,15 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
             {sessionMeta.id.slice(0, 8)}.jsonl
           </a>
         )}
+        <a
+          className="session-path-btn context-snapshot-btn hide-mobile"
+          href={`/api/context-snapshot?project=${encodeURIComponent(stableProjectDir)}&session=${encodeURIComponent(sessionMeta.id)}`}
+          title="Open context usage snapshot"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Context
+        </a>
         {loading && win && <span className="session-refreshing" title="Refreshing…" />}
         {sessionMeta.gitBranch && <span className="git-branch hide-mobile">⎇ {sessionMeta.gitBranch}</span>}
         {isRecentlyActive(sessionMeta.lastActivity) && <span className="active-badge">● Live</span>}
