@@ -1098,7 +1098,7 @@ function addTokens(map, name, tokens, kind) {
 
 function buildGenericContextSnapshot(projectPath, sessionId, msgs) {
   const components = new Map()
-  const source = projectPath.split(":")[0] || "claude"
+  const source = projectPath.includes(":") && !projectPath.startsWith("/") ? projectPath.split(":")[0] : "claude"
   let firstUser = ""
   let lastActivity = ""
   let messageCount = 0
