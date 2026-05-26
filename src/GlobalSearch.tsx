@@ -74,7 +74,10 @@ export function GlobalSearch({ onNavigate, onClose, sessionTitles }: Props) {
     return () => window.removeEventListener("keydown", onKey)
   }, [onClose])
 
-  // Search when query changes (300ms delay)
+  // Search immediately on every query change; discard stale responses.
+  // While a new fetch is in-flight, filter displayed hits to only those
+  // whose snippets still contain the current query (removes no-longer-relevant
+  // results from a prior search string without waiting for the new response).
   useEffect(() => {
     const q = query.trim()
     const id = ++seqRef.current
@@ -85,10 +88,24 @@ export function GlobalSearch({ onNavigate, onClose, sessionTitles }: Props) {
       setLoading(false)
       return
     }
+    // Optimistically filter stale hits in place while the new fetch runs
+    setHits(prev => {
+      if (!prev.length) return prev
+      const ql = q.toLowerCase()
+      const filtered = prev.filter(h =>
+        h.snippets.some(s => s.toLowerCase().includes(ql)) ||
+        (h.displayTitle ?? "").toLowerCase().includes(ql)
+      )
+      return filtered
+    })
     setLoading(true)
-    const timer = setTimeout(async () => {
+    const controller = new AbortController()
+    ;(async () => {
       try {
-        const res = await fetch(`/api/search/global?q=${encodeURIComponent(q)}`, { credentials: "include" })
+        const res = await fetch(`/api/search/global?q=${encodeURIComponent(q)}`, {
+          credentials: "include",
+          signal: controller.signal,
+        })
         if (id !== seqRef.current) return
         const data = await res.json()
         if (id !== seqRef.current) return
@@ -97,14 +114,14 @@ export function GlobalSearch({ onNavigate, onClose, sessionTitles }: Props) {
         setError(data.error ?? null)
         setActiveIdx(0)
       } catch (e: unknown) {
-        if (id !== seqRef.current) return
+        if (controller.signal.aborted || id !== seqRef.current) return
         setError(e instanceof Error ? e.message : "Search failed")
         setHits([])
       } finally {
         if (id === seqRef.current) setLoading(false)
       }
-    }, 300)
-    return () => clearTimeout(timer)
+    })()
+    return () => controller.abort()
   }, [query])
 
   // Keyboard navigation through results
