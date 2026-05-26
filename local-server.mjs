@@ -52,7 +52,7 @@ import {
 import { buildSidebarSearchDoc, runSidebarSessionSearch, runThreadKeywordSearch } from "./lib/session-search-core.mjs"
 import { indexSession, removeSession, getSearchRows } from "./lib/search-index.mjs"
 import { rgGlobalSearch } from "./lib/rg-search.mjs"
-import { contentSearch } from "./lib/content-search.mjs"
+import { contentSearchStream } from "./lib/content-search.mjs"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -2300,29 +2300,43 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  // GET /api/search/global?q= — content-only search across all platforms
+  // GET /api/search/global?q= — NDJSON streaming: one JSON line per platform as it finishes
   if (url.pathname === "/api/search/global") {
     const q = url.searchParams.get("q")?.trim() ?? ""
-    if (!q) { json({ hits: [], source: "content" }); return }
+    if (!q) { json({ hits: [], done: true }); return }
     const t0 = performance.now()
+    res.writeHead(200, {
+      "Content-Type": "application/x-ndjson",
+      "Transfer-Encoding": "chunked",
+      "Cache-Control": "no-cache",
+      "Access-Control-Allow-Origin": "*",
+    })
     try {
-      // content-search covers Claude+Codex JSONL (streaming) + Cursor/Hermes/OpenCode SQLite
-      // rg-search covers Antigravity .md files (clean text, no JSON noise)
-      const [contentHits, rgHits] = await Promise.all([
-        contentSearch(q, { limit: 100 }),
-        rgGlobalSearch(q, { limit: 100 }).catch(() => []),
-      ])
-      // Merge; deduplicate by sessionId (content-search takes precedence for shared platforms)
-      const seen = new Set(contentHits.map(h => h.sessionId))
-      const antigravityHits = (rgHits ?? []).filter(h => h.source === "antigravity" && !seen.has(h.sessionId))
-      const hits = [...contentHits, ...antigravityHits].slice(0, 100)
+      // Run content-search (all 5 platforms) + rg for Antigravity concurrently.
+      // onChunk fires as each platform resolves — SQLite ones arrive in <50ms.
+      const seen = new Set()
+      const rgPromise = rgGlobalSearch(q, { limit: 100 }).catch(() => null)
+
+      await contentSearchStream(q, { limit: 100 }, hits => {
+        for (const h of hits) seen.add(h.sessionId)
+        res.write(JSON.stringify({ hits }) + "\n")
+      })
+
+      // Flush Antigravity hits from rg (not covered by content-search)
+      const rgHits = await rgPromise
+      if (rgHits?.length) {
+        const agHits = rgHits.filter(h => h.source === "antigravity" && !seen.has(h.sessionId))
+        if (agHits.length) res.write(JSON.stringify({ hits: agHits }) + "\n")
+      }
+
       const ms = (performance.now() - t0).toFixed(1)
-      console.log(`${ts()} [global-search] q="${q}" hits=${hits.length} ms=${ms}`)
-      json({ hits, source: "content", ms: Number(ms) })
+      console.log(`${ts()} [global-search] q="${q}" ms=${ms}`)
+      res.write(JSON.stringify({ done: true, ms: Number(ms) }) + "\n")
     } catch (err) {
       console.error(`${ts()} [global-search] error q="${q}":`, err.message)
-      json({ hits: [], source: "content", error: err.message })
+      res.write(JSON.stringify({ error: err.message, done: true }) + "\n")
     }
+    res.end()
     return
   }
 

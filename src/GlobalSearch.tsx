@@ -118,23 +118,49 @@ export function GlobalSearch({ onNavigate, onClose, sessionTitles }: Props) {
     })
     setLoading(true)
     ;(async () => {
+      const allHits: GlobalSearchHit[] = []
       try {
         const res = await fetch(`/api/search/global?q=${encodeURIComponent(q)}`, { credentials: "include" })
-        const data = await res.json()
-        const hits: GlobalSearchHit[] = data.hits ?? []
-        const ms: number = data.ms ?? 0
-        _cache.set(q, { hits, ms })
-        if (id <= lastAppliedSeq.current) return
-        lastAppliedSeq.current = id
-        setHits(hits)
-        setMs(ms)
-        setError(data.error ?? null)
-        setActiveIdx(0)
+        if (!res.body) throw new Error("No response body")
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buf = ""
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          const lines = buf.split("\n")
+          buf = lines.pop() ?? ""
+          for (const line of lines) {
+            if (!line.trim()) continue
+            let chunk: { hits?: GlobalSearchHit[]; done?: boolean; ms?: number; error?: string }
+            try { chunk = JSON.parse(line) } catch { continue }
+            if (chunk.error) {
+              if (id > lastAppliedSeq.current) { lastAppliedSeq.current = id; setError(chunk.error) }
+            }
+            if (chunk.hits?.length) {
+              allHits.push(...chunk.hits)
+              // Apply incrementally — show results as they stream in
+              if (id > lastAppliedSeq.current) {
+                lastAppliedSeq.current = id
+                setHits([...allHits])
+                setActiveIdx(0)
+              }
+            }
+            if (chunk.done && chunk.ms != null) {
+              if (id > lastAppliedSeq.current) setMs(chunk.ms)
+            }
+          }
+        }
+        // Cache the final accumulated result
+        _cache.set(q, { hits: allHits, ms: 0 })
       } catch (e: unknown) {
-        if (id <= lastAppliedSeq.current) return
-        lastAppliedSeq.current = id
-        setError(e instanceof Error ? e.message : "Search failed")
-        setHits([])
+        if (id > lastAppliedSeq.current) {
+          lastAppliedSeq.current = id
+          setError(e instanceof Error ? e.message : "Search failed")
+          setHits([])
+        }
       } finally {
         if (id === seqRef.current) setLoading(false)
       }
