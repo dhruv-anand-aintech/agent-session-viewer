@@ -178,7 +178,7 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
   )
 }
 
-export function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsTruncated, onLoadAllSessions, activeSessionId: activeSessionIdProp, onSelect, width, onDragStart, mobileOpen, onMobileClose, onGlobalSearch }: {
+export function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsTruncated, onLoadAllSessions, activeSessionId: activeSessionIdProp, onSelect, width, onDragStart, mobileOpen, onMobileClose }: {
   projects: ProjectData[]
   projectsLoading: boolean
   totalSessions: number | null
@@ -191,7 +191,6 @@ export function Sidebar({ projects, projectsLoading, totalSessions, listMode, se
   onDragStart: (e: React.PointerEvent) => void
   mobileOpen: boolean
   onMobileClose: () => void
-  onGlobalSearch?: () => void
 }) {
   const isMobile = useIsMobile()
   const [grouped, setGrouped] = useState(() => localStorage.getItem("sidebarGrouped") === "true")
@@ -458,21 +457,6 @@ export function Sidebar({ projects, projectsLoading, totalSessions, listMode, se
               </button>
             ) : null}
           </div>
-          {onGlobalSearch && (
-            <button
-              type="button"
-              className="sidebar-global-search-btn"
-              onClick={onGlobalSearch}
-              title="Search transcript content (⌘K)"
-            >
-              <svg width="12" height="12" viewBox="0 0 13 13" fill="none" aria-hidden>
-                <circle cx="5.5" cy="5.5" r="3.75" stroke="currentColor" strokeWidth="1.4"/>
-                <line x1="8.6" y1="8.6" x2="12" y2="12" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
-              </svg>
-              Search content
-              <span className="sidebar-global-search-kbd">⌘K</span>
-            </button>
-          )}
         </div>
         <div className="sidebar-body">
           {projectsLoading && !searchBrowseActive && loadingLabel && (
