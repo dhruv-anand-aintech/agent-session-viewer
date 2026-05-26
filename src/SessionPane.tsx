@@ -12,6 +12,22 @@ import { useWindowedMessages } from "./useWindowedMessages"
 type Suggestion = { parentUuid: string; text: string; id: string }
 type ThreadSearchHit = { idx: number; text: string; uuid?: string; score?: number }
 
+/** Extract a snippet centered around the first match of the query in text. */
+function extractMatchSnippet(text: string, query: string, maxLen: number): string {
+  if (!text) return ""
+  const q = query.trim().toLowerCase()
+  if (!q) return text.slice(0, maxLen)
+  const idx = text.toLowerCase().indexOf(q)
+  if (idx === -1) return text.slice(0, maxLen)
+  // Center a window around the match
+  const half = Math.floor(maxLen / 2)
+  const start = Math.max(0, idx - half)
+  const end = Math.min(text.length, start + maxLen)
+  const prefix = start > 0 ? "…" : ""
+  const suffix = end < text.length ? "…" : ""
+  return prefix + text.slice(start, end) + suffix
+}
+
 function ThreadSearchResultCard({
   hit,
   active,
@@ -32,7 +48,7 @@ function ThreadSearchResultCard({
   onSelect: () => void
 }) {
   const [payload, setPayload] = useState<{ msg: SessionMessage; nextMsg?: SessionMessage | null; index: number } | null>(null)
-  const summary = hit.text.slice(0, 220)
+  const summary = extractMatchSnippet(hit.text, query, 220)
 
   useEffect(() => {
     if (!hit.uuid) {

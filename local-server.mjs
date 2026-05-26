@@ -2504,6 +2504,10 @@ const server = http.createServer(async (req, res) => {
     const project = url.searchParams.get("project")
     const session = url.searchParams.get("session")
     if (!project || !session) { json({ error: "Missing project or session" }, 400); return }
+    // Non-file-based platforms don't have a raw JSONL on disk
+    if (/^(opencode|cursor|hermes):/.test(project)) {
+      json({ error: "Raw JSONL not available for this platform" }, 404); return
+    }
     const filePath = project.startsWith("/")
       ? join(project, `${session}.jsonl`)
       : join(CLAUDE_DIR, project, `${session}.jsonl`)
