@@ -64,6 +64,25 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
 }
 .topbar-settings-btn:hover { background: hsla(255,100%,100%,0.06); color: var(--text-200); }
 
+.topbar-global-search-btn {
+  display: flex; align-items: center; gap: 5px;
+  background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+  color: var(--text-400); font-size: 12px; cursor: pointer;
+  padding: 4px 10px; border-radius: 6px; line-height: 1;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  font-family: inherit;
+}
+.topbar-global-search-btn:hover {
+  background: rgba(255,255,255,0.09); color: var(--text-200);
+  border-color: rgba(255,255,255,0.2);
+}
+.topbar-global-search-label { color: var(--text-400); }
+.topbar-global-search-kbd {
+  font-size: 10px; color: var(--text-500, #666);
+  background: rgba(255,255,255,0.06); border-radius: 3px; padding: 1px 4px;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
 .topbar-tabs {
   display: flex; gap: 2px; background: var(--bg-300); border-radius: 8px; padding: 3px;
 }
@@ -833,6 +852,10 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   .topbar-menu-btn,
   .topbar-settings-btn,
   .back-btn { min-height: 44px; min-width: 44px; display: flex; align-items: center; justify-content: center; }
+
+  /* Hide text label + kbd hint on mobile; keep the icon */
+  .topbar-global-search-label, .topbar-global-search-kbd { display: none; }
+  .topbar-global-search-btn { padding: 4px 8px; }
 
   /* Sidebar filter pills: bigger touch area */
   .platform-filter-pills { gap: 6px; flex-wrap: wrap; padding: 6px 10px 8px; }

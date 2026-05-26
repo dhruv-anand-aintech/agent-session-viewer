@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react"
+import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { useLocation } from "wouter"
 import { canonicalizeSelectedProjectPath } from "./sessionPaneState"
 import { markAppInit, markSessionClick } from "./perf"
@@ -7,6 +7,7 @@ import { SessionPane } from "./SessionPane"
 import { Sidebar } from "./Sidebar"
 import { SettingsModal } from "./SettingsModal"
 import { UsageLimits } from "./UsageLimits"
+import { GlobalSearch } from "./GlobalSearch"
 import { wallClock } from "./utils"
 import "./App.css"
 
@@ -53,6 +54,7 @@ export default function App() {
     return s
   })
   const [showSettings, setShowSettings] = useState(false)
+  const [showGlobalSearch, setShowGlobalSearch] = useState(false)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const [location, setLocation] = useLocation()
   const tab = location === "/usage" ? "usage" : "sessions"
@@ -127,6 +129,30 @@ export default function App() {
       : null)
   const effectiveProjectPath = canonicalProjectPath ?? activeProjectPath
 
+  // Cmd+K / Ctrl+K to open global search
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault()
+        setShowGlobalSearch(true)
+      }
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [])
+
+  // Build a title map from loaded projects for result enrichment
+  const sessionTitles = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const p of projects) {
+      for (const s of p.sessions) {
+        const title = s.customName ?? s.firstName ?? s.id.slice(0, 8)
+        m.set(`${s.projectPath ?? p.path}/${s.id}`, title)
+      }
+    }
+    return m
+  }, [projects])
+
   const switchTab = (t: "sessions" | "usage") => setLocation(t === "usage" ? "/usage" : "/sessions")
 
   return (
@@ -141,9 +167,31 @@ export default function App() {
         <span className={`conn-badge ${connected ? "conn-on" : "conn-off"}`}>
           {connected ? "● Live" : "○ Polling"}
         </span>
+        <button
+          className="topbar-global-search-btn"
+          onClick={() => setShowGlobalSearch(true)}
+          title="Global search (⌘K)"
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
+            <circle cx="6" cy="6" r="4.2" stroke="currentColor" strokeWidth="1.5"/>
+            <line x1="9.4" y1="9.4" x2="13" y2="13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+          </svg>
+          <span className="topbar-global-search-label">Search</span>
+          <span className="topbar-global-search-kbd">⌘K</span>
+        </button>
         <button className="topbar-settings-btn" onClick={() => setShowSettings(true)} title="Settings">⚙</button>
       </header>
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {showGlobalSearch && (
+        <GlobalSearch
+          onNavigate={(projectPath, sessionId) => {
+            setSelected({ project: projectPath, session: sessionId })
+            setLocation("/sessions")
+          }}
+          onClose={() => setShowGlobalSearch(false)}
+          sessionTitles={sessionTitles}
+        />
+      )}
       <div className="main">
         <UsageLimits visible={tab === "usage"} />
         <div className="sessions-layout" style={{ display: tab === "sessions" ? "flex" : "none", flex: 1, overflow: "hidden" }}>

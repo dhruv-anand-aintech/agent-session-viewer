@@ -51,8 +51,7 @@ import {
 } from "./platform-readers.mjs"
 import { buildSidebarSearchDoc, runSidebarSessionSearch, runThreadKeywordSearch } from "./lib/session-search-core.mjs"
 import { indexSession, removeSession, getSearchRows } from "./lib/search-index.mjs"
-import { startBackgroundIndexer, indexOneSession as lanceIndexOne, removeOne as lanceRemoveOne, getIndexerStatus } from "./lib/lancedb-indexer.mjs"
-import { getIndexStats } from "./lib/lancedb-search.mjs"
+import { rgGlobalSearch } from "./lib/rg-search.mjs"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -179,7 +178,7 @@ const DIST_DIR = join(__dirname, "dist")
 const PORT = parseInt(process.env.PORT ?? "3001")
 const AUTH_PIN = process.env.AUTH_PIN ?? null
 const ts = () => new Date().toISOString().replace("T", " ").slice(0, 23)
-const ENABLE_BACKGROUND_INDEXER = process.env.ENABLE_LANCEDB_BACKGROUND_INDEXER !== "0"
+const ENABLE_BACKGROUND_INDEXER = false // LanceDB removed; rg handles global search
 
 /** Max lines sent on initial debug load / SSE init (full file still tracked for append). */
 const DEBUG_TAIL_LINES = 500
@@ -1205,7 +1204,7 @@ function handleClaudeFileChange(filename) {
   const fp = join(projectPath, `${sessionId}.jsonl`)
   if (!existsSync(fp)) {
     removeSession(projectPath, sessionId)
-    lanceRemoveOne(projectPath, sessionId).catch(() => {})
+    // lancedb removed
     broadcastProjectsFromCache()
     return
   }
@@ -1220,7 +1219,7 @@ function handleClaudeFileChange(filename) {
     const meta = claudeSessionMetaFromMsgs(msgs, sessionId, projectKey, names, stat)
     const _tMeta = performance.now()
     indexSession(projectPath, sessionId, msgs, meta)
-    lanceIndexOne(projectPath, sessionId, msgs).catch(() => {})
+    // lancedb removed
     const _tIndex = performance.now()
     // Update sidebar cache so the next broadcast reflects new mtime + message count
     const projectDisplayName = encodedDirToDisplayName(projectDir)
@@ -1302,23 +1301,7 @@ function serveStatic(req, res) {
   createReadStream(filePath).pipe(res)
 }
 
-// --- LanceDB background indexer ---
-let _backgroundIndexerStarted = false
-async function triggerBackgroundIndexer() {
-  if (_backgroundIndexerStarted || !ENABLE_BACKGROUND_INDEXER) return
-  _backgroundIndexerStarted = true
-  console.log(`${ts()} [lancedb-indexer] starting background indexing…`)
-  const getCacheRows = () => loadSidebarCache().sessions.map(e => ({ projectPath: e.projectPath, sessionId: e.id }))
-  try {
-    await startBackgroundIndexer(
-      getCacheRows,
-      (projectPath, sessionId) => getSessionMessagesAll(projectPath, sessionId)
-    )
-  } catch (err) {
-    console.warn(`${ts()} [lancedb-indexer] background indexing error:`, err.message)
-    _backgroundIndexerStarted = false
-  }
-}
+function triggerBackgroundIndexer() { /* lancedb removed */ }
 
 // --- Event-loop lag detector (temporary debug) ---
 {
@@ -2075,14 +2058,27 @@ const server = http.createServer(async (req, res) => {
 
   // GET /api/search/status — index health
   if (url.pathname === "/api/search/status") {
-    const lancedbIndex = await getIndexStats()
     json({
-      indexer: getIndexerStatus(),
-      backgroundIndexerEnabled: ENABLE_BACKGROUND_INDEXER,
       sidebarCacheSessions: loadSidebarCache().sessions.length,
       searchRows: getSearchRows().length,
-      lancedbIndex,
     })
+    return
+  }
+
+  // GET /api/search/global?q= — rg-based full-text search across all file-based transcripts
+  if (url.pathname === "/api/search/global") {
+    const q = url.searchParams.get("q")?.trim() ?? ""
+    if (!q) { json({ hits: [], source: "rg" }); return }
+    const t0 = performance.now()
+    try {
+      const hits = await rgGlobalSearch(q, { limit: 100 })
+      const ms = (performance.now() - t0).toFixed(1)
+      console.log(`${ts()} [rg-search] q="${q}" hits=${hits.length} ms=${ms}`)
+      json({ hits, source: "rg", ms: Number(ms) })
+    } catch (err) {
+      console.error(`${ts()} [rg-search] error q="${q}":`, err.message)
+      json({ hits: [], source: "rg", error: err.message })
+    }
     return
   }
 
