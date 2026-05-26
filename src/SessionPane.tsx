@@ -1,4 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react"
+
+// Module-level thread search cache: key = "sessionId:query" → hits[]
+const _threadCache = new Map<string, { hits: ThreadSearchHit[] }>()
 import type { SessionMessage, SessionMeta, Capabilities } from "./types"
 import MessageBlock from "./MessageBlock"
 import PrettyMessageBlock from "./pretty/PrettyMessageBlock"
@@ -194,10 +197,18 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
       return
     }
 
+    const cacheKey = `${sessionMeta.id}:${q}`
+    const cached = _threadCache.get(cacheKey)
+    if (cached) {
+      setThreadHits(cached.hits)
+      setThreadHitPos(0)
+      setThreadSearchLoading(false)
+      return
+    }
+
     let cancelled = false
     const runSearch = async () => {
       const requestStartedAt = performance.now()
-      console.log(`[thread-search] start q="${q}" loaded=${winRef.current?.msgs.length ?? 0}`)
       setThreadSearchLoading(true)
       try {
         const r = await fetch(
@@ -208,6 +219,7 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
           const data = await r.json()
           if (data.hits && Array.isArray(data.hits) && data.hits.length) {
             const hits = [...data.hits].sort((a, b) => b.idx - a.idx)
+            _threadCache.set(cacheKey, { hits })
             setThreadHits(hits)
             setThreadHitPos(0)
             console.log(`[thread-search] results=${hits.length} source=server ms=${(performance.now() - requestStartedAt).toFixed(1)} q="${q}"`)
@@ -222,6 +234,7 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
       if (!cancelled) {
         const raw = runThreadSearch(q, threadSearchMsgs ?? [])
         raw.sort((a, b) => b.idx - a.idx)
+        _threadCache.set(cacheKey, { hits: raw })
         setThreadHits(raw)
         setThreadHitPos(0)
         console.log(`[thread-search] results=${raw.length} source=local ms=${(performance.now() - requestStartedAt).toFixed(1)} q="${q}"`)

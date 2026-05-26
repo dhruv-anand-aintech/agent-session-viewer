@@ -39,71 +39,27 @@ function safeJson(x: unknown): string {
   }
 }
 
-function normalizeKeywordText(text: string): string {
-  return String(text ?? "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-}
-
-function tokenizeQuery(query: string): string[] {
-  return normalizeKeywordText(query)
-    .split(" ")
-    .filter(t => t.length >= 2)
-    .slice(0, 12)
-}
-
-function countTermHits(text: string, term: string): number {
-  let hits = 0
-  let idx = text.indexOf(term)
-  while (idx !== -1) {
-    hits++
-    idx = text.indexOf(term, idx + term.length)
-  }
-  return hits
-}
-
-function scoreKeywordHit(text: string, terms: string[], phrase: string): number {
-  if (!terms.length) return 0
-  const phrasePos = phrase ? text.indexOf(phrase) : -1
-  let score = 0
-  let matched = 0
-
-  if (phrasePos !== -1) {
-    score += 30 + Math.max(0, 12 - Math.floor(phrasePos / 10))
-  }
-
-  for (const term of terms) {
-    const pos = text.indexOf(term)
-    if (pos === -1) continue
-    matched++
-    score += 8 + Math.max(0, 8 - Math.floor(pos / 25))
-    score += Math.min(4, countTermHits(text, term))
-  }
-
-  if (!matched) return 0
-  if (matched === terms.length) score += 15
-  score += matched * 2
-  return score
-}
 
 export function runThreadSearch(query: string, msgs: SessionMessage[]): ThreadSearchHit[] {
   const q = (query ?? "").trim()
   if (!q || !Array.isArray(msgs)) return []
 
-  const terms = tokenizeQuery(q)
-  if (!terms.length) return []
-  const phrase = normalizeKeywordText(q)
+  let re: RegExp
+  try {
+    re = new RegExp(q, "gi")
+  } catch {
+    re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi")
+  }
 
   const hits: ThreadSearchHit[] = []
   for (let idx = 0; idx < msgs.length; idx++) {
     const text = flattenMessageForThread(msgs[idx])
     if (!text) continue
-    const norm = normalizeKeywordText(text)
-    if (!norm) continue
-    const score = scoreKeywordHit(norm, terms, phrase)
-    if (score > 0) hits.push({ idx, text, uuid: msgs[idx]?.uuid, score })
+    re.lastIndex = 0
+    const match = re.exec(text)
+    if (!match) continue
+    const score = Math.max(1, 1000 - match.index)
+    hits.push({ idx, text, uuid: msgs[idx]?.uuid, score })
   }
 
   return hits.sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || a.idx - b.idx).slice(0, 40)

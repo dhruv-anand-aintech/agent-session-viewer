@@ -1,6 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import "./GlobalSearch.css"
 
+// Module-level cache — persists across modal open/close within the session
+const _cache = new Map<string, { hits: GlobalSearchHit[]; ms: number }>()
+
 export interface GlobalSearchHit {
   source: string
   projectPath: string
@@ -90,26 +93,41 @@ export function GlobalSearch({ onNavigate, onClose, sessionTitles }: Props) {
       lastAppliedSeq.current = id
       return
     }
-    // Optimistically filter stale hits in place while the new fetch runs
+    // Cache hit — apply immediately, skip fetch
+    const cached = _cache.get(q)
+    if (cached) {
+      if (id > lastAppliedSeq.current) {
+        lastAppliedSeq.current = id
+        setHits(cached.hits)
+        setMs(cached.ms)
+        setError(null)
+        setActiveIdx(0)
+      }
+      setLoading(false)
+      return
+    }
+
+    // Optimistically filter stale hits while the new fetch runs
     setHits(prev => {
       if (!prev.length) return prev
       const ql = q.toLowerCase()
-      const filtered = prev.filter(h =>
+      return prev.filter(h =>
         h.snippets.some(s => s.toLowerCase().includes(ql)) ||
         (h.displayTitle ?? "").toLowerCase().includes(ql)
       )
-      return filtered
     })
     setLoading(true)
     ;(async () => {
       try {
         const res = await fetch(`/api/search/global?q=${encodeURIComponent(q)}`, { credentials: "include" })
         const data = await res.json()
-        // Only apply if no response for a newer query has already been shown
+        const hits: GlobalSearchHit[] = data.hits ?? []
+        const ms: number = data.ms ?? 0
+        _cache.set(q, { hits, ms })
         if (id <= lastAppliedSeq.current) return
         lastAppliedSeq.current = id
-        setHits(data.hits ?? [])
-        setMs(data.ms ?? null)
+        setHits(hits)
+        setMs(ms)
         setError(data.error ?? null)
         setActiveIdx(0)
       } catch (e: unknown) {
@@ -118,7 +136,6 @@ export function GlobalSearch({ onNavigate, onClose, sessionTitles }: Props) {
         setError(e instanceof Error ? e.message : "Search failed")
         setHits([])
       } finally {
-        // Clear loading only if nothing newer is still pending
         if (id === seqRef.current) setLoading(false)
       }
     })()
