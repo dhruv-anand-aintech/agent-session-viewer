@@ -11,7 +11,7 @@ export interface GlobalSearchHit {
 }
 
 interface Props {
-  onNavigate: (projectPath: string, sessionId: string) => void
+  onNavigate: (projectPath: string, sessionId: string, query: string) => void
   onClose: () => void
   /** Optional session metadata map for title enrichment */
   sessionTitles?: Map<string, string>
@@ -118,7 +118,7 @@ export function GlobalSearch({ onNavigate, onClose, sessionTitles }: Props) {
     } else if (e.key === "Enter" && hits.length > 0) {
       e.preventDefault()
       const hit = hits[activeIdx]
-      if (hit) { onNavigate(hit.projectPath, hit.sessionId); onClose() }
+      if (hit) { onNavigate(hit.projectPath, hit.sessionId, query.trim()); onClose() }
     }
   }, [hits, activeIdx, onNavigate, onClose])
 
@@ -190,7 +190,7 @@ export function GlobalSearch({ onNavigate, onClose, sessionTitles }: Props) {
                 key={`${hit.projectPath}/${hit.sessionId}`}
                 data-idx={i}
                 className={`gs-result${i === activeIdx ? " gs-result--active" : ""}`}
-                onClick={() => { onNavigate(hit.projectPath, hit.sessionId); onClose() }}
+                onClick={() => { onNavigate(hit.projectPath, hit.sessionId, query.trim()); onClose() }}
                 onMouseEnter={() => setActiveIdx(i)}
               >
                 <div className="gs-result-head">

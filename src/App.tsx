@@ -48,7 +48,7 @@ export default function App() {
     loadAllSessions,
   } = useProjects()
   const capabilities = useCapabilities()
-  const [selected, setSelected] = useState<{ project: string; session: string } | null>(() => {
+  const [selected, setSelected] = useState<{ project: string; session: string; initialQuery?: string } | null>(() => {
     const s = parseUrlSession()
     if (s) markSessionClick(s.session)
     return s
@@ -167,25 +167,13 @@ export default function App() {
         <span className={`conn-badge ${connected ? "conn-on" : "conn-off"}`}>
           {connected ? "● Live" : "○ Polling"}
         </span>
-        <button
-          className="topbar-global-search-btn"
-          onClick={() => setShowGlobalSearch(true)}
-          title="Global search (⌘K)"
-        >
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
-            <circle cx="6" cy="6" r="4.2" stroke="currentColor" strokeWidth="1.5"/>
-            <line x1="9.4" y1="9.4" x2="13" y2="13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-          </svg>
-          <span className="topbar-global-search-label">Search</span>
-          <span className="topbar-global-search-kbd">⌘K</span>
-        </button>
         <button className="topbar-settings-btn" onClick={() => setShowSettings(true)} title="Settings">⚙</button>
       </header>
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
       {showGlobalSearch && (
         <GlobalSearch
-          onNavigate={(projectPath, sessionId) => {
-            setSelected({ project: projectPath, session: sessionId })
+          onNavigate={(projectPath, sessionId, query) => {
+            setSelected({ project: projectPath, session: sessionId, initialQuery: query })
             setLocation("/sessions")
           }}
           onClose={() => setShowGlobalSearch(false)}
@@ -203,11 +191,12 @@ export default function App() {
             sessionsTruncated={sessionsTruncated}
             onLoadAllSessions={loadAllSessions}
             activeSessionId={activeSessionId}
-            onSelect={(p, s) => setSelected({ project: p, session: s })}
+            onSelect={(p, s) => setSelected({ project: p, session: s, initialQuery: undefined })}
             width={sidebarWidth}
             onDragStart={onDragStart}
             mobileOpen={mobileSidebarOpen}
             onMobileClose={() => setMobileSidebarOpen(false)}
+            onGlobalSearch={() => setShowGlobalSearch(true)}
           />
           <div className="content">
             {effectiveMeta && effectiveProjectPath
@@ -217,6 +206,7 @@ export default function App() {
                   sessionMeta={effectiveMeta}
                   onBack={() => setMobileSidebarOpen(true)}
                   capabilities={capabilities}
+                  initialQuery={selected?.session === effectiveMeta.id ? selected?.initialQuery : undefined}
                 />
               : <div className="empty-state">Select a session from the sidebar</div>}
           </div>

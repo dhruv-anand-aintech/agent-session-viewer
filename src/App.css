@@ -275,6 +275,35 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   background: hsla(255, 100%, 100%, 0.06);
 }
 
+.sidebar-global-search-btn {
+  display: flex; align-items: center; gap: 6px;
+  width: calc(100% - 16px); margin: 4px 8px 6px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.09);
+  border-radius: 6px;
+  padding: 5px 10px;
+  color: var(--text-400);
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.sidebar-global-search-btn:hover {
+  background: rgba(255,255,255,0.08);
+  color: var(--text-200);
+  border-color: rgba(255,255,255,0.18);
+}
+.sidebar-global-search-kbd {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-500, #555);
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
 /* Platform avatar — replace colored dots with brand favicon/glyph */
 .platform-icon-wrap {
   width: 14px;

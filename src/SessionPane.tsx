@@ -110,7 +110,7 @@ function wordOverlap(a: string, b: string): number {
   return wa.size ? hits / wa.size : 0
 }
 
-export function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: { projectDir: string; sessionMeta: SessionMeta; onBack?: () => void; capabilities: Capabilities }) {
+export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, initialQuery }: { projectDir: string; sessionMeta: SessionMeta; onBack?: () => void; capabilities: Capabilities; initialQuery?: string }) {
   const paintLogged = useRef(false)
   const stableProjectDirRef = useRef(createPinnedProjectPath(projectDir))
   const stableProjectDir = stableProjectDirRef.current.current
@@ -148,6 +148,19 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities }: {
   const [threadHits, setThreadHits] = useState<ThreadSearchHit[]>([])
   const [threadHitPos, setThreadHitPos] = useState(0)
   const threadSearchInputRef = useRef<HTMLInputElement>(null)
+  const initialQueryApplied = useRef(false)
+
+  // Auto-open thread search with initialQuery (from global search navigation)
+  useEffect(() => {
+    if (!initialQuery || initialQueryApplied.current) return
+    if (fullRef.current.length === 0) return // wait for messages
+    initialQueryApplied.current = true
+    setThreadSearchOpen(true)
+    setThreadSearchMsgs(fullRef.current.filter(m => m.type !== "file-history-snapshot"))
+    setThreadSearchQuery(initialQuery)
+    setThreadHits([])
+    setThreadHitPos(0)
+  }, [initialQuery, win]) // re-check when win loads
 
   async function prepareThreadSearch() {
     setThreadSearchOpen(true)
