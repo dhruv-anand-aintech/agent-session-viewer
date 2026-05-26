@@ -58,6 +58,7 @@ export function GlobalSearch({ onNavigate, onClose, sessionTitles }: Props) {
   const [activeIdx, setActiveIdx] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
   const seqRef = useRef(0)
+  const lastAppliedSeq = useRef(0)
   const resultsRef = useRef<HTMLDivElement>(null)
 
   // Focus input on mount
@@ -86,6 +87,7 @@ export function GlobalSearch({ onNavigate, onClose, sessionTitles }: Props) {
       setMs(null)
       setError(null)
       setLoading(false)
+      lastAppliedSeq.current = id
       return
     }
     // Optimistically filter stale hits in place while the new fetch runs
@@ -99,29 +101,27 @@ export function GlobalSearch({ onNavigate, onClose, sessionTitles }: Props) {
       return filtered
     })
     setLoading(true)
-    const controller = new AbortController()
     ;(async () => {
       try {
-        const res = await fetch(`/api/search/global?q=${encodeURIComponent(q)}`, {
-          credentials: "include",
-          signal: controller.signal,
-        })
-        if (id !== seqRef.current) return
+        const res = await fetch(`/api/search/global?q=${encodeURIComponent(q)}`, { credentials: "include" })
         const data = await res.json()
-        if (id !== seqRef.current) return
+        // Only apply if no response for a newer query has already been shown
+        if (id <= lastAppliedSeq.current) return
+        lastAppliedSeq.current = id
         setHits(data.hits ?? [])
         setMs(data.ms ?? null)
         setError(data.error ?? null)
         setActiveIdx(0)
       } catch (e: unknown) {
-        if (controller.signal.aborted || id !== seqRef.current) return
+        if (id <= lastAppliedSeq.current) return
+        lastAppliedSeq.current = id
         setError(e instanceof Error ? e.message : "Search failed")
         setHits([])
       } finally {
+        // Clear loading only if nothing newer is still pending
         if (id === seqRef.current) setLoading(false)
       }
     })()
-    return () => controller.abort()
   }, [query])
 
   // Keyboard navigation through results
