@@ -21,6 +21,7 @@ continuation*.md
 continuation*.archive.*.md
 .autopilot.json
 tmp/
+.tmp/
 
 # Editor directories and files
 .vscode/*
