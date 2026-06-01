@@ -2,3 +2,8 @@ name = "dhruv-anand"
 main = "worker/directory.ts"
 compatibility_date = "2026-05-15"
 workers_dev = true
+
+[vars]
+CF_ACCOUNT_ID = "3524c9d42ea71bdaf82c655a45d61e19"
+WORKERS_DEV_SUBDOMAIN = "dhruv-anand"
+# CF_API_TOKEN is a secret: npx wrangler secret put CF_API_TOKEN --config wrangler.directory.toml

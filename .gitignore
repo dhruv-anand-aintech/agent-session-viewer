@@ -34,3 +34,4 @@ tmp/
 *.sln
 *.sw?
 .agents/
+.dev.vars
