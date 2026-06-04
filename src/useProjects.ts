@@ -56,6 +56,7 @@ export function useProjects() {
   const [projects, setProjects] = useState<ProjectData[]>([])
   const [connected, setConnected] = useState(false)
   const [projectsLoading, setProjectsLoading] = useState(true)
+  const [projectsUpdating, setProjectsUpdating] = useState(true)
   const [totalSessions, setTotalSessions] = useState<number | null>(null)
   const [listMode, setListMode] = useState<"recent" | "full">("recent")
   const projectsRef = useRef<ProjectData[]>([])
@@ -68,6 +69,7 @@ export function useProjects() {
     const qs = listMode === "recent" ? `?maxSessions=${RECENT_SIDEBAR_SESSIONS}` : ""
     queueMicrotask(() => {
       setProjectsLoading(true)
+      setProjectsUpdating(true)
       if (listMode === "recent" || projectsRef.current.length === 0) setProjects([])
       setTotalSessions(null)
     })
@@ -77,6 +79,7 @@ export function useProjects() {
     es.onerror = () => {
       setConnected(false)
       setProjectsLoading(false)
+      setProjectsUpdating(false)
     }
     es.addEventListener("projects_meta", e => {
       try {
@@ -87,17 +90,26 @@ export function useProjects() {
     es.addEventListener("projects", e => {
       try {
         const incoming = JSON.parse((e as MessageEvent).data) as ProjectData[]
-        if (firstProjectsBatch) { markProjectsFirst(); firstProjectsBatch = false }
+        if (firstProjectsBatch) {
+          markProjectsFirst()
+          firstProjectsBatch = false
+          setProjectsLoading(false)
+        }
         setProjects(prev => mergeProjectData(prev, incoming))
       } catch { /* ignore */ }
     })
     es.addEventListener("bootstrap_done", () => {
       setProjectsLoading(false)
+      if (listMode === "full") setProjectsUpdating(false)
       requestAnimationFrame(() => markBootstrapDone(projectsRef.current.reduce((n, p) => n + p.sessions.length, 0)))
+    })
+    es.addEventListener("background_done", () => {
+      setProjectsUpdating(false)
     })
     return () => {
       es.close()
       setProjectsLoading(false)
+      setProjectsUpdating(false)
     }
   }, [listMode])
 
@@ -111,6 +123,7 @@ export function useProjects() {
     projects,
     connected,
     projectsLoading,
+    projectsUpdating,
     totalSessions,
     listMode,
     sessionsTruncated,

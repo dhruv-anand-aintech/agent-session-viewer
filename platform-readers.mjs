@@ -2,7 +2,7 @@
  * platform-readers.mjs — shared platform session readers
  *
  * Exports pure reader functions for Cursor (IDE + CLI agent), OpenCode, Antigravity, and Hermes.
- * Used by both daemon/watch.mjs (streaming sync) and local-server.mjs (direct read).
+ * Used by local-server.mjs and build-cache.mjs.
  *
  * Each reader returns { meta, msgs }[] and does NOT modify shared state.
  * Change-detection caches are managed by the callers.
@@ -409,7 +409,7 @@ export function readCursorSessions(cacheGet, cacheSet, changedSet) {
 
 /**
  * Full Cursor session reader — loads all bubble text for every session.
- * Slow (reads all 50k+ rows) but needed by the daemon to sync messages to the Worker.
+ * Slow (reads all 50k+ rows) and used by build-cache tooling when a full refresh is needed.
  * local-server uses readCursorSessions (metadata only) + readCursorSessionMsgs (on-demand).
  */
 export function readCursorSessionsFull(cacheGet, cacheSet, changedSet) {
@@ -1788,6 +1788,167 @@ export function readAntigravitySession(session, cacheGet, cacheSet) {
     },
     msgs: converted,
   }
+}
+
+// ── Antigravity CLI ───────────────────────────────────────────────────────────
+//
+// The Antigravity CLI stores sessions in a separate directory from the desktop app:
+//   ~/.gemini/antigravity-cli/history.jsonl  — index (conversationId, display, workspace, timestamp)
+//   ~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/transcript.jsonl
+//   ~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/transcript_full.jsonl
+
+export const ANTIGRAVITY_CLI_DIR = path.join(homedir(), ".gemini", "antigravity-cli")
+const ANTIGRAVITY_CLI_BRAIN_DIR = path.join(ANTIGRAVITY_CLI_DIR, "brain")
+const ANTIGRAVITY_CLI_HISTORY = path.join(ANTIGRAVITY_CLI_DIR, "history.jsonl")
+
+function parseAntigravityCliHistory() {
+  if (!fs.existsSync(ANTIGRAVITY_CLI_HISTORY)) return []
+  const lines = fs.readFileSync(ANTIGRAVITY_CLI_HISTORY, "utf8").trim().split("\n").filter(Boolean)
+  const sessions = new Map()
+  for (const line of lines) {
+    try {
+      const { conversationId, display, timestamp, workspace } = JSON.parse(line)
+      if (!conversationId) continue
+      if (!sessions.has(conversationId)) {
+        sessions.set(conversationId, { id: conversationId, title: display ?? null, workspacePath: workspace ?? "", lastTs: timestamp ?? 0 })
+      } else {
+        const s = sessions.get(conversationId)
+        if ((timestamp ?? 0) > s.lastTs) s.lastTs = timestamp
+      }
+    } catch { /* skip */ }
+  }
+  return [...sessions.values()]
+}
+
+function antigravityCliTranscriptToMessages(sessionId, steps) {
+  const msgs = []
+  let pendingAssistantBlocks = []
+  let pendingTs = null
+  let lastToolCallId = null
+
+  function flushAssistant(i) {
+    if (!pendingAssistantBlocks.length) return
+    msgs.push({
+      uuid: `antigravity-cli-${sessionId}-step-${i}-asst`,
+      parentUuid: msgs.length > 0 ? msgs[msgs.length - 1].uuid : null,
+      type: "assistant",
+      sessionId,
+      timestamp: pendingTs ?? new Date().toISOString(),
+      isSidechain: false,
+      message: { role: "assistant", content: pendingAssistantBlocks },
+    })
+    pendingAssistantBlocks = []
+    pendingTs = null
+    lastToolCallId = null
+  }
+
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i]
+    const { type, source, created_at: ts, content, thinking, tool_calls } = step
+    if (!type) continue
+
+    if (source === "USER_EXPLICIT" && type === "USER_INPUT") {
+      flushAssistant(i)
+      const text = (content ?? "")
+        .replace(/<USER_REQUEST>\n?/, "").replace(/\n?<\/USER_REQUEST>/, "")
+        .replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/g, "")
+        .replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/g, "")
+        .trim()
+      if (!text) continue
+      msgs.push({
+        uuid: `antigravity-cli-${sessionId}-step-${i}`,
+        parentUuid: msgs.length > 0 ? msgs[msgs.length - 1].uuid : null,
+        type: "human",
+        sessionId,
+        timestamp: ts ?? new Date().toISOString(),
+        isSidechain: false,
+        message: { role: "user", content: text },
+      })
+    } else if (source === "MODEL") {
+      if (!pendingTs) pendingTs = ts
+
+      if (type === "PLANNER_RESPONSE") {
+        if (thinking) pendingAssistantBlocks.push({ type: "thinking", thinking })
+        const calls = tool_calls ?? []
+        for (let ci = 0; ci < calls.length; ci++) {
+          const tc = calls[ci]
+          const toolId = `agcli-${sessionId}-${i}-${ci}`
+          lastToolCallId = toolId
+          // Args values may be double-JSON-encoded (e.g. "\"some string\"") — normalize
+          const args = {}
+          for (const [k, v] of Object.entries(tc.args ?? {})) {
+            if (typeof v === "string") { try { args[k] = JSON.parse(v) } catch { args[k] = v } }
+            else args[k] = v
+          }
+          const toolNameMap = { list_dir: "LS", grep_search: "Grep", view_file: "Read", run_command: "Bash", code_action: "Edit", search_web: "WebSearch" }
+          pendingAssistantBlocks.push({ type: "tool_use", id: toolId, name: toolNameMap[tc.name] ?? tc.name, input: args })
+        }
+        if (!calls.length && !thinking) {
+          const text = content ?? ""
+          if (text) pendingAssistantBlocks.push({ type: "text", text })
+        }
+      } else if (type === "GENERIC") {
+        const text = content ?? ""
+        if (text) pendingAssistantBlocks.push({ type: "text", text })
+      } else if (["LIST_DIRECTORY", "GREP_SEARCH", "VIEW_FILE", "CODE_ACTION", "RUN_COMMAND", "SEARCH_WEB"].includes(type)) {
+        if (content && lastToolCallId) {
+          // Strip "Created At: ...\nCompleted At: ...\n" header added by the CLI
+          const stripped = content.replace(/^Created At:.*\nCompleted At:.*\n/, "").trim()
+          pendingAssistantBlocks.push({ type: "tool_result", tool_use_id: lastToolCallId, content: stripped.slice(0, 4000) })
+        }
+        lastToolCallId = null
+      }
+    }
+    // Skip SYSTEM steps (CONVERSATION_HISTORY, SYSTEM_MESSAGE)
+  }
+  flushAssistant(steps.length)
+  return msgs
+}
+
+export function readAntigravityCliSessions(cacheGet, cacheSet) {
+  if (!fs.existsSync(ANTIGRAVITY_CLI_BRAIN_DIR)) return []
+  const index = parseAntigravityCliHistory()
+  const indexMap = new Map(index.map(s => [s.id, s]))
+  for (const id of fs.readdirSync(ANTIGRAVITY_CLI_BRAIN_DIR)) {
+    if (!indexMap.has(id)) indexMap.set(id, { id, title: null, workspacePath: "", lastTs: 0 })
+  }
+
+  const results = []
+  for (const session of indexMap.values()) {
+    const transcriptPath = path.join(ANTIGRAVITY_CLI_BRAIN_DIR, session.id, ".system_generated", "logs", "transcript.jsonl")
+    if (!fs.existsSync(transcriptPath)) continue
+    let mtime = 0
+    try { mtime = fs.statSync(transcriptPath).mtimeMs } catch { continue }
+    if (cacheGet && cacheGet(`cli-${session.id}`) === mtime) continue
+    if (cacheSet) cacheSet(`cli-${session.id}`, mtime)
+
+    const steps = fs.readFileSync(transcriptPath, "utf8").trim().split("\n").filter(Boolean)
+      .map(l => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean)
+    if (!steps.length) continue
+
+    const msgs = antigravityCliTranscriptToMessages(session.id, steps)
+    if (!msgs.length) continue
+
+    const lastActivity = steps[steps.length - 1]?.created_at ?? new Date().toISOString()
+    const userMsgs = msgs.filter(m => m.type === "human")
+    const title = session.title ?? userMsgs[0]?.message?.content?.slice(0, 60) ?? null
+    const projectDir = session.workspacePath ? normProjectDir(session.workspacePath) : "antigravity-cli-global"
+
+    results.push({
+      meta: {
+        id: session.id,
+        projectPath: `antigravity-cli:${projectDir}`,
+        messageCount: msgs.length,
+        userMessageCount: userMsgs.length,
+        lastActivity,
+        isActive: false,
+        firstName: title,
+        source: "antigravity-cli",
+      },
+      msgs,
+    })
+  }
+  return results
 }
 
 // ── Hermes ────────────────────────────────────────────────────────────────────

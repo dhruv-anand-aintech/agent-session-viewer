@@ -108,6 +108,27 @@ function upsert(entry) {
 // ── Claude JSONL sessions ──────────────────────────────────────────────────────
 let claudeCount = 0
 const names = loadConfig().names ?? {}
+
+function readSubagentMeta(jsonlPath) {
+  if (!jsonlPath.endsWith(".jsonl")) return null
+  const metaPath = jsonlPath.slice(0, -".jsonl".length) + ".meta.json"
+  try {
+    const obj = JSON.parse(readFileSync(metaPath, "utf8"))
+    if (obj && typeof obj === "object") {
+      return {
+        agentType: typeof obj.agentType === "string" ? obj.agentType : null,
+        description: typeof obj.description === "string" ? obj.description : null,
+      }
+    }
+  } catch { /* missing or malformed — fine */ }
+  return null
+}
+
+function subagentFirstName(jsonlPath, meta) {
+  if (meta?.description?.trim()) return meta.description.trim().slice(0, 100)
+  return null
+}
+
 for (const { path: root, label } of getClaudeScanRoots()) {
   let dirs
   try { dirs = readdirSync(root) } catch { continue }
@@ -115,7 +136,7 @@ for (const { path: root, label } of getClaudeScanRoots()) {
     const dp = join(root, dir)
     try { if (!statSync(dp).isDirectory()) continue } catch { continue }
     let files
-    try { files = readdirSync(dp).filter(f => f.endsWith(".jsonl")) } catch { continue }
+    try { files = readdirSync(dp).filter(f => f.endsWith(".jsonl")) } catch { files = [] }
 
     const projectPath = `${root}/${dir}`
     const baseName = encodedDirToDisplayName(dir)
@@ -148,6 +169,89 @@ for (const { path: root, label } of getClaudeScanRoots()) {
       }
       claudeCount++
       if (claudeCount % 50 === 0) process.stdout.write(`\r  Claude: ${claudeCount} sessions…`)
+    }
+
+    // Subagent sessions — walk <projectPath>/<parentSessionId>/subagents/...
+    let parentDirs
+    try { parentDirs = readdirSync(dp) } catch { parentDirs = [] }
+    for (const parentSessionId of parentDirs) {
+      if (!parentSessionId || parentSessionId.endsWith(".jsonl")) continue
+      const parentDir = join(dp, parentSessionId)
+      let parentStat
+      try { parentStat = statSync(parentDir) } catch { continue }
+      if (!parentStat.isDirectory()) continue
+      const subDir = join(parentDir, "subagents")
+      let subEntries
+      try { subEntries = readdirSync(subDir) } catch { continue }
+
+      for (const subEntry of subEntries) {
+        const subEntryPath = join(subDir, subEntry)
+        let subStat
+        try { subStat = statSync(subEntryPath) } catch { continue }
+
+        const directFiles = []
+        if (subStat.isFile() && subEntry.startsWith("agent-") && subEntry.endsWith(".jsonl")) {
+          directFiles.push({ id: `${parentSessionId}/subagents/${subEntry.slice(0, -".jsonl".length)}`, filePath: subEntryPath, stat: subStat, workflowId: null })
+        }
+        if (subStat.isDirectory() && subEntry === "workflows") {
+          let wfEntries
+          try { wfEntries = readdirSync(subEntryPath) } catch { continue }
+          for (const wfId of wfEntries) {
+            if (!wfId.startsWith("wf_")) continue
+            const wfDir = join(subEntryPath, wfId)
+            let wfStat
+            try { wfStat = statSync(wfDir) } catch { continue }
+            if (!wfStat.isDirectory()) continue
+            let agentEntries
+            try { agentEntries = readdirSync(wfDir) } catch { continue }
+            for (const agentFile of agentEntries) {
+              if (!agentFile.startsWith("agent-") || !agentFile.endsWith(".jsonl")) continue
+              const agentPath = join(wfDir, agentFile)
+              let agentStat
+              try { agentStat = statSync(agentPath) } catch { continue }
+              directFiles.push({
+                id: `${parentSessionId}/subagents/workflows/${wfId}/${agentFile.slice(0, -".jsonl".length)}`,
+                filePath: agentPath,
+                stat: agentStat,
+                workflowId: wfId,
+              })
+            }
+          }
+        }
+
+        for (const sub of directFiles) {
+          const sessionId = sub.id
+          const fp = sub.filePath
+          const stat = sub.stat
+          const mtime = String(stat.mtimeMs)
+          const cached = existingCache.get(sessionId)
+          const meta = readSubagentMeta(fp)
+          if (cached && cached.mtime === mtime) {
+            upsert({ ...cached, customName: names[`${projectPath}/${sessionId}`] ?? cached.customName ?? null })
+          } else {
+            const msgs = parseJsonl(fp)
+            const { messageCount, userMessageCount, firstName: promptFirstName } = sessionMetaFromMsgs(msgs, stat)
+            const firstName = cached?.firstName ?? subagentFirstName(fp, meta) ?? promptFirstName ?? null
+            upsert({
+              id: sessionId,
+              projectPath,
+              projectDisplayName,
+              source: "claude",
+              messageCount,
+              userMessageCount,
+              firstName,
+              lastActivity: stat.mtime.toISOString(),
+              mtime,
+              customName: names[`${projectPath}/${sessionId}`] ?? null,
+              isSidechain: true,
+              parentSessionId,
+              agentType: meta?.agentType ?? "subagent",
+            })
+          }
+          claudeCount++
+          if (claudeCount % 50 === 0) process.stdout.write(`\r  Claude: ${claudeCount} sessions…`)
+        }
+      }
     }
   }
 }

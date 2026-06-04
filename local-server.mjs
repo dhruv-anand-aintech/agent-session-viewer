@@ -37,9 +37,12 @@ import {
   parseAntigravitySessionIndex,
   readAntigravitySession,
   readAntigravityRpcSessions,
+  ANTIGRAVITY_CLI_DIR,
+  readAntigravityCliSessions,
   HERMES_DB,
   readHermesSessions,
   readCodexSessionById,
+  listCodexSessionFiles,
   normProjectDir,
   readOpenclawSessions,
   OPENCLAW_ROOT,
@@ -68,6 +71,8 @@ try {
 } catch {}
 
 const PLATFORM_LOADER_WORKER = join(__dirname, "lib", "platform-loader-worker.mjs")
+const STREAM_PLATFORM_WORKERS = ["codex", "gemini", "opencode", "hermes", "openclaw", "cursor", "cursor-agent", "antigravity", "antigravity-cli"]
+const BUNDLE_PLATFORM_WORKERS = ["cursor", "opencode"]
 
 const CLAUDE_DIR = join(homedir(), ".claude", "projects")
 const APP_CONFIG_DIR = join(homedir(), ".config", "agent-session-viewer")
@@ -185,6 +190,8 @@ const ENABLE_BACKGROUND_INDEXER = false // LanceDB removed; rg handles global se
 const DEBUG_TAIL_LINES = 500
 
 const FIVE_MIN = 5 * 60 * 1000
+const RECENT_CODEX_SEED_LIMIT = 40
+const STREAM_BACKGROUND_DELAY_MS = 1200
 
 // --- Config persistence (names + settings) ---
 
@@ -248,6 +255,15 @@ function saveSidebarCache() {
   _sidebarCache.sessions.sort((a, b) => String(b.lastActivity).localeCompare(String(a.lastActivity)))
   const { _map, ...toWrite } = _sidebarCache
   try { writeFileSync(SIDEBAR_CACHE_FILE, JSON.stringify(toWrite)) } catch { /* ignore */ }
+}
+
+let sidebarCacheSaveTimer = null
+function scheduleSidebarCacheSave(delayMs = 750) {
+  if (sidebarCacheSaveTimer) return
+  sidebarCacheSaveTimer = setTimeout(() => {
+    sidebarCacheSaveTimer = null
+    saveSidebarCache()
+  }, delayMs)
 }
 
 /**
@@ -358,6 +374,253 @@ function flushSidebarCacheFromProjects(projects, fileBySessKey) {
   if (dirty) saveSidebarCache()
 }
 
+function codexSessionIdFromFile(filePath) {
+  const base = basename(filePath, ".jsonl")
+  const matches = base.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi)
+  return matches?.at(-1) ?? base
+}
+
+function readJsonlPrefixRows(filePath, maxBytes = 64 * 1024, maxLines = 100) {
+  let fd = null
+  try {
+    const st = statSync(filePath)
+    const len = Math.min(maxBytes, st.size)
+    const buf = Buffer.alloc(len)
+    fd = openSync(filePath, "r")
+    const bytes = readSync(fd, buf, 0, len, 0)
+    const text = buf.toString("utf8", 0, bytes)
+    return text
+      .split("\n")
+      .filter(Boolean)
+      .slice(0, maxLines)
+      .flatMap(line => {
+        try { return [JSON.parse(line)] } catch { return [] }
+      })
+  } catch {
+    return []
+  } finally {
+    if (fd != null) {
+      try { closeSync(fd) } catch { /* ignore */ }
+    }
+  }
+}
+
+function cheapCodexMetaFromFile(filePath, names) {
+  let stat
+  try { stat = statSync(filePath) } catch { return null }
+  const rows = readJsonlPrefixRows(filePath)
+  const sessionMeta = rows.find(r => r?.type === "session_meta")?.payload ?? {}
+  const turnContext = rows.find(r => r?.type === "turn_context")?.payload ?? {}
+  const sessionId = sessionMeta.id ?? codexSessionIdFromFile(filePath)
+  const cwd = sessionMeta.cwd ?? turnContext.cwd ?? ""
+  const projectDir = cwd ? normProjectDir(cwd) : "codex-global"
+  const projectPath = `codex:${projectDir}`
+  const cacheEntry = loadSidebarCache()._map.get(sessionId)
+  const firstUser = rows.find(r => r?.type === "event_msg" && r?.payload?.type === "user_message")
+  const firstName =
+    typeof firstUser?.payload?.message === "string"
+      ? stripXml(firstUser.payload.message).replace(/\s+/g, " ").trim().slice(0, 80)
+      : cacheEntry?.firstName ?? null
+  const isSubagent = typeof sessionMeta.source === "object" && sessionMeta.source?.subagent != null
+  const parentSessionId = sessionMeta.forked_from_id ?? sessionMeta.source?.subagent?.thread_spawn?.parent_thread_id ?? null
+  return {
+    id: sessionId,
+    projectPath,
+    messageCount: cacheEntry?.messageCount ?? 0,
+    userMessageCount: cacheEntry?.userMessageCount ?? null,
+    lastActivity: stat.mtime.toISOString(),
+    isActive: Date.now() - stat.mtimeMs < FIVE_MIN,
+    firstName,
+    customName: names[`${projectPath}/${sessionId}`] ?? cacheEntry?.customName ?? null,
+    source: "codex",
+    version: sessionMeta.cli_version ?? cacheEntry?.version ?? null,
+    lastUsedModel: turnContext.model ?? cacheEntry?.lastUsedModel ?? null,
+    ...(isSubagent ? { isSidechain: true, parentSessionId, agentType: "subagent" } : {}),
+  }
+}
+
+function loadRecentCodexProjectsCheap(limit = RECENT_CODEX_SEED_LIMIT) {
+  if (!existsSync(CODEX_SESSIONS_ROOT)) return []
+  const names = loadConfig().names ?? {}
+  const recentFiles = listCodexSessionFiles()
+    .flatMap(filePath => {
+      try { return [{ filePath, mtimeMs: statSync(filePath).mtimeMs }] } catch { return [] }
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, Math.max(1, limit))
+  const projects = new Map()
+  for (const { filePath } of recentFiles) {
+    const meta = cheapCodexMetaFromFile(filePath, names)
+    if (!meta) continue
+    const projectPath = meta.projectPath
+    if (!projects.has(projectPath)) {
+      projects.set(projectPath, {
+        path: projectPath,
+        displayName: projectPath,
+        sessions: [],
+      })
+    }
+    projects.get(projectPath).sessions.push(meta)
+  }
+  for (const project of projects.values()) {
+    project.sessions.sort((a, b) => String(b.lastActivity).localeCompare(String(a.lastActivity)))
+  }
+  return Array.from(projects.values())
+}
+
+function stringifyCodexTailOutput(value) {
+  if (typeof value === "string") return value
+  if (value == null) return ""
+  try { return JSON.stringify(value, null, 2) } catch { return String(value) }
+}
+
+function codexTailAssistantText(content) {
+  if (!Array.isArray(content)) return ""
+  return content
+    .map(item => item?.type === "output_text" && typeof item.text === "string" ? item.text : "")
+    .filter(Boolean)
+    .join("\n\n")
+    .trim()
+}
+
+function codexTailReasoningText(payload) {
+  if (typeof payload?.content === "string" && payload.content.trim()) return payload.content.trim()
+  if (!Array.isArray(payload?.summary)) return ""
+  return payload.summary
+    .map(part => {
+      if (typeof part === "string") return part
+      if (typeof part?.text === "string") return part.text
+      if (typeof part?.summary_text === "string") return part.summary_text
+      return ""
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim()
+}
+
+function codexTailRowsToMessages(sessionId, rows, fallbackTs) {
+  const out = []
+  let seq = 0
+  const push = msg => {
+    out.push({
+      ...msg,
+      parentUuid: out.length > 0 ? out[out.length - 1].uuid : null,
+    })
+  }
+  for (const row of rows) {
+    const ts = typeof row?.timestamp === "string" ? row.timestamp : fallbackTs
+    if (row?.type === "event_msg" && row?.payload?.type === "user_message") {
+      const text = typeof row.payload.message === "string" ? row.payload.message.trim() : ""
+      if (!text) continue
+      push({
+        uuid: `codex-${sessionId}-tail-u-${seq++}`,
+        type: "human",
+        sessionId,
+        timestamp: ts,
+        isSidechain: false,
+        message: { role: "user", content: text },
+      })
+      continue
+    }
+    if (row?.type === "event_msg" && row?.payload?.type === "agent_message") {
+      const text = typeof row.payload.message === "string" ? row.payload.message.trim() : ""
+      if (!text) continue
+      push({
+        uuid: `codex-${sessionId}-tail-a-${seq++}`,
+        type: "assistant",
+        sessionId,
+        timestamp: ts,
+        isSidechain: false,
+        message: { role: "assistant", content: text },
+      })
+      continue
+    }
+    if (row?.type !== "response_item" || !row?.payload?.type) continue
+    if (row.payload.type === "message" && row.payload.role === "assistant") {
+      const text = codexTailAssistantText(row.payload.content)
+      if (!text) continue
+      push({
+        uuid: `codex-${sessionId}-tail-a-${seq++}`,
+        type: "assistant",
+        sessionId,
+        timestamp: ts,
+        isSidechain: false,
+        message: { role: "assistant", content: text },
+      })
+      continue
+    }
+    if (row.payload.type === "reasoning") {
+      const thinking = codexTailReasoningText(row.payload)
+      if (!thinking) continue
+      push({
+        uuid: `codex-${sessionId}-tail-a-${seq++}`,
+        type: "assistant",
+        sessionId,
+        timestamp: ts,
+        isSidechain: false,
+        message: { role: "assistant", content: [{ type: "thinking", thinking }] },
+      })
+      continue
+    }
+    if (row.payload.type === "function_call") {
+      let input = {}
+      try { input = JSON.parse(row.payload.arguments ?? "{}") } catch { input = { _raw: row.payload.arguments ?? "" } }
+      push({
+        uuid: `codex-${sessionId}-tail-a-${seq++}`,
+        type: "assistant",
+        sessionId,
+        timestamp: ts,
+        isSidechain: false,
+        message: {
+          role: "assistant",
+          content: [{
+            type: "tool_use",
+            id: row.payload.call_id ?? `${sessionId}-tail-tool-${seq}`,
+            name: row.payload.name ?? "tool",
+            input,
+          }],
+        },
+      })
+      continue
+    }
+    if (row.payload.type === "function_call_output") {
+      push({
+        uuid: `codex-${sessionId}-tail-u-${seq++}`,
+        type: "human",
+        sessionId,
+        timestamp: ts,
+        isSidechain: false,
+        message: {
+          role: "user",
+          content: [{
+            type: "tool_result",
+            tool_use_id: row.payload.call_id ?? undefined,
+            content: stringifyCodexTailOutput(row.payload.output),
+          }],
+        },
+      })
+    }
+  }
+  return out
+}
+
+function readCodexSessionTailFast(projectPath, sessionId, tail) {
+  const fp = findCodexSessionFile(sessionId)
+  if (!fp) return null
+  let stat
+  try { stat = statSync(fp) } catch { return null }
+  const meta = cheapCodexMetaFromFile(fp, loadConfig().names ?? {})
+  if (!meta || meta.projectPath !== projectPath) return null
+  const jsonRows = readJsonlTail(fp, Math.max(200, tail * 50))
+  const msgs = codexTailRowsToMessages(sessionId, jsonRows, stat.mtime.toISOString())
+  if (!msgs.length) return null
+  const cachedTotal = loadSidebarCache()._map.get(sessionId)?.messageCount
+  return {
+    msgs: msgs.slice(-tail),
+    total: cachedTotal && cachedTotal >= msgs.length ? cachedTotal : msgs.length,
+  }
+}
+
 // --- Session reading ---
 
 function parseJsonl(fp) {
@@ -440,6 +703,37 @@ function readJsonlTail(fp, n) {
     lines.reverse()
     return lines
   } catch { return [] }
+}
+
+/**
+ * Read a Claude subagent's sibling `<basename>.meta.json` if present.
+ * Returns { agentType, description } or null. Description is preferred over the
+ * (very long) first-prompt body when present.
+ */
+function readClaudeSubagentMeta(jsonlPath) {
+  if (!jsonlPath.endsWith(".jsonl")) return null
+  const metaPath = jsonlPath.slice(0, -".jsonl".length) + ".meta.json"
+  try {
+    const raw = readFileSync(metaPath, "utf8")
+    const obj = JSON.parse(raw)
+    if (obj && typeof obj === "object") {
+      return {
+        agentType: typeof obj.agentType === "string" ? obj.agentType : null,
+        description: typeof obj.description === "string" ? obj.description : null,
+      }
+    }
+  } catch { /* missing or malformed — fine */ }
+  return null
+}
+
+/**
+ * Pick a display name for a subagent session. Prefers the meta.json description
+ * (often concise like "Research ORT protobuf parsing failure") and falls back to
+ * the truncated first user prompt body.
+ */
+function pickClaudeSubagentFirstName(jsonlPath, meta) {
+  if (meta?.description?.trim()) return meta.description.trim().slice(0, 100)
+  return cheapReadFirstUserMsg(jsonlPath)
 }
 
 /** Read just the first ~4KB of a JSONL to cheaply extract the first user message text. */
@@ -537,60 +831,14 @@ function claudeSessionMetaFromMsgs(msgs, sessionId, projectKey, names, stat) {
   }
 }
 
-/** Full parse of every Claude JSONL — search, SSE refresh, “load all” sidebar. */
+/** Full project list without full Claude JSONL parsing — search uses rg/content search. */
 async function loadProjectsFull() {
   const names = loadConfig().names ?? {}
-  const projects = []
-  const roots = getClaudeScanRoots()
-
-  for (const { path: root, label } of roots) {
-    let dirs
-    try { dirs = readdirSync(root) } catch { continue }
-
-    for (const dir of dirs) {
-      const dp = join(root, dir)
-      try { if (!statSync(dp).isDirectory()) continue } catch { continue }
-
-      const sessions = []
-      let files
-      try { files = readdirSync(dp).filter(f => f.endsWith(".jsonl")) } catch { continue }
-
-      for (const f of files) {
-        const fp = join(dp, f)
-        let stat
-        try { stat = statSync(fp) } catch { continue }
-        const sessionId = f.replace(".jsonl", "")
-        const projectKey = root === CLAUDE_DIR ? dir : `${root}/${dir}`
-        const ck = `${root}/${dir}/${sessionId}`
-        const msgs = msgCache.has(ck) ? msgCache.get(ck) : parseJsonl(fp)
-        if (!msgCache.has(ck)) msgCache.set(ck, msgs)
-        sessions.push(claudeSessionMetaFromMsgs(msgs, sessionId, `${root}/${dir}`, names, stat))
-      }
-
-      if (sessions.length > 0) {
-        const baseName = encodedDirToDisplayName(dir)
-        projects.push({
-          path: `${root}/${dir}`,
-          displayName: label ? `[${label}] ${baseName}` : baseName,
-          sessions: sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity)),
-        })
-      }
-    }
-  }
-
-  const { fileBySessKey } = scanClaudeProjectsCheap(names)
-  scheduleClaudeJsonlIndexing(fileBySessKey, names)
+  const { projects } = scanClaudeProjectsCheap(names)
 
   const allProjects = [
     ...projects,
-    ...loadCodexSessions(),
-    ...loadCursorSessions(),
-    ...loadCursorAgentSessions(),
-    ...loadGeminiSessions(),
-    ...loadOpenCodeSessions(),
-    ...await loadAntigravitySessions(),
-    ...loadHermesSessions(),
-    ...loadOpenclawSessions(),
+    ...await loadPlatformProjectsHybrid(),
   ]
 
   return allProjects.sort((a, b) => {
@@ -603,19 +851,88 @@ async function loadProjectsFull() {
 const SESS_PATH_KEY = (projectPath, sessionId) => `${projectPath}\x1f${sessionId}`
 
 /**
+ * Scan a Claude project's subagent storage.
+ *
+ * Layout per parent session:
+ *   <project>/<parentSessionId>/subagents/agent-<agentId>.jsonl           — direct subagent
+ *   <project>/<parentSessionId>/subagents/agent-<agentId>.meta.json
+ *   <project>/<parentSessionId>/subagents/workflows/wf_<wfId>/agent-<agentId>.jsonl
+ *   <project>/<parentSessionId>/subagents/workflows/wf_<wfId>/agent-<agentId>.meta.json
+ *
+ * Returns session rows keyed by full relative path inside `projectPath` so that
+ * `join(projectPath, sessionId + ".jsonl")` resolves the file. Each row is
+ * flagged `isSidechain: true` with `parentSessionId` set so the sidebar groups
+ * them under their parent.
+ */
+function scanClaudeSubagents(projectPath, names) {
+  const out = []
+  let entries
+  try { entries = readdirSync(projectPath) } catch { return out }
+
+  for (const parentSessionId of entries) {
+    if (!parentSessionId) continue
+    if (parentSessionId.endsWith(".jsonl")) continue
+    const parentDir = join(projectPath, parentSessionId)
+    let parentStat
+    try { parentStat = statSync(parentDir) } catch { continue }
+    if (!parentStat.isDirectory()) continue
+
+    const subDir = join(parentDir, "subagents")
+    let subEntries
+    try { subEntries = readdirSync(subDir) } catch { continue }
+
+    for (const subEntry of subEntries) {
+      const subEntryPath = join(subDir, subEntry)
+      let subStat
+      try { subStat = statSync(subEntryPath) } catch { continue }
+
+      if (subStat.isFile() && subEntry.startsWith("agent-") && subEntry.endsWith(".jsonl")) {
+        // Direct subagent: <parentSessionId>/subagents/agent-<id>.jsonl
+        const id = `${parentSessionId}/subagents/${subEntry.slice(0, -".jsonl".length)}`
+        out.push({ id, parentSessionId, filePath: subEntryPath, stat: subStat, workflowId: null })
+        continue
+      }
+
+      if (subStat.isDirectory() && subEntry === "workflows") {
+        // Dynamic-workflow subagents: <parentSessionId>/subagents/workflows/wf_<wfId>/agent-<id>.jsonl
+        let wfEntries
+        try { wfEntries = readdirSync(subEntryPath) } catch { continue }
+        for (const wfId of wfEntries) {
+          if (!wfId.startsWith("wf_")) continue
+          const wfDir = join(subEntryPath, wfId)
+          let wfStat
+          try { wfStat = statSync(wfDir) } catch { continue }
+          if (!wfStat.isDirectory()) continue
+          let agentEntries
+          try { agentEntries = readdirSync(wfDir) } catch { continue }
+          for (const agentFile of agentEntries) {
+            if (!agentFile.startsWith("agent-") || !agentFile.endsWith(".jsonl")) continue
+            const agentPath = join(wfDir, agentFile)
+            let agentStat
+            try { agentStat = statSync(agentPath) } catch { continue }
+            const id = `${parentSessionId}/subagents/workflows/${wfId}/${agentFile.slice(0, -".jsonl".length)}`
+            out.push({ id, parentSessionId, filePath: agentPath, stat: agentStat, workflowId: wfId })
+          }
+        }
+      }
+    }
+  }
+  return out
+}
+
+/**
  * One Claude project directory under a scan root. Fills `fileBySessKey`; returns a project row or null.
  */
 function scanOneClaudeFolder(root, label, dir, names, fileBySessKey) {
   const dp = join(root, dir)
   try { if (!statSync(dp).isDirectory()) return null } catch { return null }
-  let files
-  try { files = readdirSync(dp).filter(f => f.endsWith(".jsonl")) } catch { return null }
-  if (!files.length) return null
   const projectPath = `${root}/${dir}`
-  const projectKey = root === CLAUDE_DIR ? dir : `${root}/${dir}`
   const cacheMap = loadSidebarCache()._map
   const sessions = []
-  for (const f of files) {
+  let topLevelJsonl = []
+  try { topLevelJsonl = readdirSync(dp).filter(f => f.endsWith(".jsonl")) } catch { /* ignore */ }
+
+  for (const f of topLevelJsonl) {
     const fp = join(dp, f)
     let stat
     try { stat = statSync(fp) } catch { continue }
@@ -638,6 +955,35 @@ function scanOneClaudeFolder(root, label, dir, names, fileBySessKey) {
       source: "claude",
     })
   }
+
+  // Subagent sessions: same project, flagged as sidechains of their parent session
+  for (const sub of scanClaudeSubagents(projectPath, names)) {
+    fileBySessKey.set(SESS_PATH_KEY(projectPath, sub.id), { fp: sub.filePath, stat: sub.stat })
+    const cachedEntry = cacheMap.get(sub.id)
+    const meta = readClaudeSubagentMeta(sub.filePath)
+    const firstName =
+      cachedEntry?.firstName ??
+      pickClaudeSubagentFirstName(sub.filePath, meta)
+    const sessionId = sub.id
+    sessions.push({
+      id: sessionId,
+      projectPath,
+      lastActivity: sub.stat.mtime.toISOString(),
+      version: undefined,
+      gitBranch: undefined,
+      isActive: Date.now() - sub.stat.mtimeMs < FIVE_MIN,
+      userMessageCount: cachedEntry?.userMessageCount ?? null,
+      messageCount: cachedEntry?.messageCount ?? 0,
+      firstName,
+      customName: names[`${projectPath}/${sessionId}`] ?? null,
+      source: "claude",
+      isSidechain: true,
+      parentSessionId: sub.parentSessionId,
+      agentType: meta?.agentType ?? cachedEntry?.agentType ?? "subagent",
+    })
+  }
+
+  if (!sessions.length) return null
   applySidebarCache(sessions)
   const baseName = encodedDirToDisplayName(dir)
   return {
@@ -744,6 +1090,7 @@ async function backgroundIndexAllClaudeJsonl(fileBySessKey, names) {
 }
 
 function scheduleClaudeJsonlIndexing(fileBySessKey, names) {
+  if (!ENABLE_BACKGROUND_INDEXER) return
   setImmediate(async () => {
     await backgroundIndexAllClaudeJsonl(fileBySessKey, names)
   })
@@ -769,12 +1116,38 @@ function loadPlatformInWorker(platform) {
   })
 }
 
+async function loadPlatformProjectsInWorkers() {
+  const results = await Promise.all(BUNDLE_PLATFORM_WORKERS.map(platform => loadPlatformInWorker(platform)))
+  return results.flatMap(({ projects }) => projects)
+}
+
+async function loadPlatformProjectsHybrid() {
+  const workerProjectsPromise = loadPlatformProjectsInWorkers()
+  const syncProjects = [
+    ...loadCodexSessions(),
+    ...loadCursorAgentSessions(),
+    ...loadGeminiSessions(),
+    ...await loadAntigravitySessions(),
+    ...loadAntigravityCliSessions(),
+    ...loadHermesSessions(),
+    ...loadOpenclawSessions(),
+  ]
+  const workerProjects = await workerProjectsPromise
+  return [...syncProjects, ...workerProjects]
+}
+
 /** Progressive recent sidebar: emit cached state + bootstrap_done immediately, then fill in background. */
 async function streamRecentSidebarInitial(res, maxSessions) {
-  // Emit cached sidebar state and signal bootstrap done immediately — UI is interactive from the start.
+  // Emit cached sidebar state plus freshly-statted recent Codex sessions immediately.
+  // Codex is often where the active work is, and the full platform worker can lag.
   const cachedState = loadCachedSidebarState()
-  if (cachedState?.length) {
-    const merged = mergeProjectsInto([], cachedState)
+  const freshCodexState = loadRecentCodexProjectsCheap(Math.max(RECENT_CODEX_SEED_LIMIT, maxSessions))
+  const initialState = [
+    ...(cachedState ?? []),
+    ...freshCodexState,
+  ]
+  if (initialState.length) {
+    const merged = mergeProjectsInto([], initialState)
     const cachedTotal = countSessionsInProjects(merged)
     const trimmed = maxSessions > 0 && cachedTotal > maxSessions
       ? trimProjectsByRecentSessionCount(merged, maxSessions)
@@ -783,9 +1156,13 @@ async function streamRecentSidebarInitial(res, maxSessions) {
     sseWrite(res, "projects_meta", { total: cachedTotal })
   }
   sseWrite(res, "bootstrap_done", {})
+  if (freshCodexState.length) {
+    setImmediate(() => flushSidebarCacheFromProjects(freshCodexState, null))
+  }
 
-  // Everything after this runs in background — doesn't block HTTP request processing.
-  setImmediate(async () => {
+  // Everything after this is delayed so deep-linked session fetches win the event loop.
+  setTimeout(async () => {
+    if (res.destroyed) return
     const _tBg0 = performance.now()
     console.log(`[perf ${wallClock()}] streamRecent bg-start`)
     const names = loadConfig().names ?? {}
@@ -804,11 +1181,10 @@ async function streamRecentSidebarInitial(res, maxSessions) {
     }
 
     // Launch all platform workers immediately so they run concurrently with the Claude scan.
-    const PLATFORMS = ["codex", "gemini", "opencode", "hermes", "openclaw", "cursor", "cursor-agent", "antigravity"]
     const _platformT0 = performance.now()
     // pendingWorkers: Map<platform, Promise<{platform, projects}>>
     const pendingWorkers = new Map(
-      PLATFORMS.map(p => [p, loadPlatformInWorker(p)])
+      STREAM_PLATFORM_WORKERS.map(p => [p, loadPlatformInWorker(p)])
     )
 
     // Track which worker results have already been merged (in case they arrive during Claude scan)
@@ -884,7 +1260,8 @@ async function streamRecentSidebarInitial(res, maxSessions) {
     if (!res.destroyed) emitProjects(sortProjectGroups(acc))
 
     scheduleClaudeJsonlIndexing(fileBySessKey, names)
-  }) // end setImmediate
+    if (!res.destroyed) sseWrite(res, "background_done", {})
+  }, STREAM_BACKGROUND_DELAY_MS)
 }
 
 async function hydrateClaudeSessionsInProjects(projects, fileBySessKey, names) {
@@ -906,10 +1283,12 @@ async function hydrateClaudeSessionsInProjects(projects, fileBySessKey, names) {
           customName: names[`${s.projectPath}/${s.id}`] ?? s.customName ?? null,
         }
       } else {
-        // Need firstName: parse the full file and cache it for session-view reuse
-        const msgs = parseJsonl(rec.fp)
-        msgCache.set(cacheKey, msgs)
-        p.sessions[i] = claudeSessionMetaFromMsgs(msgs, s.id, s.projectPath, names, rec.stat)
+        p.sessions[i] = {
+          ...s,
+          firstName: cheapReadFirstUserMsg(rec.fp),
+          messageCount: countJsonlLines(rec.fp),
+          customName: names[`${s.projectPath}/${s.id}`] ?? s.customName ?? null,
+        }
       }
       await yieldEventLoopTick()
     }
@@ -925,14 +1304,7 @@ async function loadProjectsBundleRecent(maxSessions) {
   const { projects: claudeProjects, fileBySessKey } = scanClaudeProjectsCheap(names)
   const allProjects = [
     ...claudeProjects,
-    ...loadCodexSessions(),
-    ...loadCursorSessions(),
-    ...loadCursorAgentSessions(),
-    ...loadGeminiSessions(),
-    ...loadOpenCodeSessions(),
-    ...await loadAntigravitySessions(),
-    ...loadHermesSessions(),
-    ...loadOpenclawSessions(),
+    ...await loadPlatformProjectsHybrid(),
   ].sort((a, b) => {
     const aLast = a.sessions[0]?.lastActivity ?? ""
     const bLast = b.sessions[0]?.lastActivity ?? ""
@@ -1026,6 +1398,12 @@ function loadSessionMessagesOndemand(projectPath, sessionId) {
     if (r && Array.isArray(r.msgs) && r.meta.id === sessionId) return r.msgs
     return null
   }
+  if (projectPath.startsWith("antigravity-cli:")) {
+    for (const { meta, msgs } of readAntigravityCliSessions(null, null)) {
+      if (meta.id === sessionId) return msgs
+    }
+    return null
+  }
   if (projectPath.startsWith("openclaw:")) {
     for (const { meta, msgs } of readOpenclawSessions(null, null)) {
       if (meta.id === sessionId) return msgs
@@ -1048,7 +1426,7 @@ function getSessionMessagesAll(projectPath, sessionId) {
     return ondemand
   }
   if (
-    /^(opencode|codex|hermes|antigravity|cursor-agent|openclaw):/.test(projectPath) &&
+    /^(opencode|codex|hermes|antigravity|antigravity-cli|cursor-agent|openclaw):/.test(projectPath) &&
     !/^[A-Za-z]:[\\/]/.test(projectPath)
   ) {
     return null
@@ -1366,6 +1744,13 @@ async function loadAntigravitySessions() {
   return resultsToProjects(results, "antigravity")
 }
 
+// ── Antigravity CLI sessions ───────────────────────────────────────────────────
+
+function loadAntigravityCliSessions() {
+  if (!existsSync(ANTIGRAVITY_CLI_DIR)) return []
+  return resultsToProjects(readAntigravityCliSessions(null, null), "antigravity-cli")
+}
+
 // ── Hermes sessions ────────────────────────────────────────────────────────────
 
 function loadHermesSessions() {
@@ -1430,11 +1815,34 @@ async function broadcastProjects() {
 // Watch ~/.claude/projects for file changes; update search index for changed JSONL files.
 function handleClaudeFileChange(filename) {
   if (!filename || !filename.endsWith(".jsonl")) { broadcastProjects(); return }
-  // filename is relative: "<projectDir>/<sessionId>.jsonl"
+  // filename is relative to ~/.claude/projects:
+  //   "<projectDir>/<sessionId>.jsonl"                                 — top-level session
+  //   "<projectDir>/<parentSessionId>/subagents/agent-<id>.jsonl"     — direct subagent
+  //   "<projectDir>/<parentSessionId>/subagents/workflows/wf_<wfId>/agent-<id>.jsonl" — workflow subagent
   const parts = filename.split(/[\\/]/)
   if (parts.length < 2) { broadcastProjects(); return }
-  const sessionId = parts[parts.length - 1].replace(".jsonl", "")
-  const projectDir = parts.slice(0, -1).join("/")
+
+  let projectDir, sessionId, parentSessionId
+  if (parts.length >= 5 && parts[parts.length - 3] === "subagents" && parts[parts.length - 2].startsWith("workflows")) {
+    // .../<projectDir>/<parentSessionId>/subagents/workflows/wf_<wfId>/agent-<id>.jsonl
+    const leaf = parts[parts.length - 1].replace(".jsonl", "")
+    const wfId = parts[parts.length - 2]
+    const parent = parts[parts.length - 4]
+    projectDir = parts.slice(0, -4).join("/")
+    parentSessionId = parent
+    sessionId = `${parent}/subagents/workflows/${wfId}/${leaf}`
+  } else if (parts.length >= 4 && parts[parts.length - 2] === "subagents") {
+    // .../<projectDir>/<parentSessionId>/subagents/agent-<id>.jsonl
+    const leaf = parts[parts.length - 1].replace(".jsonl", "")
+    const parent = parts[parts.length - 3]
+    projectDir = parts.slice(0, -3).join("/")
+    parentSessionId = parent
+    sessionId = `${parent}/subagents/${leaf}`
+  } else {
+    // .../<projectDir>/<sessionId>.jsonl
+    sessionId = parts[parts.length - 1].replace(".jsonl", "")
+    projectDir = parts.slice(0, -1).join("/")
+  }
   const projectPath = join(CLAUDE_DIR, projectDir)
   const fp = join(projectPath, `${sessionId}.jsonl`)
   if (!existsSync(fp)) {
@@ -1447,31 +1855,56 @@ function handleClaudeFileChange(filename) {
     const _t0 = performance.now()
     const stat = statSync(fp)
     const names = loadConfig().names ?? {}
-    const projectKey = projectDir
-    const msgs = parseJsonl(fp)
-    const _tParse = performance.now()
-    msgCache.set(`${projectPath}/${sessionId}`, msgs)
-    const meta = claudeSessionMetaFromMsgs(msgs, sessionId, projectKey, names, stat)
+    const cachedEntry = loadSidebarCache()._map.get(sessionId)
+    const meta = readClaudeSubagentMeta(fp)
+    const firstName =
+      cachedEntry?.firstName ??
+      pickClaudeSubagentFirstName(fp, meta)
+    const messageCount = countJsonlLines(fp)
+    const _tRead = performance.now()
+    msgCache.delete(`${projectPath}/${sessionId}`)
+    const sessionMeta = {
+      id: sessionId,
+      projectPath,
+      lastActivity: stat.mtime.toISOString(),
+      isActive: Date.now() - stat.mtimeMs < FIVE_MIN,
+      userMessageCount: cachedEntry?.userMessageCount ?? null,
+      messageCount,
+      firstName,
+      customName: names[`${projectPath}/${sessionId}`] ?? null,
+      source: "claude",
+      ...(parentSessionId
+        ? {
+            isSidechain: true,
+            parentSessionId,
+            agentType: meta?.agentType ?? cachedEntry?.agentType ?? "subagent",
+          }
+        : {}),
+    }
     const _tMeta = performance.now()
-    indexSession(projectPath, sessionId, msgs, meta)
+    indexSession(projectPath, sessionId, [], sessionMeta)
     // lancedb removed
     const _tIndex = performance.now()
     // Update sidebar cache so the next broadcast reflects new mtime + message count
     const projectDisplayName = encodedDirToDisplayName(projectDir)
-    updateSidebarCacheEntry(sessionId, {
+    const cacheDirty = updateSidebarCacheEntry(sessionId, {
       projectPath,  // absolute path — matches what scanOneClaudeFolder uses
       projectDisplayName,
       source: "claude",
-      messageCount: meta.messageCount,
-      userMessageCount: meta.userMessageCount ?? null,
-      firstName: meta.firstName ?? null,
+      messageCount: sessionMeta.messageCount,
+      userMessageCount: sessionMeta.userMessageCount ?? null,
+      firstName: sessionMeta.firstName ?? null,
       lastActivity: stat.mtime.toISOString(),
       mtime: stat.mtimeMs,
+      customName: sessionMeta.customName ?? null,
+      isSidechain: !!parentSessionId,
+      parentSessionId: parentSessionId ?? null,
+      agentType: sessionMeta.agentType ?? "subagent",
     })
-    saveSidebarCache()
-    const _tSave = performance.now()
-    if (_tSave - _t0 > 20) {
-      console.log(`[perf ${wallClock()}] handleClaudeFileChange ${sessionId.slice(0,8)} parse:${(_tParse-_t0).toFixed(1)}ms meta:${(_tMeta-_tParse).toFixed(1)}ms index:${(_tIndex-_tMeta).toFixed(1)}ms save:${(_tSave-_tIndex).toFixed(1)}ms total:${(_tSave-_t0).toFixed(1)}ms msgs:${msgs.length}`)
+    if (cacheDirty) scheduleSidebarCacheSave()
+    const _tDone = performance.now()
+    if (_tDone - _t0 > 20) {
+      console.log(`[perf ${wallClock()}] handleClaudeFileChange ${sessionId.slice(0,8)} read:${(_tRead-_t0).toFixed(1)}ms meta:${(_tMeta-_tRead).toFixed(1)}ms index:${(_tIndex-_tMeta).toFixed(1)}ms cache:${(_tDone-_tIndex).toFixed(1)}ms total:${(_tDone-_t0).toFixed(1)}ms lines:${messageCount}`)
     }
   } catch { /* ignore */ }
   broadcastProjectsFromCache()
@@ -1495,6 +1928,26 @@ if (existsSync(OPENCODE_DIR)) {
   } catch {
     try {
       watch(OPENCODE_DIR, () => broadcastProjects())
+    } catch { /* ignore */ }
+  }
+}
+
+if (existsSync(ANTIGRAVITY_BRAIN_DIR)) {
+  try {
+    watch(ANTIGRAVITY_BRAIN_DIR, { recursive: true }, () => broadcastProjects())
+  } catch {
+    try {
+      watch(ANTIGRAVITY_BRAIN_DIR, () => broadcastProjects())
+    } catch { /* ignore */ }
+  }
+}
+
+if (existsSync(ANTIGRAVITY_CLI_DIR)) {
+  try {
+    watch(join(ANTIGRAVITY_CLI_DIR, "brain"), { recursive: true }, () => broadcastProjects())
+  } catch {
+    try {
+      watch(ANTIGRAVITY_CLI_DIR, { recursive: true }, () => broadcastProjects())
     } catch { /* ignore */ }
   }
 }
@@ -2204,7 +2657,7 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  // GET|PUT /api/settings — allow both cookie + header auth (daemon uses header)
+  // GET|PUT /api/settings — allow both cookie + header auth (legacy automation clients)
   if (url.pathname === "/api/settings") {
     if (!checkCookieAuth(req) && !checkHeaderAuth(req)) { json({ error: "Unauthorized" }, 401); return }
     if (req.method === "GET") {
@@ -2222,15 +2675,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // PUT /api/sync — daemon compat; local mode reads files directly so just ack + push
-  if (url.pathname === "/api/sync" && req.method === "PUT") {
-    if (!checkHeaderAuth(req)) { json({ error: "Unauthorized" }, 401); return }
-    broadcastProjects()
-    json({ ok: true })
-    return
-  }
-
-  // GET /api/usage — cookie or header auth (daemon/CLI uses header)
+  // GET /api/usage — cookie or header auth for optional remote clients
   if (url.pathname === "/api/usage" && req.method === "GET") {
     if (!checkCookieAuth(req) && !checkHeaderAuth(req)) { json({ error: "Unauthorized" }, 401); return }
     json(await fetchAllUsage())
@@ -2322,10 +2767,10 @@ const server = http.createServer(async (req, res) => {
         res.write(JSON.stringify({ hits }) + "\n")
       })
 
-      // Flush Antigravity hits from rg (not covered by content-search)
+      // Flush Antigravity + Antigravity CLI hits from rg (not covered by content-search)
       const rgHits = await rgPromise
       if (rgHits?.length) {
-        const agHits = rgHits.filter(h => h.source === "antigravity" && !seen.has(h.sessionId))
+        const agHits = rgHits.filter(h => (h.source === "antigravity" || h.source === "antigravity-cli") && !seen.has(h.sessionId))
         if (agHits.length) res.write(JSON.stringify({ hits: agHits }) + "\n")
       }
 
@@ -2390,13 +2835,22 @@ const server = http.createServer(async (req, res) => {
 
     // Resolve the watchable file path
     let watchFile = null
+    let watchIsDir = false
     if (projectPath.startsWith("openclaw:")) {
       watchFile = findOpenclawSessionFile(sessionId)
     } else if (projectPath.startsWith("codex:")) {
       watchFile = findCodexSessionFile(sessionId)
+    } else if (projectPath.startsWith("antigravity:")) {
+      // Antigravity desktop writes markdown artifacts in place; watch the brain dir itself —
+      // on macOS, fs.watch on a directory fires for child file content changes too.
+      const brainDir = join(ANTIGRAVITY_BRAIN_DIR, sessionId)
+      if (existsSync(brainDir)) { watchFile = brainDir; watchIsDir = true }
+    } else if (projectPath.startsWith("antigravity-cli:")) {
+      // Antigravity CLI appends JSONL — watch transcript.jsonl directly (size-based diff)
+      const transcriptFile = join(ANTIGRAVITY_CLI_DIR, "brain", sessionId, ".system_generated", "logs", "transcript.jsonl")
+      if (existsSync(transcriptFile)) watchFile = transcriptFile
     } else if (!projectPath.startsWith("cursor:") && !projectPath.startsWith("cursor-agent:") &&
-               !projectPath.startsWith("opencode:") && !projectPath.startsWith("hermes:") &&
-               !projectPath.startsWith("antigravity:")) {
+               !projectPath.startsWith("opencode:") && !projectPath.startsWith("hermes:")) {
       // Claude JSONL
       const fp = projectPath.startsWith("/")
         ? join(projectPath, `${sessionId}.jsonl`)
@@ -2419,8 +2873,16 @@ const server = http.createServer(async (req, res) => {
       return
     }
 
-    let lastSize = 0
-    try { lastSize = statSync(watchFile).size } catch { /* file may not exist yet */ }
+    function dirMaxMtime(dir) {
+      try {
+        return Math.max(...readdirSync(dir).map(f => { try { return statSync(join(dir, f)).mtimeMs } catch { return 0 } }))
+      } catch { return 0 }
+    }
+
+    let lastSig = 0
+    try {
+      lastSig = watchIsDir ? dirMaxMtime(watchFile) : statSync(watchFile).size
+    } catch { /* file may not exist yet */ }
 
     function pushUpdate() {
       try {
@@ -2444,12 +2906,12 @@ const server = http.createServer(async (req, res) => {
     try {
       watcher = watch(watchFile, () => {
         clearTimeout(debounceTimer)
-        // Small debounce: JSONL appends may fire multiple events per write
+        // Small debounce: JSONL appends / md rewrites may fire multiple events per write
         debounceTimer = setTimeout(() => {
           try {
-            const newSize = statSync(watchFile).size
-            if (newSize === lastSize) return
-            lastSize = newSize
+            const newSig = watchIsDir ? dirMaxMtime(watchFile) : statSync(watchFile).size
+            if (newSig === lastSig) return
+            lastSig = newSig
             // Invalidate mem-cache so fresh parse picks up new lines
             msgCache.delete(`${projectPath}/${sessionId}`)
             pushUpdate()
@@ -2540,7 +3002,7 @@ const server = http.createServer(async (req, res) => {
   if (sessionMatch) {
     const reqT0 = performance.now()
     const projectPath = decodeURIComponent(sessionMatch[1])
-    const sessionId = sessionMatch[2]
+    const sessionId = decodeURIComponent(sessionMatch[2])
     const tailParam = url.searchParams.get("tail")
     const skipParam = url.searchParams.get("skip")
     const tail = tailParam ? Math.max(1, parseInt(tailParam) || 0) : 0
@@ -2584,6 +3046,25 @@ const server = http.createServer(async (req, res) => {
       console.log(`[perf ${wallClock()}] /api/session cache-hit ${source}:${shortId} key=${cacheKey}`)
       jsonPaged(msgCache.get(cacheKey), "mem-cache")
       return
+    }
+
+    if (projectPath.startsWith("codex:") && tail > 0 && skip === 0) {
+      const t0tail = performance.now()
+      const quick = readCodexSessionTailFast(projectPath, sessionId, tail)
+      const tailMs = (performance.now() - t0tail).toFixed(1)
+      if (quick?.msgs?.length) {
+        const jsonStr = JSON.stringify(quick.msgs)
+        const totalMs = (performance.now() - reqT0).toFixed(1)
+        console.log(`[perf ${wallClock()}] /api/session codex:${shortId} tail=${tail} → ${quick.msgs.length}/${quick.total} msgs | load:jsonl-tail ${tailMs}ms | total:${totalMs}ms | resp:${(jsonStr.length/1024).toFixed(1)}KB`)
+        res.writeHead(200, { "Content-Type": "application/json", "X-Message-Total": String(quick.total) })
+        res.end(jsonStr)
+        setImmediate(() => {
+          if (msgCache.has(cacheKey)) return
+          const full = loadSessionMessagesOndemand(projectPath, sessionId)
+          if (Array.isArray(full)) msgCache.set(cacheKey, full)
+        })
+        return
+      }
     }
 
     // Non-Claude platforms: on-demand read via platform-readers

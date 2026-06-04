@@ -23,7 +23,7 @@ export function adaptivePage(all: SessionMessage[], fromIdx: number): number {
 }
 
 export function sessionUrl(projectDir: string, sessionId: string, tail?: number, skip?: number) {
-  const base = `/api/session/${encodeURIComponent(projectDir)}/${sessionId}`
+  const base = `/api/session/${encodeURIComponent(projectDir)}/${encodeURIComponent(sessionId)}`
   const params = new URLSearchParams()
   if (tail) params.set("tail", String(tail))
   if (skip) params.set("skip", String(skip))
