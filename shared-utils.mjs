@@ -1,5 +1,5 @@
 /**
- * Shared utilities for local-server and daemon
+ * Shared utilities for local-server and build-cache
  */
 
 export function stripXml(text) {

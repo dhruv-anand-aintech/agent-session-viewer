@@ -126,17 +126,16 @@ const publicUrl = customDomain
 console.log(`
 ✅  Setup complete!
 
-Your viewer is live at: ${publicUrl}
+Your viewer worker is live at: ${publicUrl}
 
-To start syncing your sessions to the Worker, run:
+For sharing, use the CLI tunnel modes from this checkout:
 
-  WORKER_URL=${publicUrl} AUTH_PIN=${pin} npm run daemon
+  node bin/agent-session-viewer.mjs --cf
+  node bin/agent-session-viewer.mjs --ngrok
 
-Or pass them as flags:
+For local access only:
 
-  node daemon/watch.mjs --worker <url> --pin <pin>
+  npm run local
 
-Optional: to also sync nanoclaw (WhatsApp/Telegram) agent sessions:
-
-  WORKER_URL=... AUTH_PIN=... NANOCLAW_DIR=/path/to/nanoclaw npm run daemon
+Daemon-based remote syncing is no longer part of this branch.
 `)

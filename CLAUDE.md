@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A **multi-platform** web UI for browsing AI coding assistant sessions locally: **Claude Code** (JSONL), **Cursor**, **OpenCode**, **Antigravity**, **Hermes**, plus **claw**-style bots (nanoclaw, openclaw, …). Runs entirely on localhost — no cloud account needed. Remote access is via LAN, Cloudflare quick tunnel, or ngrok modes built into the CLI.
 
-> **Note:** `worker/index.ts` and the Cloudflare/KV/daemon architecture are **deprecated**. The Worker returns HTTP 410. Do not add new features there.
+> **Note:** `worker/index.ts` and the older Cloudflare/deprecated deployment path are **deprecated**. The Worker returns HTTP 410. Do not add new features there.
 
 ## Repo layout
 

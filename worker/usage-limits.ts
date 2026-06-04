@@ -16,7 +16,7 @@ export default {
       return new Response(null, { headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "X-Sync-Secret,Content-Type" } })
     }
 
-    // POST /ingest — local daemon pushes full fetchAllUsage() snapshot
+    // POST /ingest — local-server pushes full fetchAllUsage() snapshot
     if (req.method === "POST" && url.pathname === "/ingest") {
       if (req.headers.get("X-Sync-Secret") !== env.SYNC_SECRET)
         return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401, headers: CORS })
@@ -28,7 +28,7 @@ export default {
     // GET /snapshot — return latest snapshot JSON
     if (req.method === "GET" && url.pathname === "/snapshot") {
       const raw = await env.USAGE_KV.get("usage_snapshot")
-      if (!raw) return new Response(JSON.stringify({ error: "No data yet — daemon not running?" }), { status: 404, headers: CORS })
+      if (!raw) return new Response(JSON.stringify({ error: "No data yet — local push pending" }), { status: 404, headers: CORS })
       return new Response(raw, { headers: CORS })
     }
 
