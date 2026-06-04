@@ -41,6 +41,7 @@ export default function App() {
   const {
     projects,
     projectsLoading,
+    projectsUpdating,
     totalSessions,
     listMode,
     sessionsTruncated,
@@ -123,6 +124,7 @@ export default function App() {
             : selected.project.startsWith("opencode:") ? "opencode"
             : selected.project.startsWith("codex:") ? "codex"
             : selected.project.startsWith("hermes:") ? "hermes"
+            : selected.project.startsWith("antigravity-cli:") ? "antigravity-cli"
             : selected.project.startsWith("antigravity:") ? "antigravity"
             : "claude" }
       : null)
@@ -194,6 +196,7 @@ export default function App() {
           <Sidebar
             projects={projects}
             projectsLoading={projectsLoading}
+            projectsUpdating={projectsUpdating}
             totalSessions={totalSessions}
             listMode={listMode}
             sessionsTruncated={sessionsTruncated}

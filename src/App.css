@@ -21,6 +21,7 @@
   --color-cursor: hsl(210, 70%, 62%);
   --color-opencode: hsl(140, 55%, 52%);
   --color-antigravity: hsl(263, 55%, 65%);
+  --color-antigravity-cli: hsl(280, 60%, 70%);
   --color-hermes: hsl(40, 58%, 54%);
   --color-openclaw: hsl(320, 55%, 60%);
   --success: hsl(97, 59.1%, 46.1%);
@@ -159,6 +160,18 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   gap: 6px;
   flex-shrink: 0;
 }
+.sidebar-loading-banner--inline {
+  justify-content: center;
+  margin: 6px 8px 10px;
+  padding: 10px 8px;
+  border: 1px solid var(--border-100);
+  border-radius: 8px;
+  background: hsla(255, 100%, 100%, 0.03);
+}
+.sidebar-bottom-sentinel {
+  width: 100%;
+  height: 1px;
+}
 
 .sidebar-title {
   padding: 14px 12px 6px; font-size: 11px; font-weight: 600;
@@ -208,6 +221,11 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   background: hsla(263, 55%, 65%, 0.12);
   border-color: var(--color-antigravity);
   color: hsl(263, 55%, 75%);
+}
+.sidebar-platform-btn.active-antigravity-cli {
+  background: hsla(280, 60%, 70%, 0.12);
+  border-color: var(--color-antigravity-cli);
+  color: hsl(280, 60%, 80%);
 }
 .sidebar-platform-btn.active-hermes {
   background: hsla(40, 58%, 54%, 0.12);
@@ -465,6 +483,16 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
 }
 .session-path-btn { background: none; border: none; color: var(--text-400); font-size: 11px; cursor: pointer; padding: 2px 6px; border-radius: 4px; transition: all 0.12s; text-decoration: none; font-family: var(--font-mono); }
 .session-path-btn:hover { background: hsla(255,100%,100%,0.06); color: var(--text-200); }
+.resume-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  flex-shrink: 0;
+}
+.resume-copy-btn.copied { color: var(--success); }
 .git-branch { font-size: 11px; color: var(--text-400); }
 .active-badge { font-size: 10px; color: var(--success); }
 .session-refreshing { width: 6px; height: 6px; border-radius: 50%; background: var(--text-500); opacity: 0.6; animation: pulse-dot 1.2s ease-in-out infinite; flex-shrink: 0; }

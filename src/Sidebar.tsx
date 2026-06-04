@@ -178,9 +178,10 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
   )
 }
 
-export function Sidebar({ projects, projectsLoading, totalSessions, listMode, sessionsTruncated, onLoadAllSessions, activeSessionId: activeSessionIdProp, onSelect, width, onDragStart, mobileOpen, onMobileClose }: {
+export function Sidebar({ projects, projectsLoading, projectsUpdating, totalSessions, listMode, sessionsTruncated, onLoadAllSessions, activeSessionId: activeSessionIdProp, onSelect, width, onDragStart, mobileOpen, onMobileClose }: {
   projects: ProjectData[]
   projectsLoading: boolean
+  projectsUpdating: boolean
   totalSessions: number | null
   listMode: "recent" | "full"
   sessionsTruncated: boolean
@@ -196,6 +197,9 @@ export function Sidebar({ projects, projectsLoading, totalSessions, listMode, se
   const [grouped, setGrouped] = useState(() => localStorage.getItem("sidebarGrouped") === "true")
   const [expandedParents, setExpandedParents] = useState<Set<string>>(new Set())
   const [platformFilter, setPlatformFilter] = useState<string>("all")
+  const [sidebarBottomInView, setSidebarBottomInView] = useState(false)
+  const sessionsScrollRef = useRef<HTMLDivElement>(null)
+  const sidebarBottomRef = useRef<HTMLDivElement>(null)
 
   const [sidebarSearchQuery, setSidebarSearchQuery] = useState("")
   const [sidebarSearchLoading, setSidebarSearchLoading] = useState(false)
@@ -254,7 +258,31 @@ export function Sidebar({ projects, projectsLoading, totalSessions, listMode, se
     }
   }, [sidebarSearchQuery, platformFilter])
 
+  const allSessions = projects.flatMap(p => p.sessions)
+  const presentPlatforms = Array.from(new Set(allSessions.map(s => s.source ?? "claude")))
+  const showPlatformFilter = presentPlatforms.length > 1
+  const loadedSessionCount = projects.reduce((n, p) => n + p.sessions.length, 0)
+
   const searchBrowseActive = sidebarSearchQuery.trim().length > 0
+  useEffect(() => {
+    if (searchBrowseActive) {
+      setSidebarBottomInView(false)
+      return
+    }
+    const root = sessionsScrollRef.current
+    const target = sidebarBottomRef.current
+    if (!root || !target || !("IntersectionObserver" in window)) {
+      setSidebarBottomInView(false)
+      return
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => setSidebarBottomInView(entry.isIntersecting),
+      { root, threshold: 0.1 },
+    )
+    observer.observe(target)
+    return () => observer.disconnect()
+  }, [searchBrowseActive, grouped, platformFilter, loadedSessionCount])
+
   const filteredSearchHits = (sidebarSearchHits ?? []).filter(h => {
     if (platformFilter !== "all" && (h.meta.source ?? "claude") !== platformFilter) return false
     return matchesSidebarSearchFields(
@@ -337,10 +365,6 @@ export function Sidebar({ projects, projectsLoading, totalSessions, listMode, se
     })
   }
 
-  const allSessions = projects.flatMap(p => p.sessions)
-  const presentPlatforms = Array.from(new Set(allSessions.map(s => s.source ?? "claude")))
-  const showPlatformFilter = presentPlatforms.length > 1
-  const loadedSessionCount = projects.reduce((n, p) => n + p.sessions.length, 0)
   const recentTargetCount =
     listMode === "recent" && totalSessions != null
       ? Math.min(totalSessions, RECENT_SIDEBAR_SESSIONS)
@@ -362,6 +386,25 @@ export function Sidebar({ projects, projectsLoading, totalSessions, listMode, se
           ? `Loading sessions… ${loadedSessionCount} loaded`
           : `Loading…`
     : null
+  const inlineLoadingLabel =
+    sessionsTruncated && sidebarBottomInView
+      ? "Loading older sessions…"
+      : listMode === "recent"
+        ? "Loading recent sessions…"
+        : totalSessions != null
+          ? `Loading sessions… ${loadedSessionCount} loaded`
+          : "Loading sessions…"
+  const showTopLoading = projectsLoading && loadedSessionCount === 0
+  const showInlineLoading =
+    projectsUpdating &&
+    loadedSessionCount > 0 &&
+    sidebarBottomInView
+
+  useEffect(() => {
+    if (searchBrowseActive || projectsLoading || loadedSessionCount === 0) return
+    if (!sessionsTruncated || !sidebarBottomInView) return
+    onLoadAllSessions()
+  }, [searchBrowseActive, projectsLoading, loadedSessionCount, sessionsTruncated, sidebarBottomInView, onLoadAllSessions])
 
   const _allFlatRaw: { s: SessionMeta; projectPath: string }[] = projects
     .flatMap(p => p.sessions.map(s => ({ s, projectPath: s.projectPath || p.path })))
@@ -396,6 +439,12 @@ export function Sidebar({ projects, projectsLoading, totalSessions, listMode, se
   const listedSessionCount = projects.reduce((n, p) => n + p.sessions.length, 0)
   const moreSessionsHidden =
     totalSessions != null && listMode === "recent" ? Math.max(0, totalSessions - listedSessionCount) : 0
+  const showLoadOlderButton =
+    sessionsTruncated &&
+    totalSessions != null &&
+    moreSessionsHidden > 0 &&
+    !searchBrowseActive &&
+    !sidebarBottomInView
 
   return (
     <>
@@ -459,13 +508,13 @@ export function Sidebar({ projects, projectsLoading, totalSessions, listMode, se
           </div>
         </div>
         <div className="sidebar-body">
-          {projectsLoading && !searchBrowseActive && loadingLabel && (
+          {showTopLoading && !searchBrowseActive && loadingLabel && (
             <div className="sidebar-loading-banner">
               <span className="sidebar-spinner" />
               <span>{loadingLabel}</span>
             </div>
           )}
-          <div className="sidebar-sessions-scroll">
+          <div className="sidebar-sessions-scroll" ref={sessionsScrollRef}>
             {searchBrowseActive ? (
               <>
                 {sidebarSearchLoading && (
@@ -589,9 +638,18 @@ export function Sidebar({ projects, projectsLoading, totalSessions, listMode, se
                 ))}
               </>
             )}
+            {!searchBrowseActive && (
+              <div ref={sidebarBottomRef} className="sidebar-bottom-sentinel" aria-hidden />
+            )}
+            {!searchBrowseActive && showInlineLoading && (
+              <div className="sidebar-loading-banner sidebar-loading-banner--inline">
+                <span className="sidebar-spinner" />
+                <span>{inlineLoadingLabel}</span>
+              </div>
+            )}
             {!projectsLoading && projects.length === 0 && !searchBrowseActive && <div className="sidebar-empty">No sessions found</div>}
           </div>
-          {sessionsTruncated && totalSessions != null && moreSessionsHidden > 0 && !searchBrowseActive && (
+          {showLoadOlderButton && (
             <div className="sidebar-load-more">
               <button
                 type="button"

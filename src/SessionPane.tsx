@@ -31,6 +31,46 @@ function extractMatchSnippet(text: string, query: string, maxLen: number): strin
   return prefix + text.slice(start, end) + suffix
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+function cwdFromProjectPath(projectPath: string, chatDir: string | null): string | null {
+  if (chatDir?.startsWith("/")) return chatDir
+  if (projectPath.includes("/.claude/projects/")) return null
+  const prefixed = projectPath.match(/^[a-z-]+:(\/.+)$/)
+  if (prefixed) return prefixed[1]
+  if (projectPath.startsWith("/")) return projectPath
+  return null
+}
+
+function resumeCommandForSession(projectPath: string, sessionMeta: SessionMeta, chatDir: string | null): string | null {
+  const source = sessionMeta.source ?? (projectPath.includes(":") && !projectPath.startsWith("/") ? projectPath.split(":")[0] : "claude")
+  const id = shellQuote(sessionMeta.id)
+  let command: string | null = null
+  switch (source) {
+    case "claude":
+      command = `claude --resume ${id}`
+      break
+    case "codex":
+      command = `codex resume ${id}`
+      break
+    case "cursor-agent":
+      command = `cursor-agent --resume ${id}`
+      break
+    case "opencode":
+      command = `opencode --session ${id}`
+      break
+    case "gemini":
+      command = `gemini --resume ${id}`
+      break
+    default:
+      return null
+  }
+  const cwd = cwdFromProjectPath(projectPath, chatDir)
+  return cwd ? `cd ${shellQuote(cwd)} && ${command}` : command
+}
+
 function ThreadSearchResultCard({
   hit,
   active,
@@ -454,6 +494,15 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
   }
 
   const chatDirLabel = chatDir ?? stableProjectDir
+  const resumeCommand = resumeCommandForSession(stableProjectDir, sessionMeta, chatDir)
+  const [resumeCopied, setResumeCopied] = useState(false)
+
+  async function copyResumeCommand() {
+    if (!resumeCommand) return
+    await navigator.clipboard.writeText(resumeCommand)
+    setResumeCopied(true)
+    window.setTimeout(() => setResumeCopied(false), 1400)
+  }
 
   return (
     <div className="session-pane">
@@ -481,6 +530,26 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
         >
           Context
         </a>
+        {resumeCommand && (
+          <button
+            type="button"
+            className={`session-path-btn resume-copy-btn ${resumeCopied ? "copied" : ""}`}
+            onClick={() => void copyResumeCommand()}
+            title={resumeCopied ? "Copied resume command" : resumeCommand}
+            aria-label="Copy resume command"
+          >
+            {resumeCopied ? (
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <path d="M2.5 7.2 5.4 10 11.5 3.8" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <rect x="4.25" y="2.25" width="6.75" height="8.75" rx="1.25" stroke="currentColor" strokeWidth="1.3" />
+                <path d="M3 4.1H2.6c-.7 0-1.1.4-1.1 1.1v6.2c0 .7.4 1.1 1.1 1.1h5.1c.7 0 1.1-.4 1.1-1.1V11" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+              </svg>
+            )}
+          </button>
+        )}
         {loading && win && <span className="session-refreshing" title="Refreshing…" />}
         {sessionMeta.gitBranch && <span className="git-branch hide-mobile">⎇ {sessionMeta.gitBranch}</span>}
         {isRecentlyActive(sessionMeta.lastActivity) && <span className="active-badge">● Live</span>}

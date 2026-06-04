@@ -5,6 +5,7 @@ export function platformIconLabel(source?: string): string {
     case "cursor": return "Cursor"
     case "opencode": return "OpenCode"
     case "antigravity": return "Antigravity"
+    case "antigravity-cli": return "Antigravity CLI"
     case "hermes": return "Hermes"
     case "codex": return "Codex"
     case "gemini": return "Gemini"
@@ -19,7 +20,8 @@ export function platformIconSrc(source?: string): string | null {
     case "cursor": return "https://www.google.com/s2/favicons?sz=64&domain=cursor.com"
     case "opencode": return "https://www.google.com/s2/favicons?sz=64&domain=opencode.ai"
     case "codex": return "https://www.google.com/s2/favicons?sz=64&domain=openai.com"
-    case "antigravity": return "https://www.google.com/s2/favicons?sz=64&domain=idx.google.com"
+    case "antigravity": return "https://www.google.com/s2/favicons?sz=64&domain=antigravity.google"
+    case "antigravity-cli": return "https://www.google.com/s2/favicons?sz=64&domain=antigravity.google"
     case "hermes": return "https://www.google.com/s2/favicons?sz=64&domain=nousresearch.com"
     case "gemini": return "https://www.google.com/s2/favicons?sz=64&domain=gemini.google.com"
     case "openclaw": return "https://www.google.com/s2/favicons?sz=64&domain=openclaw.ai"
@@ -32,6 +34,7 @@ export function platformFallbackGlyph(source?: string): string {
     case "cursor": return "⌁"
     case "opencode": return "</>"
     case "antigravity": return "◌"
+    case "antigravity-cli": return "◌"
     case "hermes": return "⚚"
     case "gemini": return "♊"
     case "codex": return "{}"
@@ -70,6 +73,7 @@ export const PLATFORM_FILTER_ACTIVE: Record<string, string> = {
   cursor: "active-cursor",
   opencode: "active-opencode",
   antigravity: "active-antigravity",
+  "antigravity-cli": "active-antigravity-cli",
   hermes: "active-hermes",
   gemini: "active-gemini",
   openclaw: "active-openclaw",

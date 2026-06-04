@@ -1,12 +1,6 @@
 import { useState, useEffect } from "react"
 
-const KNOWN_CLAW_TOOLS = [
-  "nanoclaw", "openclaw", "picoclaw", "femtoclaw", "attoclaw",
-  "kiloclaw", "megaclaw", "zeroclaw", "microclaw", "rawclaw",
-]
-
 export function SettingsModal({ onClose }: { onClose: () => void }) {
-  const [toolPaths, setToolPaths] = useState<Record<string, string>>({})
   const [rateLimitAlertsEnabled, setRateLimitAlertsEnabled] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
@@ -15,7 +9,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
     fetch("/api/settings", { credentials: "include" })
       .then(r => r.ok ? r.json() : {})
       .then((s: Record<string, unknown>) => {
-        setToolPaths((s.toolPaths as Record<string, string>) ?? {})
         if (typeof s.rateLimitAlertsEnabled === "boolean") {
           setRateLimitAlertsEnabled(s.rateLimitAlertsEnabled)
         }
@@ -30,7 +23,7 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ toolPaths, rateLimitAlertsEnabled }),
+        body: JSON.stringify({ rateLimitAlertsEnabled }),
       })
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
@@ -62,23 +55,6 @@ export function SettingsModal({ onClose }: { onClose: () => void }) {
             Install the LaunchAgent with <code>npm run rate-limit-watch:launchd-install</code>.
             The watcher covers Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Hermes, and OpenClaw.
           </div>
-
-          <div className="settings-section-label">Claw Tool Paths</div>
-          <div className="settings-hint">
-            Leave blank to auto-detect (checks <code>~/toolname</code>).
-            Restart the daemon after changing paths.
-          </div>
-          {KNOWN_CLAW_TOOLS.map(name => (
-            <div key={name} className="settings-row">
-              <label className="settings-label">{name}</label>
-              <input
-                className="settings-input"
-                placeholder={`e.g. /Users/you/${name}`}
-                value={toolPaths[name] ?? ""}
-                onChange={e => setToolPaths(p => ({ ...p, [name]: e.target.value }))}
-              />
-            </div>
-          ))}
         </div>
         <div className="settings-footer">
           <button className="settings-save-btn" onClick={save} disabled={saving}>
