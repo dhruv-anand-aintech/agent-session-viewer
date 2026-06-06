@@ -4,8 +4,10 @@ import { Router, Redirect } from "wouter"
 import PinGate from "./PinGate"
 import App from "./App"
 import { initDebugTrace } from "./debug-trace"
+import { installSsePagehideCleanup } from "./sse-lifecycle"
 
 initDebugTrace()
+installSsePagehideCleanup()
 
 /** Abort a fetch after `ms` milliseconds. */
 function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit & { timeout?: number }) {

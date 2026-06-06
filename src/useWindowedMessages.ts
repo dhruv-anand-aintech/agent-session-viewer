@@ -6,6 +6,7 @@ import { charCountMsg } from "./pretty/PrettyMessageBlock"
 import { markIDBResult, markRemoteFetch, markChunkLoad } from "./perf"
 import { wallClock } from "./utils"
 import { debugLog } from "./debug-trace"
+import { trackedEventSource } from "./sse-lifecycle"
 
 export const CHUNK = 60
 export const MAX_DOM = 180
@@ -196,7 +197,7 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
     }
 
     const qs = `?project=${encodeURIComponent(projectDir)}&session=${encodeURIComponent(sessionId)}&tail=${INITIAL_TAIL}`
-    const es = new EventSource(`/api/session-watch${qs}`)
+    const es = trackedEventSource(`/api/session-watch${qs}`)
     let pollFallback: ReturnType<typeof setInterval> | null = null
 
     es.addEventListener("session_update", (e: MessageEvent) => {

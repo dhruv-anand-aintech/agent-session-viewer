@@ -65,6 +65,9 @@
     "test:unit": "node --test tests/*.test.mjs && vitest run",
     "test:tunnel-regression": "node scripts/tunnel-load-regression.mjs",
     "test:tunnel": "node scripts/tunnel-browser-test.mjs",
+    "tunnel:install": "bash scripts/install-tunnel-daemon.sh",
+    "tunnel:warm-install": "bash scripts/install-tunnel-warm.sh",
+    "tunnel:warm": "bash scripts/tunnel-warm.sh",
     "test:prepush": "npm test && npm run test:tunnel-regression"
   },
   "dependencies": {

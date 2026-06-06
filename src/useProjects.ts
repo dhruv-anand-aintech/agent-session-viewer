@@ -7,6 +7,7 @@ import {
   mergeSessionUpsert,
   trimProjectsToMaxSessions,
 } from "./projects-merge"
+import { trackedEventSource } from "./sse-lifecycle"
 
 export { RECENT_SIDEBAR_SESSIONS, mergeProjectData, mergeSessionUpsert } from "./projects-merge"
 
@@ -48,7 +49,7 @@ export function useProjects() {
       if (listMode === "recent" || projectsRef.current.length === 0) setProjects([])
       setTotalSessions(null)
     })
-    const es = new EventSource(`/api/stream${qs}`)
+    const es = trackedEventSource(`/api/stream${qs}`)
     let firstProjectsBatch = true
     es.onopen = () => { setConnected(true); markSSEOpen() }
     es.onerror = () => {

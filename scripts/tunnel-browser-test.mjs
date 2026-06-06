@@ -1,38 +1,31 @@
 #!/usr/bin/env node
 /**
- * Playwright browser test against the Cloudflare tunnel deployment.
+ * Headful Playwright browser test against the Cloudflare tunnel deployment.
  * Usage:
  *   AUTH_PIN=xxxx node scripts/tunnel-browser-test.mjs
- *   # or relies on .env AUTH_PIN in repo root
+ *   HEADLESS=1 node scripts/tunnel-browser-test.mjs
  */
 import { chromium } from "playwright"
-import { existsSync, mkdirSync, readFileSync } from "node:fs"
-import { join, dirname } from "node:path"
-import { fileURLToPath } from "node:url"
-
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..")
-const BASE = process.env.TUNNEL_URL ?? "https://agent-session-viewer.ainorthstar.tech"
-const OUT = join(ROOT, "tmp", "tunnel-playwright")
-mkdirSync(OUT, { recursive: true })
-
-function loadPin() {
-  if (process.env.AUTH_PIN) return process.env.AUTH_PIN
-  const envPath = join(ROOT, ".env")
-  if (existsSync(envPath)) {
-    const m = readFileSync(envPath, "utf8").match(/^AUTH_PIN=(.+)$/m)
-    if (m) return m[1].trim()
-  }
-  return null
-}
-
-const PIN = loadPin()
+import { mkdirSync } from "node:fs"
+import { join } from "node:path"
+import {
+  BASE,
+  OUT,
+  discoverDeepLink,
+  loginIfNeeded,
+  measureDeepLinkLoad,
+  printScenario,
+  trackApiTraffic,
+  createPersistentContext,
+  launchOptions,
+  isHeadless,
+} from "./tunnel-test-lib.mjs"
 
 function row(label, ms, ok, detail = "") {
   return { label, ms: Math.round(ms), ok, detail }
 }
 
 async function timedFetch(page, url, init = {}) {
-  const t0 = Date.now()
   const result = await page.evaluate(async ({ url, init }) => {
     const t0 = performance.now()
     try {
@@ -49,84 +42,10 @@ async function timedFetch(page, url, init = {}) {
       return { ok: false, status: 0, ms: performance.now() - t0, error: String(err) }
     }
   }, { url, init })
-  return { ...result, wallMs: Date.now() - t0 }
+  return result
 }
 
-async function main() {
-  const results = []
-  const networkLog = []
-
-  const browser = await chromium.launch({ headless: true })
-  const context = await browser.newContext({ ignoreHTTPSErrors: true })
-  const api = context.request
-  const page = await context.newPage()
-
-  page.on("response", async res => {
-    const url = res.url()
-    if (!url.includes("/api/")) return
-    try {
-      const timing = res.request().timing()
-      networkLog.push({
-        url: url.replace(BASE, ""),
-        status: res.status(),
-        durationMs: timing.responseEnd >= 0 ? Math.round(timing.responseEnd) : null,
-      })
-    } catch { /* ignore */ }
-  })
-
-  console.log(`\nTunnel browser test → ${BASE}\n`)
-
-  // ── 1. Public endpoints (no cookie) ───────────────────────────────────────
-  await page.goto(`${BASE}/api/capabilities`, { waitUntil: "domcontentloaded" })
-  const capsText = await page.locator("body").innerText()
-  const caps = JSON.parse(capsText)
-  results.push(row("/api/capabilities (public)", 0, caps.pinRequired === true, `pinRequired=${caps.pinRequired}`))
-
-  const health = await timedFetch(page, `${BASE}/api/health`)
-  results.push(row("/api/health", health.ms, health.ok, health.body?.slice(0, 120)))
-
-  // ── 2. Login + app shell ───────────────────────────────────────────────────
-  const appT0 = Date.now()
-  if (caps.pinRequired && !caps.authed) {
-    if (!PIN) throw new Error("PIN required but AUTH_PIN not set (env or .env)")
-    const loginT0 = Date.now()
-    const loginRes = await api.post(`${BASE}/api/login`, { data: { pin: PIN } })
-    const loginBody = await loginRes.json().catch(() => ({}))
-    if (!loginRes.ok() || !loginBody.ok) {
-      throw new Error(`PIN login failed: HTTP ${loginRes.status()}`)
-    }
-    results.push(row("POST /api/login", Date.now() - loginT0, true))
-  }
-
-  await page.goto(`${BASE}/sessions`, { waitUntil: "domcontentloaded" })
-  await page.waitForSelector("text=Connecting", { state: "hidden", timeout: 15000 }).catch(() => {})
-  results.push(row("App shell /sessions", Date.now() - appT0, true))
-
-  await page.screenshot({ path: join(OUT, "02-after-auth.png"), fullPage: true })
-
-  // ── 3. Authenticated API via browser fetch ────────────────────────────────
-  const authedCaps = await timedFetch(page, `${BASE}/api/capabilities`)
-  results.push(row("/api/capabilities (authed)", authedCaps.ms, authedCaps.ok && authedCaps.body.includes('"authed":true')))
-
-  // ── 4. Sidebar SSE + session list ─────────────────────────────────────────
-  const sidebarT0 = Date.now()
-  await page.waitForFunction(() => {
-    const marks = performance.getEntriesByName("bootstrap:done", "mark")
-    if (marks.length) return true
-    return document.querySelectorAll(".sidebar-session").length > 0
-      || document.querySelector(".sidebar-empty") !== null
-  }, { timeout: 45000 })
-  const sessionCount = await page.locator(".sidebar-session").count()
-  const emptyText = await page.locator(".sidebar-empty").first().innerText().catch(() => "")
-  results.push(row(
-    "Sidebar sessions visible",
-    Date.now() - sidebarT0,
-    sessionCount > 0,
-    sessionCount > 0 ? `${sessionCount} items` : emptyText || "empty",
-  ))
-  await page.screenshot({ path: join(OUT, "03-sidebar-loaded.png"), fullPage: true })
-
-  // ── 5. Click first session → message pane ───────────────────────────────
+async function exerciseSessionUi(page, results) {
   const clickT0 = Date.now()
   const firstSession = page.locator(".sidebar-session").first()
   const sessionName = (await firstSession.locator(".ss-name").innerText().catch(() => "")).trim()
@@ -144,7 +63,6 @@ async function main() {
   results.push(row("Open first session", Date.now() - clickT0, hasMessages || !emptyState, sessionName || "unknown"))
   await page.screenshot({ path: join(OUT, "04-session-open.png"), fullPage: true })
 
-  // ── 6. Session API for selected URL ─────────────────────────────────────
   const href = await page.evaluate(() => window.location.href)
   const deepLink = new URL(href)
   const sParam = deepLink.searchParams.get("s")
@@ -155,8 +73,58 @@ async function main() {
     const sessionApi = await timedFetch(page, `${BASE}/api/session/${project}/${sessionId}?tail=5`)
     results.push(row("/api/session?tail=5", sessionApi.ms, sessionApi.ok, `status=${sessionApi.status}`))
   }
+}
 
-  // ── 7. Search interaction ─────────────────────────────────────────────────
+async function main() {
+  mkdirSync(OUT, { recursive: true })
+  const results = []
+  const networkLog = []
+
+  console.log(`\nTunnel browser test → ${BASE}`)
+  console.log(`Browser: ${isHeadless() ? "headless" : "headful"}\n`)
+
+  const browser = await chromium.launch(launchOptions())
+  const context = await browser.newContext({ ignoreHTTPSErrors: true })
+  const api = context.request
+  const page = await context.newPage()
+
+  page.on("response", async res => {
+    const url = res.url()
+    if (!url.includes("/api/")) return
+    try {
+      const timing = res.request().timing()
+      networkLog.push({
+        url: url.replace(BASE, ""),
+        status: res.status(),
+        durationMs: timing.responseEnd >= 0 ? Math.round(timing.responseEnd) : null,
+      })
+    } catch { /* ignore */ }
+  })
+
+  await page.goto(`${BASE}/api/capabilities`, { waitUntil: "domcontentloaded" })
+  const capsText = await page.locator("body").innerText()
+  const caps = JSON.parse(capsText)
+  results.push(row("/api/capabilities (public)", 0, caps.pinRequired === true, `pinRequired=${caps.pinRequired}`))
+
+  const health = await timedFetch(page, `${BASE}/api/health`)
+  results.push(row("/api/health", health.ms, health.ok, health.body?.slice(0, 120)))
+
+  await loginIfNeeded(api)
+
+  const apiLog = trackApiTraffic(page)
+  const deepLinkUrl = await discoverDeepLink(page)
+  const freshMetrics = await measureDeepLinkLoad(page, deepLinkUrl, apiLog)
+  printScenario("browser-fresh-deep-link", freshMetrics)
+  results.push(row("Deep-link load", freshMetrics.wallMs, freshMetrics.sessionCount > 0, `${freshMetrics.sessionCount} sessions`))
+  await page.screenshot({ path: join(OUT, "02-deep-link.png"), fullPage: true })
+
+  const refreshMetrics = await measureDeepLinkLoad(page, deepLinkUrl, apiLog, { reload: true })
+  printScenario("browser-same-tab-refresh", refreshMetrics)
+  results.push(row("Same-tab refresh", refreshMetrics.wallMs, refreshMetrics.sessionCount > 0, `usage=${refreshMetrics.usageCalls}`))
+  await page.screenshot({ path: join(OUT, "03-refresh.png"), fullPage: true })
+
+  await exerciseSessionUi(page, results)
+
   const searchInput = page.locator(".sidebar-search-input")
   if (await searchInput.isVisible()) {
     const searchT0 = Date.now()
@@ -168,7 +136,6 @@ async function main() {
     await searchInput.fill("")
   }
 
-  // ── 8. Usage tab ──────────────────────────────────────────────────────────
   const usageTab = page.locator(".topbar-tab", { hasText: "Usage" }).first()
   if (await usageTab.isVisible().catch(() => false)) {
     const usageT0 = Date.now()
@@ -177,14 +144,25 @@ async function main() {
     const usageFetch = await timedFetch(page, `${BASE}/api/usage`).catch(() => null)
     results.push(row("/usage tab + /api/usage", Date.now() - usageT0, usageFetch?.ok ?? true))
     await page.screenshot({ path: join(OUT, "06-usage.png"), fullPage: true })
-    await page.goto(`${BASE}/sessions`, { waitUntil: "domcontentloaded" })
   }
+
+  await context.close()
+
+  const profileContext = await createPersistentContext()
+  const profileApi = profileContext.request
+  await loginIfNeeded(profileApi)
+  const profilePage = profileContext.pages()[0] ?? await profileContext.newPage()
+  const profileLog = trackApiTraffic(profilePage)
+  const profileMetrics = await measureDeepLinkLoad(profilePage, deepLinkUrl, profileLog)
+  printScenario("browser-profile-fresh", profileMetrics)
+  results.push(row("Profile context load", profileMetrics.wallMs, profileMetrics.sessionCount > 0))
+  await profilePage.screenshot({ path: join(OUT, "07-profile.png"), fullPage: true })
+  await profileContext.close()
 
   await browser.close()
 
-  // ── Report ────────────────────────────────────────────────────────────────
   const failed = results.filter(r => !r.ok)
-  console.log("Results:")
+  console.log("\nResults:")
   for (const r of results) {
     const mark = r.ok ? "✓" : "✗"
     const detail = r.detail ? ` — ${r.detail}` : ""
