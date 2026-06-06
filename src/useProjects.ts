@@ -8,6 +8,7 @@ import {
   trimProjectsToMaxSessions,
 } from "./projects-merge"
 import { trackedEventSource } from "./sse-lifecycle"
+import { parseUrlSession } from "./urlSession"
 
 export { RECENT_SIDEBAR_SESSIONS, mergeProjectData, mergeSessionUpsert } from "./projects-merge"
 
@@ -42,7 +43,10 @@ export function useProjects() {
   }, [projects])
 
   useEffect(() => {
-    const qs = listMode === "recent" ? `?maxSessions=${RECENT_SIDEBAR_SESSIONS}` : ""
+    const deepLink = parseUrlSession()
+    const pinQs = deepLink?.session ? `&pinSession=${encodeURIComponent(deepLink.session)}` : ""
+    const qs = listMode === "recent" ? `?maxSessions=${RECENT_SIDEBAR_SESSIONS}${pinQs}` : ""
+    const pinSessionIds = deepLink?.session ? new Set([deepLink.session]) : undefined
     queueMicrotask(() => {
       setProjectsLoading(true)
       setProjectsUpdating(true)
@@ -94,7 +98,7 @@ export function useProjects() {
             o.projectDisplayName ?? o.projectPath!,
             o.session!,
           )
-          if (listMode === "recent") next = trimProjectsToMaxSessions(next, RECENT_SIDEBAR_SESSIONS)
+          if (listMode === "recent") next = trimProjectsToMaxSessions(next, RECENT_SIDEBAR_SESSIONS, pinSessionIds)
           return next
         })
       } catch { /* ignore */ }

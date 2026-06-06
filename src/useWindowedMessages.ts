@@ -38,6 +38,7 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [initialRemotePending, setInitialRemotePending] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [chatDir, setChatDir] = useState<string | null>(null)
   const fullRef = useRef<SessionMessage[]>([])
   const loadSeqRef = useRef(0)
@@ -80,7 +81,13 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
       if (signal?.aborted) return
       const fetchMs = performance.now() - t0
       debugLog(`[session-load ${wallClock()}] ${trace} remote-headers status=${r.status} ok=${r.ok} fetchMs=${fetchMs.toFixed(1)}`)
-      if (!r.ok) return
+      if (!r.ok) {
+        setLoadError(r.status === 401 ? "Session requires PIN — refresh and sign in again."
+          : r.status === 404 ? "Session not found."
+          : `Failed to load session (HTTP ${r.status}).`)
+        return
+      }
+      setLoadError(null)
       const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || 0
       const jsonT0 = performance.now()
       let msgs: SessionMessage[] = await r.json()
@@ -135,6 +142,7 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
     const trace = traceLabel(loadSeq)
     debugLog(`[session-load ${wallClock()}] ${trace} effect-start project=${projectDir} key=${idbKey}`)
     setWin(null)
+    setLoadError(null)
     setLoading(true)
     setInitialRemotePending(true)
     fullRef.current = []
@@ -401,6 +409,7 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
     loading,
     loadingMore,
     initialRemotePending,
+    loadError,
     hasEarlier,
     hasLater,
     loadEarlier,

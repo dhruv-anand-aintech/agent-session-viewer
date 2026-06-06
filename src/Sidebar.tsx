@@ -366,6 +366,17 @@ export function Sidebar({ projects, projectsLoading, projectsUpdating, totalSess
     })
   }
 
+  // Deep-link / selection on a parent: expand subagents once children are in projects state.
+  useEffect(() => {
+    if (!activeSessionIdProp || projectsLoading) return
+    const flat = projects.flatMap(p => p.sessions.map(s => ({ s, projectPath: s.projectPath || p.path })))
+    const active = flat.find(({ s }) => s.id === activeSessionIdProp)
+    if (!active || active.s.isSidechain) return
+    const childCount = flat.filter(({ s }) => s.isSidechain && s.parentSessionId === activeSessionIdProp).length
+    if (childCount === 0) return
+    setExpandedParents(prev => (prev.has(activeSessionIdProp) ? prev : new Set(prev).add(activeSessionIdProp)))
+  }, [activeSessionIdProp, projects, projectsLoading])
+
   const recentTargetCount =
     listMode === "recent" && totalSessions != null
       ? Math.min(totalSessions, RECENT_SIDEBAR_SESSIONS)

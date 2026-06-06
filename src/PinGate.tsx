@@ -10,7 +10,7 @@ export default function PinGate({ onAuth }: { onAuth: () => void }) {
   useEffect(() => {
     async function checkAuth() {
       try {
-        const r = await fetch("/api/capabilities")
+        const r = await fetch("/api/capabilities", { credentials: "include" })
         const data = await r.json()
         if (data.authed) {
           onAuth()

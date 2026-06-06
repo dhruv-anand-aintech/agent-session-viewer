@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { useLocation } from "wouter"
 import { canonicalizeSelectedProjectPath } from "./sessionPaneState"
+import { parseUrlSession } from "./urlSession"
 import { markAppInit, markSessionClick } from "./perf"
 import { useProjects, useCapabilities } from "./useProjects"
 import { SessionPane } from "./SessionPane"
@@ -17,26 +18,6 @@ markAppInit()
 const SIDEBAR_MIN = 140
 const SIDEBAR_MAX = 520
 const SIDEBAR_DEFAULT = 220
-
-function parseUrlSession(): { project: string; session: string } | null {
-  const raw = new URLSearchParams(window.location.search).get("s")
-  if (!raw) return null
-  const m = /^([\s\S]+)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(raw)
-  if (m) {
-    try {
-      return { project: decodeURIComponent(m[1]), session: m[2] }
-    } catch {
-      return null
-    }
-  }
-  const slash = raw.lastIndexOf("/")
-  if (slash < 1) return null
-  try {
-    return { project: decodeURIComponent(raw.slice(0, slash)), session: raw.slice(slash + 1) }
-  } catch {
-    return null
-  }
-}
 
 export default function App() {
   const {

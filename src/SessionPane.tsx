@@ -174,6 +174,7 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
     hasLater,
     loadEarlier,
     loadLater,
+    loadError,
     loadingEarlierRef,
     loadingLaterRef,
     chatDir,
@@ -641,7 +642,8 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
         </>
       )}
       <div className="messages-scroll" ref={scrollRef} onScroll={handleScroll}>
-        {loading && !win && <div className="loading-state">Loading messages…</div>}
+        {loading && !win && !loadError && <div className="loading-state">Loading messages…</div>}
+        {loadError && !win && <div className="loading-state">{loadError}</div>}
         {loadEarlierControl.show && !loading && (
           <div>
             <div ref={topSentinelRef} style={{ height: 1 }} />
