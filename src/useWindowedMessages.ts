@@ -5,6 +5,7 @@ import { hasEarlierMessages } from "./sessionPaneState"
 import { charCountMsg } from "./pretty/PrettyMessageBlock"
 import { markIDBResult, markRemoteFetch, markChunkLoad } from "./perf"
 import { wallClock } from "./utils"
+import { debugLog } from "./debug-trace"
 
 export const CHUNK = 60
 export const MAX_DOM = 180
@@ -73,45 +74,45 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
       const trace = traceLabel(loadSeq)
       const url5 = sessionUrl(projectDir, sessionId, INITIAL_TAIL)
       const t0 = performance.now()
-      console.log(`[session-load ${wallClock()}] ${trace} remote-start url=${url5}`)
+      debugLog(`[session-load ${wallClock()}] ${trace} remote-start url=${url5}`)
       const r = await fetch(url5, { credentials: "include", signal })
       if (signal?.aborted) return
       const fetchMs = performance.now() - t0
-      console.log(`[session-load ${wallClock()}] ${trace} remote-headers status=${r.status} ok=${r.ok} fetchMs=${fetchMs.toFixed(1)}`)
+      debugLog(`[session-load ${wallClock()}] ${trace} remote-headers status=${r.status} ok=${r.ok} fetchMs=${fetchMs.toFixed(1)}`)
       if (!r.ok) return
       const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || 0
       const jsonT0 = performance.now()
       let msgs: SessionMessage[] = await r.json()
       if (signal?.aborted) return
       const parseMs = performance.now() - jsonT0
-      console.log(`[session-load ${wallClock()}] ${trace} remote-json count=${msgs.length} total=${serverTotal || msgs.length} jsonMs=${parseMs.toFixed(1)}`)
+      debugLog(`[session-load ${wallClock()}] ${trace} remote-json count=${msgs.length} total=${serverTotal || msgs.length} jsonMs=${parseMs.toFixed(1)}`)
       let total = serverTotal || msgs.length
       if (msgs.every(m => m.type === "file-history-snapshot") && total > msgs.length) {
         const url50 = sessionUrl(projectDir, sessionId, 50)
-        console.log(`[session-load ${wallClock()}] ${trace} remote-fallback start url=${url50}`)
+        debugLog(`[session-load ${wallClock()}] ${trace} remote-fallback start url=${url50}`)
         const r2 = await fetch(url50, { credentials: "include", signal })
         if (r2.ok) {
           const json2T0 = performance.now()
           msgs = await r2.json()
           if (signal?.aborted) return
           total = parseInt(r2.headers.get("X-Message-Total") ?? "0") || total
-          console.log(`[session-load ${wallClock()}] ${trace} remote-fallback ok count=${msgs.length} total=${total} jsonMs=${(performance.now() - json2T0).toFixed(1)}`)
+          debugLog(`[session-load ${wallClock()}] ${trace} remote-fallback ok count=${msgs.length} total=${total} jsonMs=${(performance.now() - json2T0).toFixed(1)}`)
         } else {
-          console.log(`[session-load ${wallClock()}] ${trace} remote-fallback status=${r2.status} ok=${r2.ok}`)
+          debugLog(`[session-load ${wallClock()}] ${trace} remote-fallback status=${r2.status} ok=${r2.ok}`)
         }
       }
       if (signal?.aborted) return
       markRemoteFetch(sessionId, fetchMs, parseMs, msgs.length, total)
-      console.log(`[session-load ${wallClock()}] ${trace} remote-commit count=${msgs.length} total=${total}`)
+      debugLog(`[session-load ${wallClock()}] ${trace} remote-commit count=${msgs.length} total=${total}`)
       await idbPut(idbKey, { msgs, total })
       if (signal?.aborted) return
       initWindow(msgs, total)
     } catch (err) {
       if (signal?.aborted) return
-      console.log(`[session-load ${wallClock()}] ${traceLabel(loadTraceRef.current)} remote-error`, err)
+      debugLog(`[session-load ${wallClock()}] ${traceLabel(loadTraceRef.current)} remote-error`, err)
     } finally {
       if (!signal?.aborted) {
-        console.log(`[session-load ${wallClock()}] ${traceLabel(loadTraceRef.current)} remote-finish`)
+        debugLog(`[session-load ${wallClock()}] ${traceLabel(loadTraceRef.current)} remote-finish`)
         setLoading(false)
         setInitialRemotePending(false)
       }
@@ -131,7 +132,7 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
     const loadSeq = ++loadSeqRef.current
     loadTraceRef.current = loadSeq
     const trace = traceLabel(loadSeq)
-    console.log(`[session-load ${wallClock()}] ${trace} effect-start project=${projectDir} key=${idbKey}`)
+    debugLog(`[session-load ${wallClock()}] ${trace} effect-start project=${projectDir} key=${idbKey}`)
     setWin(null)
     setLoading(true)
     setInitialRemotePending(true)
@@ -144,17 +145,17 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
       const idbMs = performance.now() - idbT0
       const cachedMsgs = Array.isArray(idbRaw) ? idbRaw : idbRaw?.msgs
       const cachedTotal = Array.isArray(idbRaw) ? (idbRaw.length) : (idbRaw?.total ?? idbRaw?.msgs?.length ?? 0)
-      console.log(`[session-load ${wallClock()}] ${trace} idb-result hasMsgs=${!!(cachedMsgs && cachedMsgs.length > 0)} count=${cachedMsgs?.length ?? 0} total=${cachedTotal} ms=${idbMs.toFixed(1)}`)
+      debugLog(`[session-load ${wallClock()}] ${trace} idb-result hasMsgs=${!!(cachedMsgs && cachedMsgs.length > 0)} count=${cachedMsgs?.length ?? 0} total=${cachedTotal} ms=${idbMs.toFixed(1)}`)
       markIDBResult(sessionId, !!(cachedMsgs && cachedMsgs.length > 0), cachedMsgs?.length ?? 0, idbMs)
       if (cachedMsgs && cachedMsgs.length > 0) {
-        console.log(`[session-load ${wallClock()}] ${trace} idb-commit count=${cachedMsgs.length} total=${cachedTotal}`)
+        debugLog(`[session-load ${wallClock()}] ${trace} idb-commit count=${cachedMsgs.length} total=${cachedTotal}`)
         initWindow(cachedMsgs, cachedTotal)
         if (!controller.signal.aborted && loadSeq === loadSeqRef.current) setLoading(false)
       }
       await fetchRemote(controller.signal)
     })()
     return () => {
-      console.log(`[session-load ${wallClock()}] ${trace} effect-cleanup abort=${controller.signal.aborted}`)
+      debugLog(`[session-load ${wallClock()}] ${trace} effect-cleanup abort=${controller.signal.aborted}`)
       controller.abort()
     }
   }, [projectDir, sessionId, idbKey, fetchRemote, initWindow, updateChatDir, traceLabel])

@@ -9,6 +9,7 @@ import { SettingsModal } from "./SettingsModal"
 import { UsageLimits } from "./UsageLimits"
 import { GlobalSearch } from "./GlobalSearch"
 import { wallClock } from "./utils"
+import { debugLog } from "./debug-trace"
 import "./App.css"
 
 markAppInit()
@@ -113,7 +114,7 @@ export default function App() {
   useEffect(() => {
     if (!selected || !activeSessionId || !activeMeta?.projectPath) return
     if (selected.project === activeMeta.projectPath) return
-    console.log(`[session-state ${wallClock()}] ${activeSessionId.slice(0, 8)} canonical-project-path selected=${selected.project} resolved=${activeMeta.projectPath}`)
+    debugLog(`[session-state ${wallClock()}] ${activeSessionId.slice(0, 8)} canonical-project-path selected=${selected.project} resolved=${activeMeta.projectPath}`)
     setSelected({ project: activeMeta.projectPath, session: activeSessionId })
   }, [activeMeta?.projectPath, activeSessionId, selected])
 

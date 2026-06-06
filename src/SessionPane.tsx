@@ -10,6 +10,7 @@ import { highlightTermsInPlainText } from "./searchHighlight"
 import { createPinnedProjectPath, getLoadEarlierControlState } from "./sessionPaneState"
 import { markFirstPaint, markSessionClick } from "./perf"
 import { isRecentlyActive, wallClock } from "./utils"
+import { debugLog, debugWarn } from "./debug-trace"
 import { useWindowedMessages } from "./useWindowedMessages"
 
 type Suggestion = { parentUuid: string; text: string; id: string }
@@ -160,7 +161,7 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
 
   useEffect(() => {
     if (stableProjectDirRef.current.diverges(projectDir)) {
-      console.log(`[session-state ${wallClock()}] ${sessionMeta.id.slice(0, 8)} project-path-diverged mounted=${stableProjectDirRef.current.current} prop=${projectDir}`)
+      debugLog(`[session-state ${wallClock()}] ${sessionMeta.id.slice(0, 8)} project-path-diverged mounted=${stableProjectDirRef.current.current} prop=${projectDir}`)
     }
   }, [projectDir, sessionMeta.id])
 
@@ -212,7 +213,7 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
     setThreadSearchQuery("")
     setThreadHits([])
     setThreadHitPos(0)
-    console.log(`[thread-search] panel open project=${stableProjectDir} session=${sessionMeta.id} loaded=${fullRef.current.length}`)
+    debugLog(`[thread-search] panel open project=${stableProjectDir} session=${sessionMeta.id} loaded=${fullRef.current.length}`)
     setTimeout(() => threadSearchInputRef.current?.focus(), 0)
   }
 
@@ -262,13 +263,13 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
             _threadCache.set(cacheKey, { hits })
             setThreadHits(hits)
             setThreadHitPos(0)
-            console.log(`[thread-search] results=${hits.length} source=server ms=${(performance.now() - requestStartedAt).toFixed(1)} q="${q}"`)
+            debugLog(`[thread-search] results=${hits.length} source=server ms=${(performance.now() - requestStartedAt).toFixed(1)} q="${q}"`)
             if (!cancelled) setThreadSearchLoading(false)
             return
           }
         }
       } catch (e) {
-        console.warn(`[thread-search] server search error q="${q}":`, e)
+        debugWarn(`[thread-search] server search error q="${q}":`, e)
       }
 
       if (!cancelled) {
@@ -277,7 +278,7 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
         _threadCache.set(cacheKey, { hits: raw })
         setThreadHits(raw)
         setThreadHitPos(0)
-        console.log(`[thread-search] results=${raw.length} source=local ms=${(performance.now() - requestStartedAt).toFixed(1)} q="${q}"`)
+        debugLog(`[thread-search] results=${raw.length} source=local ms=${(performance.now() - requestStartedAt).toFixed(1)} q="${q}"`)
       }
       if (!cancelled) setThreadSearchLoading(false)
     }
@@ -306,7 +307,7 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
   }, [threadHitPos, threadHits, threadSearchOpen, bringMessageIndexIntoView, jumpToUuid, globalOffset])
 
   async function focusThreadHit(hit: { idx: number; text: string; uuid?: string }) {
-    console.log(`[thread-search] focus idx=${hit.idx} uuid=${hit.uuid ?? "n/a"}`)
+    debugLog(`[thread-search] focus idx=${hit.idx} uuid=${hit.uuid ?? "n/a"}`)
     if (hit.uuid) {
       await jumpToUuid(hit.uuid, scrollRef.current)
     }
@@ -358,7 +359,7 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
 
   useEffect(() => {
     if (!win) return
-    console.log(`[session-state ${wallClock()}] ${sessionMeta.id.slice(0, 8)} project=${stableProjectDir} hasEarlier=${hasEarlier} hasLater=${hasLater} loading=${loading} loadingMore=${loadingMore} initialRemotePending=${initialRemotePending} win=${win.msgs.length}/${win.total} serverFetchedFrom=${win.serverFetchedFrom}`)
+    debugLog(`[session-state ${wallClock()}] ${sessionMeta.id.slice(0, 8)} project=${stableProjectDir} hasEarlier=${hasEarlier} hasLater=${hasLater} loading=${loading} loadingMore=${loadingMore} initialRemotePending=${initialRemotePending} win=${win.msgs.length}/${win.total} serverFetchedFrom=${win.serverFetchedFrom}`)
   }, [win, hasEarlier, hasLater, loading, loadingMore, initialRemotePending, stableProjectDir, sessionMeta.id])
 
   const loadEarlierControl = getLoadEarlierControlState(win, loadingMore, initialRemotePending)

@@ -14,4 +14,5 @@ fi
 
 export PORT="${PORT:-3001}"
 export HOST="${HOST:-127.0.0.1}"
+# Perf / trace logging: DEBUG=1 node local-server.mjs  (or set in launchd plist EnvironmentVariables)
 exec node "$ROOT/local-server.mjs"

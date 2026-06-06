@@ -3,6 +3,9 @@ import { createRoot } from "react-dom/client"
 import { Router, Redirect } from "wouter"
 import PinGate from "./PinGate"
 import App from "./App"
+import { initDebugTrace } from "./debug-trace"
+
+initDebugTrace()
 
 /** Abort a fetch after `ms` milliseconds. */
 function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit & { timeout?: number }) {
@@ -21,13 +24,12 @@ function Root() {
         if (!r.ok) { setAuthed(false); return }
         try {
           const caps = (await r.json()) as { pinRequired?: boolean; authed?: boolean }
-          // New servers include `authed` so we can skip a second round-trip
-          if (caps.authed !== undefined) { setAuthed(caps.authed); return }
-          // Older servers: no pin → authed; pin required → probe /api/projects
           if (caps.pinRequired === false) { setAuthed(true); return }
-        } catch { /* fall through to probe */ }
-        const pr = await fetchWithTimeout("/api/projects?maxSessions=1", { credentials: "include", timeout: 4000 })
-        setAuthed(pr.ok)
+          if (typeof caps.authed === "boolean") { setAuthed(caps.authed); return }
+          setAuthed(false)
+        } catch {
+          setAuthed(false)
+        }
       })
       .catch(() => setAuthed(false))
   }, [])

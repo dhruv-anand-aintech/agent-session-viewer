@@ -6,6 +6,7 @@ import { markSessionClick } from "./perf"
 import { isRecentlyActive, relativeTime } from "./utils"
 import { AgentIcon, platformFilterActiveClass } from "./platformChrome"
 import { RECENT_SIDEBAR_SESSIONS } from "./useProjects"
+import { debugLog, debugWarn } from "./debug-trace"
 
 function normalizeSidebarSearchText(text: string): string {
   return String(text ?? "")
@@ -210,24 +211,24 @@ export function Sidebar({ projects, projectsLoading, projectsUpdating, totalSess
     const q = sidebarSearchQuery.trim()
     const requestId = ++sidebarSearchSeqRef.current
     if (!q) {
-      console.log(`[sidebar-search] #${requestId} cleared`)
+      debugLog(`[sidebar-search] #${requestId} cleared`)
       setSidebarSearchHits(null)
       setSidebarSearchLoading(false)
       return
     }
     const controller = new AbortController()
     const t0 = performance.now()
-    console.log(`[sidebar-search] #${requestId} start q="${q}" platform=${platformFilter}`)
+    debugLog(`[sidebar-search] #${requestId} start q="${q}" platform=${platformFilter}`)
     setSidebarSearchLoading(true)
-    console.log(`[sidebar-search] #${requestId} keep previous results visible while loading`)
+    debugLog(`[sidebar-search] #${requestId} keep previous results visible while loading`)
     fetch(`/api/search/sessions?q=${encodeURIComponent(q)}`, { credentials: "include", signal: controller.signal })
       .then(r => (r.ok ? r.json() : { results: [] }))
       .then((data: { results?: Record<string, unknown>[], source?: string }) => {
         if (controller.signal.aborted || requestId !== sidebarSearchSeqRef.current) {
-          console.log(`[sidebar-search] #${requestId} stale result ignored q="${q}"`)
+          debugLog(`[sidebar-search] #${requestId} stale result ignored q="${q}"`)
           return
         }
-        console.log(`[sidebar-search] #${requestId} results=${data.results?.length ?? 0} source=${data.source ?? "unknown"} ms=${(performance.now() - t0).toFixed(1)} q="${q}" replace=1`)
+        debugLog(`[sidebar-search] #${requestId} results=${data.results?.length ?? 0} source=${data.source ?? "unknown"} ms=${(performance.now() - t0).toFixed(1)} q="${q}" replace=1`)
         const mapped: SidebarSearchHit[] = (data.results ?? []).map(raw => ({
           projectPath: String(raw.projectPath ?? ""),
           sessionId: String(raw.sessionId ?? ""),
@@ -240,20 +241,20 @@ export function Sidebar({ projects, projectsLoading, projectsUpdating, totalSess
       })
       .catch((e) => {
         if (controller.signal.aborted || requestId !== sidebarSearchSeqRef.current) {
-          console.log(`[sidebar-search] #${requestId} aborted q="${q}"`)
+          debugLog(`[sidebar-search] #${requestId} aborted q="${q}"`)
           return
         }
-        console.warn(`[sidebar-search] #${requestId} error q="${q}":`, e)
+        debugWarn(`[sidebar-search] #${requestId} error q="${q}":`, e)
         setSidebarSearchHits([])
       })
       .finally(() => {
         if (requestId === sidebarSearchSeqRef.current) {
-          console.log(`[sidebar-search] #${requestId} settled q="${q}"`)
+          debugLog(`[sidebar-search] #${requestId} settled q="${q}"`)
           setSidebarSearchLoading(false)
         }
       })
     return () => {
-      console.log(`[sidebar-search] #${requestId} cleanup q="${q}"`)
+      debugLog(`[sidebar-search] #${requestId} cleanup q="${q}"`)
       controller.abort()
     }
   }, [sidebarSearchQuery, platformFilter])
@@ -481,7 +482,7 @@ export function Sidebar({ projects, projectsLoading, projectsUpdating, totalSess
               value={sidebarSearchQuery}
               onChange={e => {
                 const v = e.target.value
-                console.log(`[sidebar-search] input len=${v.trim().length} platform=${platformFilter}`)
+                debugLog(`[sidebar-search] input len=${v.trim().length} platform=${platformFilter}`)
                 if (v.trim()) setSidebarSearchLoading(true)
                 setSidebarSearchQuery(v)
                 if (!v.trim()) {

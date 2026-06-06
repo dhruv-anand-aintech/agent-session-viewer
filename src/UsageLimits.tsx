@@ -406,10 +406,11 @@ export function UsageLimits({ visible }: { visible: boolean }) {
   }, [])
 
   useEffect(() => {
+    if (!visible) return
     refresh()
     const id = setInterval(() => refresh(true), 60_000)
     return () => clearInterval(id)
-  }, [refresh])
+  }, [visible, refresh])
 
   return (
     <div className="ul-root" style={{ display: visible ? undefined : "none" }}>
