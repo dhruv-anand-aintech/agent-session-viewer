@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Populates ~/.claude/agent-session-viewer-sidebar-cache.json by scanning all
+ * Populates ~/.config/agent-session-viewer/sidebar-cache.db by scanning all
  * session directories. Run once after install, or any time you want to pre-warm
  * the sidebar cache (e.g. after adding a new session root).
  *
@@ -16,6 +16,7 @@ import { homedir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import { stripXml, trimProjectsByRecentSessionCount } from "./shared-utils.mjs"
+import { openSidebarCacheDb, replaceAllSidebarEntries } from "./lib/sidebar-cache-db.mjs"
 import {
   normProjectDir,
   readCursorSessions,
@@ -34,7 +35,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url))
 const CLAUDE_DIR = join(homedir(), ".claude", "projects")
 const APP_CONFIG_DIR = join(homedir(), ".config", "agent-session-viewer")
 const CONFIG_FILE = join(APP_CONFIG_DIR, "config.json")
-const SIDEBAR_CACHE_FILE = join(APP_CONFIG_DIR, "sidebar-cache.json")
+const SIDEBAR_CACHE_JSON = join(APP_CONFIG_DIR, "sidebar-cache.json")
 
 function loadConfig() {
   try { return JSON.parse(readFileSync(CONFIG_FILE, "utf8")) } catch { return {} }
@@ -43,7 +44,7 @@ function loadConfig() {
 // Load existing cache for incremental updates — skip sessions whose mtime hasn't changed
 function loadExistingCache() {
   try {
-    const raw = JSON.parse(readFileSync(SIDEBAR_CACHE_FILE, "utf8"))
+    const raw = JSON.parse(readFileSync(SIDEBAR_CACHE_JSON, "utf8"))
     if (raw.v === 2 && Array.isArray(raw.sessions))
       return new Map(raw.sessions.map(e => [e.id, e]))
   } catch { /* no cache yet */ }
@@ -318,6 +319,7 @@ const sessions = Array.from(byId.values())
   .sort((a, b) => String(b.lastActivity).localeCompare(String(a.lastActivity)))
 
 mkdirSync(APP_CONFIG_DIR, { recursive: true })
-writeFileSync(SIDEBAR_CACHE_FILE, JSON.stringify({ v: 2, sessions }))
+openSidebarCacheDb(APP_CONFIG_DIR)
+replaceAllSidebarEntries(sessions)
 writeFileSync(OC_READER_CACHE_FILE, JSON.stringify(_ocReaderCache))
-console.log(`\n✓ Sidebar cache written: ${sessions.length} sessions → ${SIDEBAR_CACHE_FILE}`)
+console.log(`\n✓ Sidebar cache written: ${sessions.length} sessions → ${join(APP_CONFIG_DIR, "sidebar-cache.db")}`)

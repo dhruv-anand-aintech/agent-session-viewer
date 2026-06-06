@@ -56,6 +56,20 @@ import { buildSidebarSearchDoc, runSidebarSessionSearch, runThreadKeywordSearch 
 import { indexSession, removeSession, getSearchRows } from "./lib/search-index.mjs"
 import { rgGlobalSearch } from "./lib/rg-search.mjs"
 import { contentSearchStream } from "./lib/content-search.mjs"
+import { isDebugTrace, debugLog, debugWarn } from "./lib/debug-trace.mjs"
+import {
+  openSidebarCacheDb,
+  getSidebarCacheMap,
+  getSidebarSessionCount,
+  getTopSidebarEntries,
+  getAllSidebarEntries,
+  upsertSidebarEntry,
+} from "./lib/sidebar-cache-db.mjs"
+import {
+  cacheEntryToSessionRow,
+  groupCacheSessionsToProjects,
+  sessionUpsertPayload,
+} from "./lib/sidebar-cache-format.mjs"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -72,12 +86,13 @@ try {
 
 const PLATFORM_LOADER_WORKER = join(__dirname, "lib", "platform-loader-worker.mjs")
 const STREAM_PLATFORM_WORKERS = ["codex", "gemini", "opencode", "hermes", "openclaw", "cursor", "cursor-agent", "antigravity", "antigravity-cli"]
-const BUNDLE_PLATFORM_WORKERS = ["cursor", "opencode"]
+const BUNDLE_PLATFORM_WORKERS = STREAM_PLATFORM_WORKERS
+const SERVER_START_TIME = Date.now()
 
 const CLAUDE_DIR = join(homedir(), ".claude", "projects")
 const APP_CONFIG_DIR = join(homedir(), ".config", "agent-session-viewer")
 const CONFIG_FILE = join(APP_CONFIG_DIR, "config.json")
-const SIDEBAR_CACHE_FILE = join(APP_CONFIG_DIR, "sidebar-cache.json")
+const SIDEBAR_CACHE_DB = join(APP_CONFIG_DIR, "sidebar-cache.db")
 
 function wallClock() {
   return new Date().toLocaleTimeString("en-US", {
@@ -204,15 +219,16 @@ function saveConfig(data) {
   writeFileSync(CONFIG_FILE, JSON.stringify(data, null, 2))
 }
 
-// --- Sidebar cache (persists messageCount/userMessageCount/firstName keyed by sessionId + mtime) ---
-// Shape: { [sessionId]: { messageCount, userMessageCount, firstName, mtime } }
+// --- Sidebar cache (SQLite sidebar-cache.db + in-memory Map for O(1) lookup) ---
 
-let _sidebarCache = null
-let _sidebarCacheMtime = null
+let _sidebarCacheReady = false
 
-function seedSearchIndexFromSidebarCache(cache) {
-  if (!cache?.sessions?.length) return
-  for (const entry of cache.sessions) {
+function initSidebarCache() {
+  if (_sidebarCacheReady) return
+  const _t0 = performance.now()
+  const { migrated } = openSidebarCacheDb(APP_CONFIG_DIR)
+  const count = getSidebarSessionCount()
+  for (const entry of getAllSidebarEntries()) {
     indexSession(entry.projectPath, entry.id, [], {
       id: entry.id,
       customName: entry.customName ?? null,
@@ -220,50 +236,19 @@ function seedSearchIndexFromSidebarCache(cache) {
       source: entry.source ?? "claude",
     })
   }
+  _sidebarCacheReady = true
+  const ms = (performance.now() - _t0).toFixed(1)
+  if (migrated) {
+    debugLog(`${ts()} [sidebar-cache] migrated ${migrated} sessions JSON→SQLite (${ms}ms)`)
+  } else {
+    debugLog(`${ts()} [sidebar-cache] opened ${count} sessions from ${SIDEBAR_CACHE_DB} (${ms}ms)`)
+  }
 }
 
-// Cache shape v2: { v: 2, sessions: CacheEntry[] } sorted by lastActivity desc.
-// CacheEntry: { id, projectPath, projectDisplayName, source, messageCount, userMessageCount,
-//               firstName, lastActivity, mtime, customName? }
-// Loaded once into memory; a Map index is built for O(1) lookup by sessionId.
-
+/** @deprecated Use getSidebarCacheMap() — kept for callers expecting { sessions, _map }. */
 function loadSidebarCache() {
-  let fileMtime = null
-  try {
-    fileMtime = statSync(SIDEBAR_CACHE_FILE).mtimeMs
-  } catch {
-    fileMtime = null
-  }
-  if (_sidebarCache && _sidebarCacheMtime === fileMtime) return _sidebarCache
-  try {
-    const raw = JSON.parse(readFileSync(SIDEBAR_CACHE_FILE, "utf8"))
-    _sidebarCache = raw
-    _sidebarCache._map = new Map(_sidebarCache.sessions.map(e => [e.id, e]))
-    _sidebarCacheMtime = fileMtime
-    seedSearchIndexFromSidebarCache(_sidebarCache)
-    console.log(`${ts()} [sidebar-cache] loaded ${_sidebarCache.sessions.length} sessions`)
-  } catch {
-    _sidebarCache = { v: 2, sessions: [], _map: new Map() }
-    _sidebarCacheMtime = fileMtime
-  }
-  return _sidebarCache
-}
-
-function saveSidebarCache() {
-  if (!_sidebarCache) return
-  // Sort by lastActivity desc before writing; omit _map (non-serialisable)
-  _sidebarCache.sessions.sort((a, b) => String(b.lastActivity).localeCompare(String(a.lastActivity)))
-  const { _map, ...toWrite } = _sidebarCache
-  try { writeFileSync(SIDEBAR_CACHE_FILE, JSON.stringify(toWrite)) } catch { /* ignore */ }
-}
-
-let sidebarCacheSaveTimer = null
-function scheduleSidebarCacheSave(delayMs = 750) {
-  if (sidebarCacheSaveTimer) return
-  sidebarCacheSaveTimer = setTimeout(() => {
-    sidebarCacheSaveTimer = null
-    saveSidebarCache()
-  }, delayMs)
+  initSidebarCache()
+  return { v: 2, sessions: getAllSidebarEntries(), _map: getSidebarCacheMap() }
 }
 
 /**
@@ -271,39 +256,36 @@ function scheduleSidebarCacheSave(delayMs = 750) {
  * Returns null if cache is empty.
  */
 function loadCachedSidebarState() {
-  const cache = loadSidebarCache()
-  if (!cache.sessions.length) return null
+  initSidebarCache()
+  const entries = getAllSidebarEntries()
+  if (!entries.length) return null
   const names = loadConfig().names ?? {}
-  const projectMap = new Map()
-  for (const e of cache.sessions) {
-    if (!projectMap.has(e.projectPath)) {
-      projectMap.set(e.projectPath, {
-        path: e.projectPath,
-        displayName: e.projectDisplayName,
-        sessions: [],
-      })
-    }
-    projectMap.get(e.projectPath).sessions.push({
-      id: e.id,
-      projectPath: e.projectPath,
-      lastActivity: e.lastActivity,
-      messageCount: e.messageCount ?? 0,
-      userMessageCount: e.userMessageCount ?? null,
-      firstName: e.firstName ?? null,
-      customName: names[`${e.projectPath}/${e.id}`] ?? e.customName ?? null,
-      source: e.source ?? "claude",
-      isActive: false,
-      ...(e.isSidechain ? { isSidechain: true, parentSessionId: e.parentSessionId, agentType: e.agentType } : {}),
-    })
-  }
-  return Array.from(projectMap.values())
+  return groupCacheSessionsToProjects(entries, names)
+}
+
+/**
+ * Sidebar cache only — no live platform scan. Top N via indexed SQLite query.
+ */
+function loadProjectsFromSidebarCache(maxSessions) {
+  initSidebarCache()
+  const _t0 = performance.now()
+  const total = getSidebarSessionCount()
+  if (!total) return { projects: [], total: 0 }
+  const names = loadConfig().names ?? {}
+  const n = Number(maxSessions)
+  const entries = Number.isFinite(n) && n > 0 ? getTopSidebarEntries(n) : getAllSidebarEntries()
+  const projects = sortProjectGroups(groupCacheSessionsToProjects(entries, names))
+  const ms = (performance.now() - _t0).toFixed(1)
+  debugLog(`[perf ${wallClock()}] loadProjectsFromSidebarCache n=${entries.length}/${total} ${ms}ms`)
+  return { projects, total }
 }
 
 /** Apply cached counts/names to sessions that are missing them (cheap-scan results). */
 function applySidebarCache(sessions) {
-  const { _map } = loadSidebarCache()
+  initSidebarCache()
+  const map = getSidebarCacheMap()
   for (const s of sessions) {
-    const entry = _map.get(s.id)
+    const entry = map.get(s.id)
     if (!entry) continue
     // Use cached value whenever the live value is 0/null (cheap-scan placeholder)
     if (!s.messageCount && entry.messageCount) s.messageCount = entry.messageCount
@@ -312,53 +294,44 @@ function applySidebarCache(sessions) {
   }
 }
 
-/** Upsert a cache entry. Returns true if anything changed. */
+/** Upsert a cache entry. Returns { changed, entry }. */
 function updateSidebarCacheEntry(sessionId, { projectPath, projectDisplayName, source, messageCount, userMessageCount, firstName, lastActivity, mtime, customName, isSidechain, parentSessionId, agentType }) {
-  const cache = loadSidebarCache()
-  const mtimeStr = typeof mtime === "number" ? String(mtime) : String(mtime)
-  const existing = cache._map.get(sessionId)
-  if (existing &&
-      existing.mtime === mtimeStr &&
-      existing.messageCount === messageCount &&
-      existing.userMessageCount === userMessageCount &&
-      existing.firstName === firstName) return false
-  const entry = {
+  initSidebarCache()
+  const { changed, entry } = upsertSidebarEntry({
     id: sessionId,
-    projectPath: projectPath ?? existing?.projectPath ?? "",
-    projectDisplayName: projectDisplayName ?? existing?.projectDisplayName ?? "",
-    source: source ?? existing?.source ?? "claude",
-    messageCount: messageCount ?? 0,
-    userMessageCount: userMessageCount ?? null,
-    firstName: firstName ?? null,
-    lastActivity: lastActivity ?? existing?.lastActivity ?? new Date(Number(mtimeStr)).toISOString(),
-    mtime: mtimeStr,
-    customName: customName ?? existing?.customName ?? null,
-    ...(isSidechain ? { isSidechain: true, parentSessionId, agentType } : {}),
-  }
-  if (existing) {
-    Object.assign(existing, entry)
-  } else {
-    cache.sessions.push(entry)
-    cache._map.set(sessionId, entry)
-  }
-  indexSession(entry.projectPath, entry.id, [], {
-    id: entry.id,
-    customName: entry.customName ?? null,
-    firstName: entry.firstName ?? null,
-    source: entry.source ?? "claude",
+    projectPath,
+    projectDisplayName,
+    source,
+    messageCount,
+    userMessageCount,
+    firstName,
+    lastActivity,
+    mtime,
+    customName,
+    isSidechain,
+    parentSessionId,
+    agentType,
   })
-  return true
+  if (changed) {
+    indexSession(entry.projectPath, entry.id, [], {
+      id: entry.id,
+      customName: entry.customName ?? null,
+      firstName: entry.firstName ?? null,
+      source: entry.source ?? "claude",
+    })
+  }
+  return { changed, entry }
 }
 
-/** Flush updated cache entries from a hydrated projects array. */
+/** Flush updated cache entries from a hydrated projects array. Returns changed entries. */
 function flushSidebarCacheFromProjects(projects, fileBySessKey) {
-  let dirty = false
+  const changed = []
   for (const p of projects) {
     for (const s of p.sessions) {
       const mtimeMs = fileBySessKey
         ? fileBySessKey.get(SESS_PATH_KEY(p.path, s.id))?.stat?.mtimeMs
         : null
-      if (updateSidebarCacheEntry(s.id, {
+      const { changed: c, entry } = updateSidebarCacheEntry(s.id, {
         projectPath: p.path,
         projectDisplayName: p.displayName,
         source: s.source ?? "claude",
@@ -368,10 +341,11 @@ function flushSidebarCacheFromProjects(projects, fileBySessKey) {
         lastActivity: s.lastActivity,
         mtime: mtimeMs ?? s.lastActivity,
         customName: s.customName ?? null,
-      })) dirty = true
+      })
+      if (c) changed.push(entry)
     }
   }
-  if (dirty) saveSidebarCache()
+  return changed
 }
 
 function codexSessionIdFromFile(filePath) {
@@ -611,7 +585,7 @@ function readCodexSessionTailFast(projectPath, sessionId, tail) {
   try { stat = statSync(fp) } catch { return null }
   const meta = cheapCodexMetaFromFile(fp, loadConfig().names ?? {})
   if (!meta || meta.projectPath !== projectPath) return null
-  const jsonRows = readJsonlTail(fp, Math.max(200, tail * 50))
+  const jsonRows = readJsonlTail(fp, Math.max(200, Math.min(tail * 4, 1200)))
   const msgs = codexTailRowsToMessages(sessionId, jsonRows, stat.mtime.toISOString())
   if (!msgs.length) return null
   const cachedTotal = loadSidebarCache()._map.get(sessionId)?.messageCount
@@ -632,7 +606,7 @@ function parseJsonl(fp) {
       try { return [JSON.parse(line)] } catch { return [] }
     })
     const ms = (performance.now() - t0).toFixed(1)
-    if (parseFloat(ms) > 50) console.warn(`[perf] parseJsonl ${ms}ms — ${result.length} msgs — ${fp.split("/").pop()}`)
+    if (parseFloat(ms) > 50) debugWarn(`[perf] parseJsonl ${ms}ms — ${result.length} msgs — ${fp.split("/").pop()}`)
     return result
   } catch { return [] }
 }
@@ -1047,6 +1021,32 @@ function sseWrite(res, event, data) {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
 }
 
+function sseEmitSessionUpserts(res, entries) {
+  if (!entries.length || res.destroyed) return
+  const names = loadConfig().names ?? {}
+  for (const entry of entries) {
+    sseWrite(res, "session_upsert", sessionUpsertPayload(entry, names))
+  }
+  sseWrite(res, "projects_meta", { total: getSidebarSessionCount() })
+}
+
+function sseBroadcastSessionUpserts(entries) {
+  if (!entries.length || sseClients.size === 0) return
+  const names = loadConfig().names ?? {}
+  const total = getSidebarSessionCount()
+  const payloads = entries.map(e => sessionUpsertPayload(e, names))
+  for (const c of sseClients) {
+    try {
+      for (const payload of payloads) {
+        c.res.write(`event: session_upsert\ndata: ${JSON.stringify(payload)}\n\n`)
+      }
+      c.res.write(`event: projects_meta\ndata: ${JSON.stringify({ total })}\n\n`)
+    } catch {
+      sseClients.delete(c)
+    }
+  }
+}
+
 function yieldEventLoopTick() {
   return new Promise(r => setTimeout(r, 0))
 }
@@ -1054,8 +1054,6 @@ function yieldEventLoopTick() {
 /** Parse and index every Claude JSONL under `fileBySessKey` (yields so the event loop stays responsive). */
 async function backgroundIndexAllClaudeJsonl(fileBySessKey, names) {
   let i = 0
-  let cacheDirty = false
-  const cache = loadSidebarCache()
   const _tBatch0 = performance.now()
   let _batchParseMs = 0
   for (const [sessKey, { fp, stat }] of fileBySessKey) {
@@ -1071,22 +1069,20 @@ async function backgroundIndexAllClaudeJsonl(fileBySessKey, names) {
         projectPath.startsWith(CLAUDE_DIR) ? projectPath.slice(CLAUDE_DIR.length + 1) : projectPath
       const meta = claudeSessionMetaFromMsgs(msgs, sessionId, projKey, names, stat)
       indexSession(projectPath, sessionId, msgs, meta)
-      if (updateSidebarCacheEntry(sessionId, {
+      updateSidebarCacheEntry(sessionId, {
         messageCount: meta.messageCount,
         userMessageCount: meta.userMessageCount,
         firstName: meta.firstName ?? null,
         mtime: stat.mtimeMs,
-      })) cacheDirty = true
+      })
     } catch { /* ignore bad files */ }
     if (++i % 20 === 0) {
-      console.log(`[perf ${wallClock()}] backgroundIndex batch i=${i} batchParseMs=${_batchParseMs.toFixed(0)} batchTotalMs=${(performance.now()-_tBatch0).toFixed(0)}`)
+      debugLog(`[perf ${wallClock()}] backgroundIndex batch i=${i} batchParseMs=${_batchParseMs.toFixed(0)} batchTotalMs=${(performance.now()-_tBatch0).toFixed(0)}`)
       _batchParseMs = 0
-      if (cacheDirty) { saveSidebarCache(); cacheDirty = false }
       await yieldEventLoopTick()
     }
   }
-  console.log(`[perf ${wallClock()}] backgroundIndex done i=${i} totalMs=${(performance.now()-_tBatch0).toFixed(0)}`)
-  if (cacheDirty) saveSidebarCache()
+  debugLog(`[perf ${wallClock()}] backgroundIndex done i=${i} totalMs=${(performance.now()-_tBatch0).toFixed(0)}`)
 }
 
 function scheduleClaudeJsonlIndexing(fileBySessKey, names) {
@@ -1122,62 +1118,33 @@ async function loadPlatformProjectsInWorkers() {
 }
 
 async function loadPlatformProjectsHybrid() {
-  const workerProjectsPromise = loadPlatformProjectsInWorkers()
-  const syncProjects = [
-    ...loadCodexSessions(),
-    ...loadCursorAgentSessions(),
-    ...loadGeminiSessions(),
-    ...await loadAntigravitySessions(),
-    ...loadAntigravityCliSessions(),
-    ...loadHermesSessions(),
-    ...loadOpenclawSessions(),
-  ]
-  const workerProjects = await workerProjectsPromise
-  return [...syncProjects, ...workerProjects]
+  return loadPlatformProjectsInWorkers()
 }
 
-/** Progressive recent sidebar: emit cached state + bootstrap_done immediately, then fill in background. */
+/** Progressive recent sidebar: cache-only burst from SQLite, then background session deltas. */
 async function streamRecentSidebarInitial(res, maxSessions) {
-  // Emit cached sidebar state plus freshly-statted recent Codex sessions immediately.
-  // Codex is often where the active work is, and the full platform worker can lag.
-  const cachedState = loadCachedSidebarState()
-  const freshCodexState = loadRecentCodexProjectsCheap(Math.max(RECENT_CODEX_SEED_LIMIT, maxSessions))
-  const initialState = [
-    ...(cachedState ?? []),
-    ...freshCodexState,
-  ]
-  if (initialState.length) {
-    const merged = mergeProjectsInto([], initialState)
-    const cachedTotal = countSessionsInProjects(merged)
-    const trimmed = maxSessions > 0 && cachedTotal > maxSessions
-      ? trimProjectsByRecentSessionCount(merged, maxSessions)
-      : merged
-    sseWrite(res, "projects", trimmed)
-    sseWrite(res, "projects_meta", { total: cachedTotal })
+  const _tBurst0 = performance.now()
+  const { projects, total } = loadProjectsFromSidebarCache(maxSessions)
+  if (projects.length) {
+    sseWrite(res, "projects", projects)
+    sseWrite(res, "projects_meta", { total })
   }
   sseWrite(res, "bootstrap_done", {})
-  if (freshCodexState.length) {
-    setImmediate(() => flushSidebarCacheFromProjects(freshCodexState, null))
-  }
+  debugLog(`[perf ${wallClock()}] streamRecent burst: ${projects.length} projects, total=${total}, ${(performance.now() - _tBurst0).toFixed(1)}ms`)
 
   // Everything after this is delayed so deep-linked session fetches win the event loop.
   setTimeout(async () => {
     if (res.destroyed) return
     const _tBg0 = performance.now()
-    console.log(`[perf ${wallClock()}] streamRecent bg-start`)
+    debugLog(`[perf ${wallClock()}] streamRecent bg-start`)
     const names = loadConfig().names ?? {}
     /** @type {Map<string, { fp: string, stat: import('fs').Stats }>} */
     const fileBySessKey = new Map()
     let acc = []
 
-    // Helper: emit projects trimmed to maxSessions, with full total in meta
-    const emitProjects = (projects) => {
-      const total = countSessionsInProjects(projects)
-      const payload = maxSessions > 0 && total > maxSessions
-        ? trimProjectsByRecentSessionCount(projects, maxSessions)
-        : projects
-      sseWrite(res, "projects", payload)
-      sseWrite(res, "projects_meta", { total })
+    const emitCacheDeltas = (projects) => {
+      const changed = flushSidebarCacheFromProjects(projects, null)
+      sseEmitSessionUpserts(res, changed)
     }
 
     // Launch all platform workers immediately so they run concurrently with the Claude scan.
@@ -1197,11 +1164,10 @@ async function streamRecentSidebarInitial(res, maxSessions) {
           if (merged.has(platform) || res.destroyed) return
           merged.add(platform)
           const ms = (performance.now() - _platformT0).toFixed(0)
-          console.log(`[perf ${wallClock()}] platform-worker ${platform}: ${ms}ms → ${projects.length} projects`)
+          debugLog(`[perf ${wallClock()}] platform-worker ${platform}: ${ms}ms → ${projects.length} projects`)
           if (!projects.length) return
-          flushSidebarCacheFromProjects(projects, null)
           acc = mergeProjectsInto(acc, projects)
-          emitProjects(sortProjectGroups(acc))
+          emitCacheDeltas(projects)
         })
       }
     }
@@ -1217,11 +1183,11 @@ async function streamRecentSidebarInitial(res, maxSessions) {
         const chunk = scanOneClaudeFolder(root, label, dir, names, fileBySessKey)
         if (!chunk) continue
         acc = mergeProjectsInto(acc, [chunk])
-        emitProjects(sortProjectGroups(acc))
+        emitCacheDeltas([chunk])
         await yieldEventLoopTick()
       }
     }
-    console.log(`[perf ${wallClock()}] streamRecent claude-scan done: ${(performance.now()-_tBg0).toFixed(0)}ms, ${fileBySessKey.size} sessions`)
+    debugLog(`[perf ${wallClock()}] streamRecent claude-scan done: ${(performance.now()-_tBg0).toFixed(0)}ms, ${fileBySessKey.size} sessions`)
 
     // Wait for all platform workers, streaming any that haven't arrived yet
     for (const promise of pendingWorkers.values()) {
@@ -1230,11 +1196,10 @@ async function streamRecentSidebarInitial(res, maxSessions) {
       if (merged.has(platform)) continue  // already streamed via mergeReady()
       merged.add(platform)
       const ms = (performance.now() - _platformT0).toFixed(0)
-      console.log(`[perf ${wallClock()}] platform-worker ${platform} (late): ${ms}ms → ${projects.length} projects`)
+      debugLog(`[perf ${wallClock()}] platform-worker ${platform} (late): ${ms}ms → ${projects.length} projects`)
       if (!projects.length) continue
-      flushSidebarCacheFromProjects(projects, null)
       acc = mergeProjectsInto(acc, projects)
-      emitProjects(sortProjectGroups(acc))
+      emitCacheDeltas(projects)
       await yieldEventLoopTick()
     }
 
@@ -1245,8 +1210,9 @@ async function streamRecentSidebarInitial(res, maxSessions) {
       : sortProjectGroups(acc)
     const _tHydrate = performance.now()
     await hydrateClaudeSessionsInProjects(forHydration, fileBySessKey, names)
-    console.log(`[perf ${wallClock()}] streamRecent hydrate done: ${(performance.now()-_tHydrate).toFixed(0)}ms`)
-    flushSidebarCacheFromProjects(forHydration, fileBySessKey)
+    debugLog(`[perf ${wallClock()}] streamRecent hydrate done: ${(performance.now()-_tHydrate).toFixed(0)}ms`)
+    const hydratedChanged = flushSidebarCacheFromProjects(forHydration, fileBySessKey)
+    sseEmitSessionUpserts(res, hydratedChanged)
     for (const p of forHydration) {
       const ap = acc.find(a => a.path === p.path)
       if (!ap) continue
@@ -1257,8 +1223,6 @@ async function streamRecentSidebarInitial(res, maxSessions) {
         if (as && s.messageCount != null) as.messageCount = s.messageCount
       }
     }
-    if (!res.destroyed) emitProjects(sortProjectGroups(acc))
-
     scheduleClaudeJsonlIndexing(fileBySessKey, names)
     if (!res.destroyed) sseWrite(res, "background_done", {})
   }, STREAM_BACKGROUND_DELAY_MS)
@@ -1273,8 +1237,11 @@ async function hydrateClaudeSessionsInProjects(projects, fileBySessKey, names) {
       if (!rec) continue
       const cacheKey = `${p.path}/${s.id}`
       // If already in msgCache (e.g. user clicked the session), do full meta from msgs
-      if (msgCache.has(cacheKey)) {
-        p.sessions[i] = claudeSessionMetaFromMsgs(msgCache.get(cacheKey), s.id, s.projectPath, names, rec.stat)
+      if (msgCacheHas(cacheKey)) {
+        const entry = msgCacheGetEntry(cacheKey)
+        const meta = claudeSessionMetaFromMsgs(entry.msgs, s.id, s.projectPath, names, rec.stat)
+        meta.messageCount = entry.total
+        p.sessions[i] = meta
       } else if (s.firstName) {
         // firstName already known (cached or cheap-read during scan) — just count lines, no full parse
         p.sessions[i] = {
@@ -1298,7 +1265,12 @@ async function hydrateClaudeSessionsInProjects(projects, fileBySessKey, names) {
   }
 }
 
-/** Sidebar “recent N” — trim using file mtime, then parse JSONL only for sessions kept. */
+/** Instant sidebar slice from in-memory/disk cache (updated by workers, watchers, broadcasts). */
+function loadProjectsBundleCached(maxSessions) {
+  return loadProjectsFromSidebarCache(maxSessions)
+}
+
+/** Full rescan — trim using file mtime, then parse JSONL only for sessions kept. */
 async function loadProjectsBundleRecent(maxSessions) {
   const names = loadConfig().names ?? {}
   const { projects: claudeProjects, fileBySessKey } = scanClaudeProjectsCheap(names)
@@ -1331,11 +1303,76 @@ async function loadProjectsBundle(maxSessions) {
     const full = await loadProjectsFull()
     return { projects: full, total: countSessionsInProjects(full) }
   }
-  return loadProjectsBundleRecent(n)
+  return loadProjectsBundleCached(n) // sync — sidebar cache only
 }
 
-// ── In-memory message cache for non-JSONL platforms ───────────────────────────
-const msgCache = new Map() // `projectPath/sessionId` → SessionMessage[]
+// ── Hot-session tail cache (top N recently viewed; tail window, not full parse) ─
+// Matches frontend windowing: MAX_DOM=180, CHUNK=60 → keep ~240 msgs from session end.
+const MSG_CACHE_MAX = 12
+const MSG_CACHE_TAIL = 240
+const msgCache = new Map() // key → { msgs: SessionMessage[], total: number }
+
+function makeMsgCacheEntry(msgs, total) {
+  const t = total ?? msgs.length
+  const tailMsgs = msgs.length > MSG_CACHE_TAIL ? msgs.slice(-MSG_CACHE_TAIL) : msgs
+  return { msgs: tailMsgs, total: t }
+}
+
+function msgCacheTouch(key, entry) {
+  if (msgCache.has(key)) msgCache.delete(key)
+  msgCache.set(key, entry)
+  while (msgCache.size > MSG_CACHE_MAX) {
+    const oldest = msgCache.keys().next().value
+    msgCache.delete(oldest)
+  }
+}
+
+function msgCachePeek(key) {
+  return msgCache.get(key)
+}
+
+function msgCacheGetEntry(key) {
+  const entry = msgCache.get(key)
+  if (!entry) return undefined
+  msgCacheTouch(key, entry)
+  return entry
+}
+
+/** True when cached tail window can satisfy tail/skip without disk. */
+function msgCacheCovers(entry, tail, skip) {
+  if (!entry?.msgs?.length) return false
+  if (!tail) return entry.msgs.length >= entry.total
+  return skip + tail <= entry.msgs.length
+}
+
+function msgCacheSlice(entry, tail, skip) {
+  const { msgs, total } = entry
+  if (!tail) return { msgs, total }
+  const end = msgs.length - skip
+  const start = Math.max(0, end - tail)
+  return { msgs: msgs.slice(start, end > 0 ? end : 0), total }
+}
+
+function msgCacheSet(key, msgs, total) {
+  if (!Array.isArray(msgs) || !msgs.length) return
+  msgCacheTouch(key, makeMsgCacheEntry(msgs, total))
+}
+
+function msgCacheHas(key) {
+  return msgCache.has(key)
+}
+
+function msgCacheDelete(key) {
+  msgCache.delete(key)
+}
+
+function msgCacheEstimatedKb() {
+  let bytes = 0
+  for (const { msgs } of msgCache.values()) {
+    try { bytes += JSON.stringify(msgs).length } catch { /* ignore */ }
+  }
+  return Math.round(bytes / 1024)
+}
 
 /**
  * If msgCache is cold (e.g. /api/session before /api/projects finished), load on demand.
@@ -1419,12 +1456,10 @@ function getSessionMessagesAll(projectPath, sessionId) {
     return readCursorSessionMsgs(sessionId).msgs
   }
   const cacheKey = `${projectPath}/${sessionId}`
-  if (msgCache.has(cacheKey)) return msgCache.get(cacheKey)
+  const cached = msgCachePeek(cacheKey)
+  if (cached && cached.msgs.length >= cached.total) return cached.msgs
   const ondemand = loadSessionMessagesOndemand(projectPath, sessionId)
-  if (ondemand != null) {
-    msgCache.set(cacheKey, ondemand)
-    return ondemand
-  }
+  if (ondemand != null) return ondemand
   if (
     /^(opencode|codex|hermes|antigravity|antigravity-cli|cursor-agent|openclaw):/.test(projectPath) &&
     !/^[A-Za-z]:[\\/]/.test(projectPath)
@@ -1675,8 +1710,7 @@ main{width:min(1320px,calc(100vw - 32px));margin:0 auto;padding:28px 0 44px}.her
 function resultsToProjects(results, platformPrefix) {
   const projects = new Map()
   for (const { meta, msgs } of results) {
-    const { id, projectPath, lastActivity } = meta
-    msgCache.set(`${projectPath}/${id}`, msgs)
+    const { id, projectPath } = meta
     indexSession(projectPath, id, msgs, meta)
     if (!projects.has(projectPath)) {
       projects.set(projectPath, {
@@ -1789,23 +1823,9 @@ function checkHeaderAuth(req) {
 /** @type {Set<{ res: import('http').ServerResponse, maxSessions: number | null }>} */
 const sseClients = new Set()
 
-/** Fast broadcast from sidebar cache — avoids full JSONL scan on every file change. */
+/** Broadcast session deltas to all SSE clients (used when we lack per-session entry). */
 function broadcastProjectsFromCache() {
-  if (sseClients.size === 0) return
-  const projects = loadCachedSidebarState()
-  if (!projects) return
-  const sorted = mergeProjectsInto([], projects)
-  for (const c of sseClients) {
-    const payload =
-      c.maxSessions != null && c.maxSessions > 0
-        ? trimProjectsByRecentSessionCount(sorted, c.maxSessions)
-        : sorted
-    try {
-      c.res.write(`event: projects\ndata: ${JSON.stringify(payload)}\n\n`)
-    } catch {
-      sseClients.delete(c)
-    }
-  }
+  // Legacy hook for platform watchers — no-op; per-session upserts are sent from update paths.
 }
 
 async function broadcastProjects() {
@@ -1862,7 +1882,7 @@ function handleClaudeFileChange(filename) {
       pickClaudeSubagentFirstName(fp, meta)
     const messageCount = countJsonlLines(fp)
     const _tRead = performance.now()
-    msgCache.delete(`${projectPath}/${sessionId}`)
+    msgCacheDelete(`${projectPath}/${sessionId}`)
     const sessionMeta = {
       id: sessionId,
       projectPath,
@@ -1887,7 +1907,7 @@ function handleClaudeFileChange(filename) {
     const _tIndex = performance.now()
     // Update sidebar cache so the next broadcast reflects new mtime + message count
     const projectDisplayName = encodedDirToDisplayName(projectDir)
-    const cacheDirty = updateSidebarCacheEntry(sessionId, {
+    const { changed, entry } = updateSidebarCacheEntry(sessionId, {
       projectPath,  // absolute path — matches what scanOneClaudeFolder uses
       projectDisplayName,
       source: "claude",
@@ -1901,13 +1921,12 @@ function handleClaudeFileChange(filename) {
       parentSessionId: parentSessionId ?? null,
       agentType: sessionMeta.agentType ?? "subagent",
     })
-    if (cacheDirty) scheduleSidebarCacheSave()
+    if (changed) sseBroadcastSessionUpserts([entry])
     const _tDone = performance.now()
     if (_tDone - _t0 > 20) {
-      console.log(`[perf ${wallClock()}] handleClaudeFileChange ${sessionId.slice(0,8)} read:${(_tRead-_t0).toFixed(1)}ms meta:${(_tMeta-_tRead).toFixed(1)}ms index:${(_tIndex-_tMeta).toFixed(1)}ms cache:${(_tDone-_tIndex).toFixed(1)}ms total:${(_tDone-_t0).toFixed(1)}ms lines:${messageCount}`)
+      debugLog(`[perf ${wallClock()}] handleClaudeFileChange ${sessionId.slice(0,8)} read:${(_tRead-_t0).toFixed(1)}ms meta:${(_tMeta-_tRead).toFixed(1)}ms index:${(_tIndex-_tMeta).toFixed(1)}ms cache:${(_tDone-_tIndex).toFixed(1)}ms total:${(_tDone-_t0).toFixed(1)}ms lines:${messageCount}`)
     }
   } catch { /* ignore */ }
-  broadcastProjectsFromCache()
 }
 
 try {
@@ -1991,13 +2010,13 @@ function serveStatic(req, res) {
 
 function triggerBackgroundIndexer() { /* lancedb removed */ }
 
-// --- Event-loop lag detector (temporary debug) ---
-{
+// --- Event-loop lag detector (debug only) ---
+if (isDebugTrace()) {
   let _lastHb = Date.now()
   setInterval(() => {
     const now = Date.now()
     const lag = now - _lastHb - 500
-    if (lag > 200) console.log(`[perf ${wallClock()}] ⚠ event-loop lag ${lag}ms`)
+    if (lag > 200) debugLog(`[perf ${wallClock()}] ⚠ event-loop lag ${lag}ms`)
     _lastHb = now
   }, 500).unref()
 }
@@ -2644,6 +2663,24 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  // GET /api/health — lightweight diagnostics (no auth)
+  if (url.pathname === "/api/health") {
+    const mem = process.memoryUsage()
+    json({
+      ok: true,
+      uptimeSec: Math.round((Date.now() - SERVER_START_TIME) / 1000),
+      rssMb: Math.round(mem.rss / 1024 / 1024),
+      heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
+      msgCacheEntries: msgCache.size,
+      msgCacheMax: MSG_CACHE_MAX,
+      msgCacheTail: MSG_CACHE_TAIL,
+      msgCacheEstimatedKb: msgCacheEstimatedKb(),
+      sidebarCacheSessions: loadSidebarCache().sessions.length,
+      sseClients: sseClients.size,
+    })
+    return
+  }
+
   // GET /api/capabilities — public bootstrap for SPA (must stay before cookie gate)
   if (url.pathname === "/api/capabilities") {
     const pinRequired = Boolean(AUTH_PIN) && !isLocalRequest(req)
@@ -2718,7 +2755,7 @@ const server = http.createServer(async (req, res) => {
     const results = runSidebarSessionSearch(q, searchRows)
     const ms = (performance.now() - t0).toFixed(1)
     const source = rows.length ? "index" : "cache-fallback"
-    console.log(`${ts()} [search] q="${q}" rows=${searchRows.length} liveRows=${rows.length} results=${results.length} source=${source} title+platform ms=${ms}`)
+    debugLog(`${ts()} [search] q="${q}" rows=${searchRows.length} liveRows=${rows.length} results=${results.length} source=${source} title+platform ms=${ms}`)
     json({ results, source })
     return
   }
@@ -2775,7 +2812,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       const ms = (performance.now() - t0).toFixed(1)
-      console.log(`${ts()} [global-search] q="${q}" ms=${ms}`)
+      debugLog(`${ts()} [global-search] q="${q}" ms=${ms}`)
       res.write(JSON.stringify({ done: true, ms: Number(ms) }) + "\n")
     } catch (err) {
       console.error(`${ts()} [global-search] error q="${q}":`, err.message)
@@ -2889,7 +2926,7 @@ const server = http.createServer(async (req, res) => {
         const msgs = getSessionMessagesAll(projectPath, sessionId)
         if (!msgs) return
         // Invalidate cache so next read is fresh
-        msgCache.delete(`${projectPath}/${sessionId}`)
+        msgCacheDelete(`${projectPath}/${sessionId}`)
         const fresh = getSessionMessagesAll(projectPath, sessionId)
         if (!fresh) return
         const tail = fresh.slice(-tailN)
@@ -2913,7 +2950,7 @@ const server = http.createServer(async (req, res) => {
             if (newSig === lastSig) return
             lastSig = newSig
             // Invalidate mem-cache so fresh parse picks up new lines
-            msgCache.delete(`${projectPath}/${sessionId}`)
+            msgCacheDelete(`${projectPath}/${sessionId}`)
             pushUpdate()
           } catch { /* ignore */ }
         }, 50)
@@ -3009,7 +3046,7 @@ const server = http.createServer(async (req, res) => {
     const skip = skipParam ? Math.max(0, parseInt(skipParam) || 0) : 0
     const shortId = sessionId.slice(0, 8)
     const source = projectPath.split(":")[0] || "claude"
-    console.log(`[perf ${wallClock()}] /api/session start ${source}:${shortId} tail=${tail} skip=${skip} path=${projectPath}`)
+    debugLog(`[perf ${wallClock()}] /api/session start ${source}:${shortId} tail=${tail} skip=${skip} path=${projectPath}`)
 
     function sliceMsgs(all) {
       const total = all.length
@@ -3019,13 +3056,41 @@ const server = http.createServer(async (req, res) => {
       return { msgs: all.slice(start, end > 0 ? end : 0), total }
     }
 
-    function jsonPaged(all, loadLabel) {
+    function jsonPaged(all, loadLabel, totalOverride) {
       const { msgs, total } = sliceMsgs(all)
+      const lineTotal = totalOverride ?? total
       const jsonStr = JSON.stringify(msgs)
       const totalMs = (performance.now() - reqT0).toFixed(1)
-      console.log(`[perf ${wallClock()}] /api/session ${source}:${shortId} tail=${tail} skip=${skip} → ${msgs.length}/${total} msgs | load:${loadLabel} | total:${totalMs}ms | resp:${(jsonStr.length/1024).toFixed(1)}KB`)
-      res.writeHead(200, { "Content-Type": "application/json", "X-Message-Total": String(total) })
+      debugLog(`[perf ${wallClock()}] /api/session ${source}:${shortId} tail=${tail} skip=${skip} → ${msgs.length}/${lineTotal} msgs | load:${loadLabel} | total:${totalMs}ms | resp:${(jsonStr.length/1024).toFixed(1)}KB`)
+      res.writeHead(200, { "Content-Type": "application/json", "X-Message-Total": String(lineTotal) })
       res.end(jsonStr)
+    }
+
+    function jsonFromWindow(windowMsgs, lineTotal, loadLabel) {
+      const jsonStr = JSON.stringify(windowMsgs)
+      const totalMs = (performance.now() - reqT0).toFixed(1)
+      debugLog(`[perf ${wallClock()}] /api/session ${source}:${shortId} tail=${tail} skip=${skip} → ${windowMsgs.length}/${lineTotal} msgs | load:${loadLabel} | total:${totalMs}ms | resp:${(jsonStr.length/1024).toFixed(1)}KB`)
+      res.writeHead(200, { "Content-Type": "application/json", "X-Message-Total": String(lineTotal) })
+      res.end(jsonStr)
+    }
+
+    const cacheKey = `${projectPath}/${sessionId}`
+
+    function cacheAndRespond(msgs, lineTotal, loadLabel) {
+      msgCacheSet(cacheKey, msgs, lineTotal)
+      if (msgCacheCovers(msgCachePeek(cacheKey), tail, skip)) {
+        const sliced = msgCacheSlice(msgCachePeek(cacheKey), tail, skip)
+        jsonFromWindow(sliced.msgs, sliced.total, loadLabel)
+        return true
+      }
+      if (!tail) {
+        jsonPaged(msgs, loadLabel, lineTotal)
+        return true
+      }
+      const end = msgs.length - skip
+      const start = Math.max(0, end - tail)
+      jsonFromWindow(msgs.slice(start, end > 0 ? end : 0), lineTotal, loadLabel)
+      return true
     }
 
     // Cursor: push tail/skip into SQLite — avoids reading all bubbles for a tail fetch
@@ -3035,34 +3100,42 @@ const server = http.createServer(async (req, res) => {
       const ms = (performance.now() - t0).toFixed(1)
       const jsonStr = JSON.stringify(msgs)
       const totalMs = (performance.now() - reqT0).toFixed(1)
-      console.log(`[perf ${wallClock()}] /api/session cursor:${shortId} tail=${tail} skip=${skip} → ${msgs.length}/${total} msgs | load:sqlite ${ms}ms | total:${totalMs}ms | resp:${(jsonStr.length/1024).toFixed(1)}KB`)
+      debugLog(`[perf ${wallClock()}] /api/session cursor:${shortId} tail=${tail} skip=${skip} → ${msgs.length}/${total} msgs | load:sqlite ${ms}ms | total:${totalMs}ms | resp:${(jsonStr.length/1024).toFixed(1)}KB`)
       res.writeHead(200, { "Content-Type": "application/json", "X-Message-Total": String(total) })
       res.end(jsonStr)
       return
     }
-    // All platforms: check msgCache first (includes Claude sessions cached after first parse)
-    const cacheKey = `${projectPath}/${sessionId}`
-    if (msgCache.has(cacheKey)) {
-      console.log(`[perf ${wallClock()}] /api/session cache-hit ${source}:${shortId} key=${cacheKey}`)
-      jsonPaged(msgCache.get(cacheKey), "mem-cache")
+    // Hot tail cache — top few recently viewed sessions keep last MSG_CACHE_TAIL msgs
+    const cachedEntry = msgCachePeek(cacheKey)
+    if (cachedEntry && msgCacheCovers(cachedEntry, tail, skip)) {
+      debugLog(`[perf ${wallClock()}] /api/session cache-hit ${source}:${shortId} cached=${cachedEntry.msgs.length}/${cachedEntry.total}`)
+      const sliced = msgCacheSlice(cachedEntry, tail, skip)
+      jsonFromWindow(sliced.msgs, sliced.total, "mem-cache")
+      msgCacheTouch(cacheKey, cachedEntry)
       return
     }
 
-    if (projectPath.startsWith("codex:") && tail > 0 && skip === 0) {
+    if (projectPath.startsWith("codex:")) {
+      if (tail > 0 && skip === 0) {
+        const t0fast = performance.now()
+        const quick = readCodexSessionTailFast(projectPath, sessionId, tail)
+        const fastMs = (performance.now() - t0fast).toFixed(1)
+        if (quick?.msgs?.length) {
+          jsonFromWindow(quick.msgs, quick.total, `codex-tail ${fastMs}ms`)
+          setImmediate(() => {
+            if (msgCacheHas(cacheKey)) return
+            const warm = readCodexSessionTailFast(projectPath, sessionId, MSG_CACHE_TAIL)
+            if (warm?.msgs?.length) msgCacheSet(cacheKey, warm.msgs, warm.total)
+          })
+          return
+        }
+      }
+      const need = tail > 0 ? skip + tail : MSG_CACHE_TAIL
       const t0tail = performance.now()
-      const quick = readCodexSessionTailFast(projectPath, sessionId, tail)
+      const quick = readCodexSessionTailFast(projectPath, sessionId, need)
       const tailMs = (performance.now() - t0tail).toFixed(1)
       if (quick?.msgs?.length) {
-        const jsonStr = JSON.stringify(quick.msgs)
-        const totalMs = (performance.now() - reqT0).toFixed(1)
-        console.log(`[perf ${wallClock()}] /api/session codex:${shortId} tail=${tail} → ${quick.msgs.length}/${quick.total} msgs | load:jsonl-tail ${tailMs}ms | total:${totalMs}ms | resp:${(jsonStr.length/1024).toFixed(1)}KB`)
-        res.writeHead(200, { "Content-Type": "application/json", "X-Message-Total": String(quick.total) })
-        res.end(jsonStr)
-        setImmediate(() => {
-          if (msgCache.has(cacheKey)) return
-          const full = loadSessionMessagesOndemand(projectPath, sessionId)
-          if (Array.isArray(full)) msgCache.set(cacheKey, full)
-        })
+        cacheAndRespond(quick.msgs, quick.total, `codex-tail ${tailMs}ms`)
         return
       }
     }
@@ -3073,47 +3146,48 @@ const server = http.createServer(async (req, res) => {
       const t0ondemand = performance.now()
       const ondemand = loadSessionMessagesOndemand(projectPath, sessionId)
       const ondemandMs = (performance.now() - t0ondemand).toFixed(1)
-      console.log(`[perf ${wallClock()}] /api/session ondemand ${source}:${shortId} load=${ondemandMs}ms hit=${ondemand != null}`)
+      debugLog(`[perf ${wallClock()}] /api/session ondemand ${source}:${shortId} load=${ondemandMs}ms hit=${ondemand != null}`)
       if (ondemand != null) {
-        msgCache.set(cacheKey, ondemand)
-        jsonPaged(ondemand, `ondemand ${ondemandMs}ms`)
+        cacheAndRespond(ondemand, ondemand.length, `ondemand ${ondemandMs}ms`)
         return
       }
       res.writeHead(404); res.end("Not Found"); return
     }
 
-    // Claude Code: serve tail instantly from file end; background-parse full session into cache
+    // Claude Code: tail-read from file end (no full parse unless necessary)
     const fp = projectPath.startsWith("/")
       ? join(projectPath, `${sessionId}.jsonl`)
       : join(CLAUDE_DIR, projectPath, `${sessionId}.jsonl`)
     if (!existsSync(fp)) { res.writeHead(404); res.end("Not Found"); return }
 
+    const lineTotal = countJsonlLines(fp)
+
     if (tail > 0 && skip === 0) {
-      // Fast path: read tail from end + count lines without full JSON parse
-      console.log(`[perf ${wallClock()}] /api/session claude:${shortId} fast-tail start tail=${tail}`)
+      debugLog(`[perf ${wallClock()}] /api/session claude:${shortId} fast-tail start tail=${tail}`)
       const tailMsgs = readJsonlTail(fp, tail)
-      const lineTotal = countJsonlLines(fp)
-      const jsonStr = JSON.stringify(tailMsgs)
-      const totalMs = (performance.now() - reqT0).toFixed(1)
-      console.log(`[perf ${wallClock()}] /api/session claude:${shortId} tail=${tail} → ${tailMsgs.length}/${lineTotal} msgs | load:jsonl-tail | total:${totalMs}ms | resp:${(jsonStr.length/1024).toFixed(1)}KB`)
-      res.writeHead(200, { "Content-Type": "application/json", "X-Message-Total": String(lineTotal) })
-      res.end(jsonStr)
-      // Warm the full cache in the background so subsequent load-more requests are instant
+      jsonFromWindow(tailMsgs, lineTotal, "jsonl-tail")
       setImmediate(() => {
-        if (!msgCache.has(cacheKey)) {
-          const full = parseJsonl(fp)
-          msgCache.set(cacheKey, full)
-        }
+        if (msgCacheHas(cacheKey)) return
+        const warm = readJsonlTail(fp, Math.min(MSG_CACHE_TAIL, lineTotal))
+        if (warm.length) msgCacheSet(cacheKey, warm, lineTotal)
       })
       return
     }
 
-    // skip > 0 or tail=0: need full parse (load-earlier pagination)
-    console.log(`[perf ${wallClock()}] /api/session claude:${shortId} parse-start skip=${skip} tail=${tail}`)
+    if (tail > 0 || skip > 0) {
+      const needFromEnd = skip + (tail || MSG_CACHE_TAIL)
+      const fetchN = Math.min(Math.max(needFromEnd, MSG_CACHE_TAIL), lineTotal)
+      debugLog(`[perf ${wallClock()}] /api/session claude:${shortId} tail-read need=${needFromEnd} fetch=${fetchN}`)
+      const tailMsgs = readJsonlTail(fp, fetchN)
+      cacheAndRespond(tailMsgs, lineTotal, "jsonl-tail")
+      return
+    }
+
+    // tail=0: rare full-session request — parse once, cache tail window only
+    debugLog(`[perf ${wallClock()}] /api/session claude:${shortId} parse-start full`)
     const parsed = parseJsonl(fp)
-    msgCache.set(cacheKey, parsed)
-    console.log(`[perf ${wallClock()}] /api/session claude:${shortId} parse-done count=${parsed.length}`)
-    jsonPaged(parsed, "jsonl-parse")
+    debugLog(`[perf ${wallClock()}] /api/session claude:${shortId} parse-done count=${parsed.length}`)
+    cacheAndRespond(parsed, parsed.length, "jsonl-parse")
     return
   }
 
@@ -3327,6 +3401,7 @@ process.on("unhandledRejection", (reason, promise) => {
 })
 
 const BIND_HOST = process.env.HOST ?? "127.0.0.1"
+initSidebarCache()
 server.listen(PORT, BIND_HOST, () => {
   const displayHost = BIND_HOST === "0.0.0.0" ? "0.0.0.0 (all interfaces)" : "localhost"
   console.log(`${ts()} \n  Agent Session Viewer (local mode)`)

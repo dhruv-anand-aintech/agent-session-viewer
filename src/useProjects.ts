@@ -1,39 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import type { Capabilities, ProjectData, SessionMeta } from "./types"
 import { markSSEOpen, markProjectsFirst, markBootstrapDone } from "./perf"
+import {
+  RECENT_SIDEBAR_SESSIONS,
+  mergeProjectData,
+  mergeSessionUpsert,
+  trimProjectsToMaxSessions,
+} from "./projects-merge"
 
-export const RECENT_SIDEBAR_SESSIONS = 30
-
-export function mergeProjectData(existing: ProjectData[], incoming: ProjectData[]): ProjectData[] {
-  const projectsByPath = new Map(existing.map(p => [p.path, { ...p, sessions: [...p.sessions] }]))
-
-  for (const project of incoming) {
-    const current = projectsByPath.get(project.path)
-    if (!current) {
-      projectsByPath.set(project.path, { ...project, sessions: [...project.sessions] })
-      continue
-    }
-
-    current.displayName = project.displayName || current.displayName
-    const sessionsById = new Map(current.sessions.map(s => [s.id, s]))
-    for (const session of project.sessions) {
-      const prev = sessionsById.get(session.id)
-      sessionsById.set(session.id, {
-        ...prev,
-        ...session,
-        firstName: session.firstName ?? prev?.firstName,
-        customName: session.customName ?? prev?.customName,
-      })
-    }
-    current.sessions = Array.from(sessionsById.values()).sort((a, b) =>
-      String(b.lastActivity ?? "").localeCompare(String(a.lastActivity ?? "")),
-    )
-  }
-
-  return Array.from(projectsByPath.values()).sort((a, b) =>
-    String(b.sessions[0]?.lastActivity ?? "").localeCompare(String(a.sessions[0]?.lastActivity ?? "")),
-  )
-}
+export { RECENT_SIDEBAR_SESSIONS, mergeProjectData, mergeSessionUpsert } from "./projects-merge"
 
 export function useCapabilities(): Capabilities {
   const [caps, setCaps] = useState<Capabilities>({ openPath: false })
@@ -96,6 +71,31 @@ export function useProjects() {
           setProjectsLoading(false)
         }
         setProjects(prev => mergeProjectData(prev, incoming))
+      } catch { /* ignore */ }
+    })
+    es.addEventListener("session_upsert", e => {
+      try {
+        const o = JSON.parse((e as MessageEvent).data) as {
+          projectPath?: string
+          projectDisplayName?: string
+          session?: SessionMeta
+        }
+        if (!o.projectPath || !o.session) return
+        if (firstProjectsBatch) {
+          markProjectsFirst()
+          firstProjectsBatch = false
+          setProjectsLoading(false)
+        }
+        setProjects(prev => {
+          let next = mergeSessionUpsert(
+            prev,
+            o.projectPath!,
+            o.projectDisplayName ?? o.projectPath!,
+            o.session!,
+          )
+          if (listMode === "recent") next = trimProjectsToMaxSessions(next, RECENT_SIDEBAR_SESSIONS)
+          return next
+        })
       } catch { /* ignore */ }
     })
     es.addEventListener("bootstrap_done", () => {

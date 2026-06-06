@@ -5,9 +5,9 @@ import { join } from "node:path"
 import { indexSessionMessages, removeSessionFromIndex } from "../lib/lancedb-search.mjs"
 import { flattenMessageForThread } from "../lib/session-search-core.mjs"
 import { loadSessionMessages } from "../lib/session-message-loader.mjs"
+import { openSidebarCacheDb, getAllSidebarEntries } from "../lib/sidebar-cache-db.mjs"
 
 const APP_CONFIG_DIR = join(homedir(), ".config", "agent-session-viewer")
-const SIDEBAR_CACHE_FILE = join(APP_CONFIG_DIR, "sidebar-cache.json")
 const MANIFEST_FILE = join(APP_CONFIG_DIR, "lancedb-index-manifest.json")
 const REBUILD = process.argv.includes("--rebuild")
 const RESET = process.argv.includes("--reset")
@@ -31,12 +31,8 @@ function memoryLine() {
 }
 
 function loadSidebarSessions() {
-  if (!existsSync(SIDEBAR_CACHE_FILE)) {
-    throw new Error(`Missing sidebar cache: ${SIDEBAR_CACHE_FILE}. Run npm run build-cache first.`)
-  }
-  const raw = JSON.parse(readFileSync(SIDEBAR_CACHE_FILE, "utf8"))
-  const sessions = Array.isArray(raw.sessions) ? raw.sessions : []
-  return sessions.filter(s => s && typeof s.id === "string" && typeof s.projectPath === "string")
+  openSidebarCacheDb(APP_CONFIG_DIR)
+  return getAllSidebarEntries().filter(s => s && typeof s.id === "string" && typeof s.projectPath === "string")
 }
 
 function loadManifest() {
