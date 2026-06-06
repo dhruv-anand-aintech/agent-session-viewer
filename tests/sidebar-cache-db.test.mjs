@@ -151,4 +151,36 @@ describe("sidebar-cache-db", () => {
     ])
     assert.equal(getTopSidebarEntries(0).length, 2)
   })
+
+  it("getTopSidebarEntries includes subagents when parent is in top N", () => {
+    openSidebarCacheDb(configDir)
+    replaceAllSidebarEntries([
+      sampleEntry("parent-1", "2026-06-06T15:00:00.000Z"),
+      sampleEntry("other-1", "2026-06-06T14:00:00.000Z"),
+      sampleEntry("sub-1", "2026-06-06T10:00:00.000Z", {
+        isSidechain: true,
+        parentSessionId: "parent-1",
+        agentType: "subagent",
+      }),
+    ])
+    const top = getTopSidebarEntries(2)
+    const ids = top.map(e => e.id).sort()
+    assert.deepEqual(ids, ["other-1", "parent-1", "sub-1"])
+  })
+
+  it("getTopSidebarEntries includes parent when subagent is in top N", () => {
+    openSidebarCacheDb(configDir)
+    replaceAllSidebarEntries([
+      sampleEntry("parent-1", "2026-06-01T10:00:00.000Z"),
+      sampleEntry("other-1", "2026-06-06T14:00:00.000Z"),
+      sampleEntry("sub-1", "2026-06-06T15:00:00.000Z", {
+        isSidechain: true,
+        parentSessionId: "parent-1",
+        agentType: "subagent",
+      }),
+    ])
+    const top = getTopSidebarEntries(2)
+    const ids = top.map(e => e.id).sort()
+    assert.deepEqual(ids, ["other-1", "parent-1", "sub-1"])
+  })
 })

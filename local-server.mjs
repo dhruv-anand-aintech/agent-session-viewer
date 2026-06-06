@@ -63,7 +63,9 @@ import {
   getSidebarSessionCount,
   getTopSidebarEntries,
   getAllSidebarEntries,
+  getSidebarEntry,
   upsertSidebarEntry,
+  expandSidebarLinkageEntries,
 } from "./lib/sidebar-cache-db.mjs"
 import {
   cacheEntryToSessionRow,
@@ -266,14 +268,18 @@ function loadCachedSidebarState() {
 /**
  * Sidebar cache only — no live platform scan. Top N via indexed SQLite query.
  */
-function loadProjectsFromSidebarCache(maxSessions) {
+function loadProjectsFromSidebarCache(maxSessions, pinSessionId = null) {
   initSidebarCache()
   const _t0 = performance.now()
   const total = getSidebarSessionCount()
   if (!total) return { projects: [], total: 0 }
   const names = loadConfig().names ?? {}
   const n = Number(maxSessions)
-  const entries = Number.isFinite(n) && n > 0 ? getTopSidebarEntries(n) : getAllSidebarEntries()
+  let entries = Number.isFinite(n) && n > 0 ? getTopSidebarEntries(n) : getAllSidebarEntries()
+  if (pinSessionId) {
+    const pinned = getSidebarEntry(pinSessionId)
+    if (pinned?.id) entries = expandSidebarLinkageEntries([...entries, pinned])
+  }
   const projects = sortProjectGroups(groupCacheSessionsToProjects(entries, names))
   const ms = (performance.now() - _t0).toFixed(1)
   debugLog(`[perf ${wallClock()}] loadProjectsFromSidebarCache n=${entries.length}/${total} ${ms}ms`)
@@ -341,6 +347,9 @@ function flushSidebarCacheFromProjects(projects, fileBySessKey) {
         lastActivity: s.lastActivity,
         mtime: mtimeMs ?? s.lastActivity,
         customName: s.customName ?? null,
+        isSidechain: s.isSidechain,
+        parentSessionId: s.parentSessionId,
+        agentType: s.agentType,
       })
       if (c) changed.push(entry)
     }
@@ -1024,7 +1033,7 @@ function sseWrite(res, event, data) {
 function sseEmitSessionUpserts(res, entries) {
   if (!entries.length || res.destroyed) return
   const names = loadConfig().names ?? {}
-  for (const entry of entries) {
+  for (const entry of expandSidebarLinkageEntries(entries)) {
     sseWrite(res, "session_upsert", sessionUpsertPayload(entry, names))
   }
   sseWrite(res, "projects_meta", { total: getSidebarSessionCount() })
@@ -1034,7 +1043,7 @@ function sseBroadcastSessionUpserts(entries) {
   if (!entries.length || sseClients.size === 0) return
   const names = loadConfig().names ?? {}
   const total = getSidebarSessionCount()
-  const payloads = entries.map(e => sessionUpsertPayload(e, names))
+  const payloads = expandSidebarLinkageEntries(entries).map(e => sessionUpsertPayload(e, names))
   for (const c of sseClients) {
     try {
       for (const payload of payloads) {
@@ -1122,9 +1131,9 @@ async function loadPlatformProjectsHybrid() {
 }
 
 /** Progressive recent sidebar: cache-only burst from SQLite, then background session deltas. */
-async function streamRecentSidebarInitial(res, maxSessions) {
+async function streamRecentSidebarInitial(res, maxSessions, pinSessionId = null) {
   const _tBurst0 = performance.now()
-  const { projects, total } = loadProjectsFromSidebarCache(maxSessions)
+  const { projects, total } = loadProjectsFromSidebarCache(maxSessions, pinSessionId)
   if (projects.length) {
     sseWrite(res, "projects", projects)
     sseWrite(res, "projects_meta", { total })
@@ -2840,6 +2849,7 @@ const server = http.createServer(async (req, res) => {
     const maxRaw = url.searchParams.get("maxSessions")
     const maxParsed = maxRaw != null && maxRaw !== "" ? Number(maxRaw) : null
     const maxSessions = Number.isFinite(maxParsed) && maxParsed > 0 ? maxParsed : null
+    const pinSessionId = url.searchParams.get("pinSession")?.trim() || null
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -2848,7 +2858,7 @@ const server = http.createServer(async (req, res) => {
     })
     res.write(": connected\n\n")  // flush headers immediately so EventSource.onopen fires now
     if (maxSessions != null) {
-      await streamRecentSidebarInitial(res, maxSessions)
+      await streamRecentSidebarInitial(res, maxSessions, pinSessionId)
     } else {
       const { projects, total } = await loadProjectsBundle(0)
       res.write(`event: projects_meta\ndata: ${JSON.stringify({ total })}\n\n`)
