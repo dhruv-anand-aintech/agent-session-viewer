@@ -277,6 +277,7 @@ function loadProjectsFromSidebarCache(maxSessions, pinSessionId = null) {
   const n = Number(maxSessions)
   let entries = Number.isFinite(n) && n > 0 ? getTopSidebarEntries(n) : getAllSidebarEntries()
   if (pinSessionId) {
+    backfillPinnedSessionLinkage(pinSessionId)
     const pinned = getSidebarEntry(pinSessionId)
     if (pinned?.id) entries = expandSidebarLinkageEntries([...entries, pinned])
   }
@@ -399,13 +400,21 @@ function cheapCodexMetaFromFile(filePath, names) {
   const projectDir = cwd ? normProjectDir(cwd) : "codex-global"
   const projectPath = `codex:${projectDir}`
   const cacheEntry = loadSidebarCache()._map.get(sessionId)
+  const isSubagent = sessionMeta.thread_source === "subagent" ||
+    (typeof sessionMeta.source === "object" && sessionMeta.source?.subagent != null)
+  const parentSessionId = sessionMeta.forked_from_id ??
+    sessionMeta.parent_thread_id ??
+    sessionMeta.source?.subagent?.thread_spawn?.parent_thread_id ??
+    null
+  const subagentNickname = sessionMeta.agent_nickname ??
+    sessionMeta.source?.subagent?.thread_spawn?.agent_nickname ??
+    null
   const firstUser = rows.find(r => r?.type === "event_msg" && r?.payload?.type === "user_message")
-  const firstName =
-    typeof firstUser?.payload?.message === "string"
+  const firstName = isSubagent && typeof subagentNickname === "string" && subagentNickname.trim()
+    ? subagentNickname.trim()
+    : typeof firstUser?.payload?.message === "string"
       ? stripXml(firstUser.payload.message).replace(/\s+/g, " ").trim().slice(0, 80)
       : cacheEntry?.firstName ?? null
-  const isSubagent = typeof sessionMeta.source === "object" && sessionMeta.source?.subagent != null
-  const parentSessionId = sessionMeta.forked_from_id ?? sessionMeta.source?.subagent?.thread_spawn?.parent_thread_id ?? null
   return {
     id: sessionId,
     projectPath,
@@ -420,6 +429,50 @@ function cheapCodexMetaFromFile(filePath, names) {
     lastUsedModel: turnContext.model ?? cacheEntry?.lastUsedModel ?? null,
     ...(isSubagent ? { isSidechain: true, parentSessionId, agentType: "subagent" } : {}),
   }
+}
+
+/** Live-scan Codex rollout files for subagents of a parent (cache backfill on deep links). */
+function findCodexSubagentsForParent(parentSessionId, names = {}) {
+  if (!parentSessionId || !existsSync(CODEX_SESSIONS_ROOT)) return []
+  const out = []
+  for (const filePath of listCodexSessionFiles()) {
+    const rows = readJsonlPrefixRows(filePath)
+    const sessionMeta = rows.find(r => r?.type === "session_meta")?.payload ?? {}
+    const parentId = sessionMeta.forked_from_id ??
+      sessionMeta.parent_thread_id ??
+      sessionMeta.source?.subagent?.thread_spawn?.parent_thread_id ??
+      null
+    if (parentId !== parentSessionId) continue
+    const meta = cheapCodexMetaFromFile(filePath, names)
+    if (meta) out.push(meta)
+  }
+  return out
+}
+
+function backfillPinnedSessionLinkage(pinSessionId) {
+  if (!pinSessionId) return []
+  const pinned = getSidebarEntry(pinSessionId)
+  if (!pinned?.id || pinned.isSidechain) return []
+  const names = loadConfig().names ?? {}
+  const changed = []
+  for (const meta of findCodexSubagentsForParent(pinSessionId, names)) {
+    const existing = getSidebarEntry(meta.id)
+    if (existing?.isSidechain && existing.parentSessionId === pinSessionId) continue
+    const { changed: c, entry } = updateSidebarCacheEntry(meta.id, {
+      projectPath: meta.projectPath,
+      source: meta.source ?? "codex",
+      messageCount: meta.messageCount ?? 0,
+      userMessageCount: meta.userMessageCount ?? null,
+      firstName: meta.firstName ?? null,
+      lastActivity: meta.lastActivity,
+      mtime: meta.lastActivity,
+      isSidechain: meta.isSidechain,
+      parentSessionId: meta.parentSessionId,
+      agentType: meta.agentType,
+    })
+    if (c) changed.push(entry)
+  }
+  return changed
 }
 
 function loadRecentCodexProjectsCheap(limit = RECENT_CODEX_SEED_LIMIT) {

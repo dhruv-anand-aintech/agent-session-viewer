@@ -1211,8 +1211,12 @@ function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
   const sessionId = sessionMeta.id ?? path.basename(filePath, ".jsonl")
   if (!sessionId) return null
 
-  const isSubagent = typeof sessionMeta.source === "object" && sessionMeta.source?.subagent != null
-  const parentSessionId = sessionMeta.forked_from_id ?? sessionMeta.source?.subagent?.thread_spawn?.parent_thread_id ?? null
+  const isSubagent = sessionMeta.thread_source === "subagent" ||
+    (typeof sessionMeta.source === "object" && sessionMeta.source?.subagent != null)
+  const parentSessionId = sessionMeta.forked_from_id ??
+    sessionMeta.parent_thread_id ??
+    sessionMeta.source?.subagent?.thread_spawn?.parent_thread_id ??
+    null
 
   const cwd = sessionMeta.cwd ?? turnContext.cwd ?? ""
   const projectDir = cwd ? normProjectDir(cwd) : "codex-global"
@@ -1354,9 +1358,14 @@ function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
   if (!out.length) return null
 
   const firstUserText = out.find(m => m.message?.role === "user" && typeof m.message?.content === "string")?.message?.content
-  const firstName = typeof firstUserText === "string"
-    ? firstUserText.replace(/\s+/g, " ").trim().slice(0, 80)
-    : null
+  const subagentNickname = sessionMeta.agent_nickname ??
+    sessionMeta.source?.subagent?.thread_spawn?.agent_nickname ??
+    null
+  const firstName = isSubagent && typeof subagentNickname === "string" && subagentNickname.trim()
+    ? subagentNickname.trim()
+    : typeof firstUserText === "string"
+      ? firstUserText.replace(/\s+/g, " ").trim().slice(0, 80)
+      : null
   const lastActivity = out[out.length - 1]?.timestamp ?? new Date(fileMtimeMs).toISOString()
   const userMessageCount = out.filter(m => m.message?.role === "user" && typeof m.message?.content === "string" && m.message.content.trim()).length
 

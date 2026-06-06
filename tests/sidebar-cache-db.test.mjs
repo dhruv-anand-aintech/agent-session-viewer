@@ -143,6 +143,22 @@ describe("sidebar-cache-db", () => {
     assert.equal(got.agentType, "subagent")
   })
 
+  it("upserts when sidechain metadata is added to an existing entry", () => {
+    openSidebarCacheDb(configDir)
+    const base = sampleEntry("sess-1", "2026-06-06T12:00:00.000Z")
+    upsertSidebarEntry(base)
+    const { changed } = upsertSidebarEntry({
+      ...base,
+      isSidechain: true,
+      parentSessionId: "parent-1",
+      agentType: "subagent",
+    })
+    assert.equal(changed, true)
+    const got = getSidebarEntry("sess-1")
+    assert.equal(got.isSidechain, true)
+    assert.equal(got.parentSessionId, "parent-1")
+  })
+
   it("getTopSidebarEntries(0) returns all sessions", () => {
     openSidebarCacheDb(configDir)
     replaceAllSidebarEntries([
