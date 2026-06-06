@@ -195,19 +195,73 @@ function WebCard({ name, input, result }: { name: string; input: Record<string, 
   )
 }
 
-function AgentCard({ input }: { input: Record<string, unknown> }) {
+function parseSpawnAgentResult(result?: string): { agentId?: string; nickname?: string; error?: string } | null {
+  if (!result?.trim()) return null
+  try {
+    const parsed = JSON.parse(result) as { agent_id?: string; nickname?: string }
+    if (parsed.agent_id) return { agentId: parsed.agent_id, nickname: parsed.nickname }
+  } catch { /* plain-text error */ }
+  if (/failed|error/i.test(result)) return { error: result.trim() }
+  return null
+}
+
+function AgentCard({
+  name,
+  input,
+  result,
+  projectPath,
+}: {
+  name: string
+  input: Record<string, unknown>
+  result?: string
+  projectPath?: string
+}) {
   const [open, setOpen] = useState(false)
-  const desc = String(input.description ?? "")
-  const prompt = String(input.prompt ?? "")
+  const isSpawn = name === "spawn_agent"
+  const desc = String(input.description ?? input.message ?? input.prompt ?? "")
+  const prompt = String(input.prompt ?? input.message ?? "")
+  const spawn = isSpawn ? parseSpawnAgentResult(result) : null
+  const sessionHref = spawn?.agentId && projectPath
+    ? `/sessions?s=${encodeURIComponent(`${projectPath}/${spawn.agentId}`)}`
+    : null
+  const headerLabel = isSpawn ? "Spawn sub-agent" : "Agent"
+  const headerDesc = spawn?.nickname
+    ? spawn.nickname
+    : spawn?.error
+      ? spawn.error.slice(0, 60)
+      : desc.slice(0, 60) + (desc.length > 60 ? "…" : "")
   return (
     <div className="pp-tool-card pp-agent">
       <div className="pp-tool-header" onClick={() => setOpen(!open)}>
         <span className="pp-tool-icon">🤖</span>
-        <span className="pp-tool-label">Agent</span>
-        <span className="pp-tool-desc">{desc.slice(0, 60)}{desc.length > 60 ? "…" : ""}</span>
+        <span className="pp-tool-label">{headerLabel}</span>
+        <span className="pp-tool-desc">{headerDesc}</span>
+        {sessionHref && (
+          <a
+            className="pp-agent-link"
+            href={sessionHref}
+            onClick={e => e.stopPropagation()}
+            title="Open sub-agent session"
+          >
+            ⤷
+          </a>
+        )}
         <span className="pp-fold-arrow">{open ? "▾" : "▸"}</span>
       </div>
-      {open && <pre className="pp-file-body">{prompt.slice(0, 2000)}</pre>}
+      {open && (
+        <div className="pp-bash-body">
+          {prompt && <pre className="pp-file-body">{prompt.slice(0, 2000)}</pre>}
+          {spawn?.agentId && (
+            <div className="pp-agent-spawn-meta">
+              {spawn.nickname && <span>{spawn.nickname}</span>}
+              <code>{spawn.agentId}</code>
+              {sessionHref && <a href={sessionHref}>Open session →</a>}
+            </div>
+          )}
+          {spawn?.error && <pre className="pp-bash-result">{spawn.error}</pre>}
+          {!isSpawn && result && <pre className="pp-bash-result">{result.slice(0, 3000)}</pre>}
+        </div>
+      )}
     </div>
   )
 }
@@ -236,7 +290,15 @@ function GenericMcpCard({ name, input, result }: { name: string; input: Record<s
 
 // ── Tool card dispatcher ──────────────────────────────────────────────────────
 
-function ToolCard({ block, resultMap }: { block: ContentBlock; resultMap: Map<string, string> }) {
+function ToolCard({
+  block,
+  resultMap,
+  projectPath,
+}: {
+  block: ContentBlock
+  resultMap: Map<string, string>
+  projectPath?: string
+}) {
   const name = block.name ?? ""
   const input = (block.input ?? {}) as Record<string, unknown>
   const result = block.id ? resultMap.get(block.id) : undefined
@@ -248,7 +310,7 @@ function ToolCard({ block, resultMap }: { block: ContentBlock; resultMap: Map<st
   if (cat === "edit") return <FileEditCard input={input} />
   if (cat === "glob" || cat === "grep") return <SearchCard name={name} input={input} result={result} />
   if (cat === "web-search" || cat === "web-fetch") return <WebCard name={name} input={input} result={result} />
-  if (cat === "agent") return <AgentCard input={input} />
+  if (cat === "agent") return <AgentCard name={name} input={input} result={result} projectPath={projectPath} />
   return <GenericMcpCard name={name} input={input} result={result} />
 }
 
@@ -282,7 +344,17 @@ function buildResultMap(content: ContentBlock[]): Map<string, string> {
   return map
 }
 
-function AssistantMessage({ content, nextMsg, timestamp }: { content: string | ContentBlock[]; nextMsg?: SessionMessage; timestamp?: string }) {
+function AssistantMessage({
+  content,
+  nextMsg,
+  timestamp,
+  projectPath,
+}: {
+  content: string | ContentBlock[]
+  nextMsg?: SessionMessage
+  timestamp?: string
+  projectPath?: string
+}) {
   // Tool results live in the NEXT user message — merge both sources
   const nextContent = Array.isArray(nextMsg?.message?.content) ? nextMsg.message.content as ContentBlock[] : []
 
@@ -310,7 +382,7 @@ function AssistantMessage({ content, nextMsg, timestamp }: { content: string | C
         <div className="pp-assistant-bubble">
           {blocks.map((b, i) => {
             if (b.type === "thinking") return <ThinkingCard key={i} text={b.thinking ?? ""} />
-            if (b.type === "tool_use") return <ToolCard key={i} block={b} resultMap={resultMap} />
+            if (b.type === "tool_use") return <ToolCard key={i} block={b} resultMap={resultMap} projectPath={projectPath} />
             if (b.type === "text" && b.text) return <div key={i} className="pp-assistant-text"><MarkdownContent text={b.text} /></div>
             return null
           })}
@@ -378,7 +450,18 @@ function SystemRow({ label, summary, timestamp }: { label: string; summary: stri
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-export default memo(function PrettyMessageBlock({ msg, index, nextMsg }: { msg: SessionMessage; index?: number; nextMsg?: SessionMessage; source?: string }) {
+export default memo(function PrettyMessageBlock({
+  msg,
+  index,
+  nextMsg,
+  projectPath,
+}: {
+  msg: SessionMessage
+  index?: number
+  nextMsg?: SessionMessage
+  source?: string
+  projectPath?: string
+}) {
   if (msg.type === "file-history-snapshot") return null
   if (msg.type === "progress") return null  // hide progress events in pretty mode
   const role = msg.message?.role
@@ -404,14 +487,14 @@ export default memo(function PrettyMessageBlock({ msg, index, nextMsg }: { msg: 
         <div className="pp-subagent-body">
           {role === "user"
             ? <UserMessage content={msg.message.content} />
-            : <AssistantMessage content={msg.message.content} nextMsg={nextMsg} />}
+            : <AssistantMessage content={msg.message.content} nextMsg={nextMsg} projectPath={projectPath} />}
         </div>
       </div>
     )
   }
 
   if (role === "user") return <UserMessage content={msg.message.content} timestamp={tsTitle} />
-  return <AssistantMessage content={msg.message.content} nextMsg={nextMsg} timestamp={tsTitle} />
+  return <AssistantMessage content={msg.message.content} nextMsg={nextMsg} timestamp={tsTitle} projectPath={projectPath} />
 })
 
 export function charCountMsg(msg: SessionMessage): number {

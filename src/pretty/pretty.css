@@ -80,6 +80,33 @@
 .pp-subagent-body .pp-user-row { padding-left: 0; padding-right: 0; padding-top: 4px; }
 .pp-subagent-body .pp-assistant-row { padding-left: 0; padding-top: 4px; }
 
+.pp-agent-link {
+  margin-left: auto;
+  margin-right: 4px;
+  color: hsl(263, 50%, 70%);
+  text-decoration: none;
+  font-size: 12px;
+  opacity: 0.85;
+}
+.pp-agent-link:hover { opacity: 1; }
+.pp-agent-spawn-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-300);
+  border-top: 0.5px solid var(--border-100);
+}
+.pp-agent-spawn-meta code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-200);
+}
+.pp-agent-spawn-meta a { color: hsl(263, 50%, 70%); text-decoration: none; }
+.pp-agent-spawn-meta a:hover { text-decoration: underline; }
+
 /* ── Turn wrapper (groups user+assistant into conversation turn) ──────────── */
 .pp-turn { padding: 8px 0 8px; }
 

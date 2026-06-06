@@ -672,7 +672,13 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
               data-msg-index={globalOffset + startIdx + i}
             >
               {isNew && <span className="new-msg-dot" title="New since load" />}
-              <Block msg={msg} index={globalOffset + startIdx + i} nextMsg={visible[i + 1]} source={sessionMeta.source} />
+              <Block
+                msg={msg}
+                index={globalOffset + startIdx + i}
+                nextMsg={visible[i + 1]}
+                source={sessionMeta.source}
+                {...(prettyMode ? { projectPath: projectDir } : {})}
+              />
               {sugg && (
                 <div className="suggestion-pill" title={sugg.text}>
                   <span className="suggestion-icon">{chosen ? "✓" : "💡"}</span>
