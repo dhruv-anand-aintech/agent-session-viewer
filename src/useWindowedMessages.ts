@@ -10,7 +10,7 @@ import { trackedEventSource } from "./sse-lifecycle"
 
 export const CHUNK = 60
 export const MAX_DOM = 180
-const INITIAL_TAIL = 5
+const INITIAL_TAIL = 20
 const IDB_KEY = (projectDir: string, sessionId: string) => `sess/${projectDir}/${sessionId}`
 
 const CHAR_TARGET = 5000

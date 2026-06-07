@@ -29,6 +29,32 @@ export function useCapabilities(): Capabilities {
   return caps
 }
 
+function sourceFromProjectPath(projectPath: string): string {
+  const match = projectPath.match(/^([a-z-]+):/)
+  return match?.[1] ?? "claude"
+}
+
+function displayNameFromProjectPath(projectPath: string): string {
+  const withoutSource = projectPath.replace(/^[a-z-]+:/, "")
+  const parts = withoutSource.split("/").filter(Boolean)
+  return parts[parts.length - 1] || projectPath
+}
+
+function deepLinkProject(projectPath: string, sessionId: string): ProjectData {
+  return {
+    path: projectPath,
+    displayName: displayNameFromProjectPath(projectPath),
+    sessions: [{
+      id: sessionId,
+      projectPath,
+      lastActivity: "",
+      isActive: false,
+      messageCount: 0,
+      source: sourceFromProjectPath(projectPath),
+    }],
+  }
+}
+
 export function useProjects() {
   const [projects, setProjects] = useState<ProjectData[]>([])
   const [connected, setConnected] = useState(false)
@@ -44,13 +70,17 @@ export function useProjects() {
 
   useEffect(() => {
     const deepLink = parseUrlSession()
-    const pinQs = deepLink?.session ? `&pinSession=${encodeURIComponent(deepLink.session)}` : ""
+    const pinQs = deepLink?.session
+      ? `&pinSession=${encodeURIComponent(deepLink.session)}&pinProject=${encodeURIComponent(deepLink.project)}`
+      : ""
     const qs = listMode === "recent" ? `?maxSessions=${RECENT_SIDEBAR_SESSIONS}${pinQs}` : ""
     const pinSessionIds = deepLink?.session ? new Set([deepLink.session]) : undefined
     queueMicrotask(() => {
       setProjectsLoading(true)
       setProjectsUpdating(true)
-      if (listMode === "recent" || projectsRef.current.length === 0) setProjects([])
+      if (listMode === "recent" || projectsRef.current.length === 0) {
+        setProjects(deepLink?.session ? [deepLinkProject(deepLink.project, deepLink.session)] : [])
+      }
       setTotalSessions(null)
     })
     const es = trackedEventSource(`/api/stream${qs}`)

@@ -268,7 +268,45 @@ function loadCachedSidebarState() {
 /**
  * Sidebar cache only — no live platform scan. Top N via indexed SQLite query.
  */
-function loadProjectsFromSidebarCache(maxSessions, pinSessionId = null) {
+function loadPinnedSessionEntry(pinProjectPath, pinSessionId, names) {
+  if (!pinProjectPath || !pinSessionId) return null
+  const msgs = loadSessionMessages(pinProjectPath, pinSessionId)
+  if (!Array.isArray(msgs) || !msgs.length) return null
+  const source = pinProjectPath.match(/^([a-z-]+):/)?.[1] ?? "claude"
+  const firstUserText = msgs.find(m => m.message?.role === "user" && typeof m.message?.content === "string")
+    ?.message?.content
+  const lastActivity = msgs[msgs.length - 1]?.timestamp ?? ""
+  return {
+    id: pinSessionId,
+    projectPath: pinProjectPath,
+    projectDisplayName: displayNameForProjectPath(pinProjectPath),
+    source,
+    messageCount: msgs.length,
+    userMessageCount: msgs.filter(m => m.message?.role === "user").length,
+    firstName: typeof firstUserText === "string"
+      ? firstUserText.replace(/\s+/g, " ").trim().slice(0, 80)
+      : pinSessionId.slice(0, 8),
+    lastActivity,
+    mtime: lastActivity,
+    customName: names[`${pinProjectPath}/${pinSessionId}`] ?? null,
+  }
+}
+
+function upsertSidebarCacheFromLoadedSession(projectPath, sessionId) {
+  const names = loadConfig().names ?? {}
+  const entry = loadPinnedSessionEntry(projectPath, sessionId, names)
+  if (!entry) return
+  const { changed, entry: cached } = updateSidebarCacheEntry(sessionId, entry)
+  if (changed) sseBroadcastSessionUpserts([cached])
+}
+
+function displayNameForProjectPath(projectPath) {
+  const withoutSource = String(projectPath ?? "").replace(/^[a-z-]+:/, "")
+  const parts = withoutSource.split("/").filter(Boolean)
+  return parts[parts.length - 1] || String(projectPath ?? "")
+}
+
+function loadProjectsFromSidebarCache(maxSessions, pinSessionId = null, pinProjectPath = null) {
   initSidebarCache()
   const _t0 = performance.now()
   const total = getSidebarSessionCount()
@@ -278,7 +316,7 @@ function loadProjectsFromSidebarCache(maxSessions, pinSessionId = null) {
   let entries = Number.isFinite(n) && n > 0 ? getTopSidebarEntries(n) : getAllSidebarEntries()
   if (pinSessionId) {
     backfillPinnedSessionLinkage(pinSessionId)
-    const pinned = getSidebarEntry(pinSessionId)
+    const pinned = getSidebarEntry(pinSessionId) ?? loadPinnedSessionEntry(pinProjectPath, pinSessionId, names)
     if (pinned?.id) entries = expandSidebarLinkageEntries([...entries, pinned])
   }
   const projects = sortProjectGroups(groupCacheSessionsToProjects(entries, names))
@@ -1184,9 +1222,9 @@ async function loadPlatformProjectsHybrid() {
 }
 
 /** Progressive recent sidebar: cache-only burst from SQLite, then background session deltas. */
-async function streamRecentSidebarInitial(res, maxSessions, pinSessionId = null) {
+async function streamRecentSidebarInitial(res, maxSessions, pinSessionId = null, pinProjectPath = null) {
   const _tBurst0 = performance.now()
-  const { projects, total } = loadProjectsFromSidebarCache(maxSessions, pinSessionId)
+  const { projects, total } = loadProjectsFromSidebarCache(maxSessions, pinSessionId, pinProjectPath)
   if (projects.length) {
     sseWrite(res, "projects", projects)
     sseWrite(res, "projects_meta", { total })
@@ -2903,6 +2941,7 @@ const server = http.createServer(async (req, res) => {
     const maxParsed = maxRaw != null && maxRaw !== "" ? Number(maxRaw) : null
     const maxSessions = Number.isFinite(maxParsed) && maxParsed > 0 ? maxParsed : null
     const pinSessionId = url.searchParams.get("pinSession")?.trim() || null
+    const pinProjectPath = url.searchParams.get("pinProject")?.trim() || null
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -2911,7 +2950,7 @@ const server = http.createServer(async (req, res) => {
     })
     res.write(": connected\n\n")  // flush headers immediately so EventSource.onopen fires now
     if (maxSessions != null) {
-      await streamRecentSidebarInitial(res, maxSessions, pinSessionId)
+      await streamRecentSidebarInitial(res, maxSessions, pinSessionId, pinProjectPath)
     } else {
       const { projects, total } = await loadProjectsBundle(0)
       res.write(`event: projects_meta\ndata: ${JSON.stringify({ total })}\n\n`)
@@ -3185,6 +3224,7 @@ const server = http.createServer(async (req, res) => {
         const fastMs = (performance.now() - t0fast).toFixed(1)
         if (quick?.msgs?.length) {
           jsonFromWindow(quick.msgs, quick.total, `codex-tail ${fastMs}ms`)
+          setImmediate(() => upsertSidebarCacheFromLoadedSession(projectPath, sessionId))
           setImmediate(() => {
             if (msgCacheHas(cacheKey)) return
             const warm = readCodexSessionTailFast(projectPath, sessionId, MSG_CACHE_TAIL)
@@ -3212,6 +3252,7 @@ const server = http.createServer(async (req, res) => {
       debugLog(`[perf ${wallClock()}] /api/session ondemand ${source}:${shortId} load=${ondemandMs}ms hit=${ondemand != null}`)
       if (ondemand != null) {
         cacheAndRespond(ondemand, ondemand.length, `ondemand ${ondemandMs}ms`)
+        setImmediate(() => upsertSidebarCacheFromLoadedSession(projectPath, sessionId))
         return
       }
       res.writeHead(404); res.end("Not Found"); return
