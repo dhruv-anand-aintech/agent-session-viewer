@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from "react"
+import { Bot, Clock, User } from "lucide-react"
 import type { SessionMeta, ProjectData } from "./types"
 import { highlightTermsInPlainText } from "./searchHighlight"
 import { mergeSidebarSearchResultItems } from "./sidebarSearchState"
@@ -26,6 +27,42 @@ function formatPlatformLabel(source?: string): string {
   const s = (source ?? "claude").trim()
   if (!s || s === "claude") return "Claude"
   return s.charAt(0).toUpperCase() + s.slice(1)
+}
+
+function sessionCountLabel(s: SessionMeta): { user: number | null; assistant: number | null; title: string } {
+  if (s.userMessageCount == null) {
+    return {
+      user: null,
+      assistant: null,
+      title: `${s.messageCount} total records; user-message count not indexed yet`,
+    }
+  }
+  const assistant = Math.max(0, s.messageCount - s.userMessageCount)
+  return {
+    user: s.userMessageCount,
+    assistant,
+    title: `${s.userMessageCount} user messages / ${assistant} assistant and tool records`,
+  }
+}
+
+function SessionColumnsHeader() {
+  return (
+    <div className="sidebar-columns-header" aria-hidden="true">
+      <span />
+      <span />
+      <span />
+      <span />
+      <span className="sidebar-count-heading" title="User messages">
+        <User size={11} strokeWidth={1.8} />
+      </span>
+      <span className="sidebar-count-heading" title="Assistant and tool records">
+        <Bot size={11} strokeWidth={1.8} />
+      </span>
+      <span className="sidebar-time-heading" title="Age">
+        <Clock size={11} strokeWidth={1.8} />
+      </span>
+    </div>
+  )
 }
 
 function matchesSidebarSearchFields(query: string, ...fields: Array<string | undefined | null>): boolean {
@@ -81,6 +118,7 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
 
   const titleQuery = (highlightTitleQuery ?? "").trim()
   const showTitleHits = titleQuery.length > 0
+  const countLabel = sessionCountLabel(s)
 
   const displayName = customName || s.firstName || s.id.slice(0, 8)
 
@@ -130,9 +168,9 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
           <span className="platform-icon-wrap" aria-hidden="true">
             <AgentIcon source={s.source} />
           </span>
-          {isRecentlyActive(s.lastActivity) && <span className="ss-live">●</span>}
-          {s.isSidechain && <span className="ss-subagent-icon" title="Sub-agent session">⤷</span>}
           <span className="ss-name">
+            {isRecentlyActive(s.lastActivity) && <span className="ss-live">●</span>}
+            {s.isSidechain && <span className="ss-subagent-icon" title="Sub-agent session">⤷</span>}
             {showTitleHits ? highlightTermsInPlainText(displayName, titleQuery) : displayName}
           </span>
           {(searchMatch || searchHint) && (
@@ -167,12 +205,13 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
             </button>
           )}
           <button className="ss-rename-btn" onClick={startEdit} title="Rename">✎</button>
-          <div className="ss-meta">
-            <span className="ss-count">
-              {s.userMessageCount != null ? `${s.userMessageCount}/${s.messageCount}` : s.messageCount}
-            </span>
-            {s.lastActivity && <span className="ss-time">{relativeTime(s.lastActivity)}</span>}
-          </div>
+          <span className="ss-count ss-count-user" title={countLabel.title} aria-label={countLabel.title}>
+            {countLabel.user ?? "?"}
+          </span>
+          <span className="ss-count ss-count-bot" title={countLabel.title} aria-label={countLabel.title}>
+            {countLabel.assistant ?? s.messageCount}
+          </span>
+          <span className="ss-time">{s.lastActivity ? relativeTime(s.lastActivity) : ""}</span>
         </>
       )}
     </div>
@@ -366,12 +405,19 @@ export function Sidebar({ projects, projectsLoading, projectsUpdating, totalSess
     })
   }
 
-  // Deep-link / selection on a parent: expand subagents once children are in projects state.
+  // Deep-link / selection: reveal the active parent or active subagent.
   useEffect(() => {
     if (!activeSessionIdProp || projectsLoading) return
     const flat = projects.flatMap(p => p.sessions.map(s => ({ s, projectPath: s.projectPath || p.path })))
     const active = flat.find(({ s }) => s.id === activeSessionIdProp)
-    if (!active || active.s.isSidechain) return
+    if (!active) return
+    if (active.s.isSidechain && active.s.parentSessionId) {
+      setExpandedParents(prev => (
+        prev.has(active.s.parentSessionId!) ? prev : new Set(prev).add(active.s.parentSessionId!)
+      ))
+      return
+    }
+    if (active.s.isSidechain) return
     const childCount = flat.filter(({ s }) => s.isSidechain && s.parentSessionId === activeSessionIdProp).length
     if (childCount === 0) return
     setExpandedParents(prev => (prev.has(activeSessionIdProp) ? prev : new Set(prev).add(activeSessionIdProp)))
@@ -526,6 +572,7 @@ export function Sidebar({ projects, projectsLoading, projectsUpdating, totalSess
               <span>{loadingLabel}</span>
             </div>
           )}
+          <SessionColumnsHeader />
           <div className="sidebar-sessions-scroll" ref={sessionsScrollRef}>
             {searchBrowseActive ? (
               <>

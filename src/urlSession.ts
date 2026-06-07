@@ -2,6 +2,14 @@
 export function parseUrlSession(search = window.location.search): { project: string; session: string } | null {
   const raw = new URLSearchParams(search).get("s")
   if (!raw) return null
+  const subagent = /^([\s\S]+)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/subagents\/[\s\S]+)$/i.exec(raw)
+  if (subagent) {
+    try {
+      return { project: decodeURIComponent(subagent[1]), session: subagent[2] }
+    } catch {
+      return null
+    }
+  }
   const m = /^([\s\S]+)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(raw)
   if (m) {
     try {

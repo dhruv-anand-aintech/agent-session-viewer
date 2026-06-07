@@ -15,9 +15,9 @@ import "./App.css"
 
 markAppInit()
 
-const SIDEBAR_MIN = 140
+const SIDEBAR_MIN = 300
 const SIDEBAR_MAX = 520
-const SIDEBAR_DEFAULT = 220
+const SIDEBAR_DEFAULT = 320
 
 export default function App() {
   const {
