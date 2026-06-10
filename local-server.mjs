@@ -1234,7 +1234,7 @@ async function loadPlatformInWorker(platform) {
     }
     const worker = new Worker(PLATFORM_LOADER_WORKER, {
       workerData: { platform },
-      resourceLimits: { maxOldGenerationSizeMb: 256, maxYoungGenerationSizeMb: 32 },
+      resourceLimits: { maxOldGenerationSizeMb: 512, maxYoungGenerationSizeMb: 64 },
     })
     worker.once("message", ({ platform: p, sessions = [], error }) => {
       if (error) console.error(`[platform-worker] ${p}: ${error}`)
@@ -2160,7 +2160,7 @@ setInterval(async () => {
 }, PLATFORM_REFRESH_MS).unref()
 
 // Memory watchdog: exit when RSS exceeds the cap so launchd (KeepAlive) restarts a fresh process.
-const WATCHDOG_MAX_RSS_MB = Number(process.env.WATCHDOG_MAX_RSS_MB ?? 1200)
+const WATCHDOG_MAX_RSS_MB = Number(process.env.WATCHDOG_MAX_RSS_MB ?? 2000)
 setInterval(() => {
   const rssMb = process.memoryUsage().rss / (1024 * 1024)
   if (rssMb > WATCHDOG_MAX_RSS_MB) {
