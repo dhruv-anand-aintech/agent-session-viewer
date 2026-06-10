@@ -3443,6 +3443,26 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  // Archived (hidden) sessions — persisted server-side so the list follows the
+  // backend across origins (localhost + any tunnel domain share one list).
+  if (url.pathname === "/api/archived" && req.method === "GET") {
+    json({ keys: loadConfig().archived ?? [] })
+    return
+  }
+  if (url.pathname === "/api/archived" && req.method === "POST") {
+    const body = await readBody()
+    const config = loadConfig()
+    const set = new Set(config.archived ?? [])
+    const key = String(body.key ?? "")
+    if (!key) { res.writeHead(400); res.end("Missing key"); return }
+    if (body.archived) set.add(key)
+    else set.delete(key)
+    config.archived = [...set]
+    saveConfig(config)
+    json({ ok: true, count: set.size })
+    return
+  }
+
   // PUT /api/names/:project/:id
   const renameMatch = url.pathname.match(/^\/api\/names\/([^/]+)\/([^/]+)$/)
   if (renameMatch && req.method === "PUT") {

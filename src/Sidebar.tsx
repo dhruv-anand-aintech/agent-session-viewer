@@ -99,7 +99,7 @@ function useIsMobile() {
   return mobile
 }
 
-function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, subagentsExpanded, onToggleSubagents, searchHint, searchMatch, highlightTitleQuery }: {
+function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, subagentsExpanded, onToggleSubagents, searchHint, searchMatch, highlightTitleQuery, archived, onToggleArchive }: {
   s: SessionMeta
   projectPath: string
   isSelected: boolean
@@ -110,6 +110,8 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
   searchHint?: string
   searchMatch?: SessionSearchMatch
   highlightTitleQuery?: string
+  archived?: boolean
+  onToggleArchive?: () => void
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState("")
@@ -204,7 +206,22 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
               {subagentsExpanded ? "▾" : "▸"}{subagentCount}
             </button>
           )}
-          <button className="ss-rename-btn" onClick={startEdit} title="Rename">✎</button>
+          <span className="ss-row-actions">
+            {onToggleArchive && (
+              <button
+                className="ss-archive-btn"
+                onClick={e => { e.stopPropagation(); onToggleArchive() }}
+                title={archived ? "Unarchive (show again)" : "Archive (hide from list)"}
+              >
+                {archived ? (
+                  <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden><path d="M1.5 4.5h11M2.5 4.5v7a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-7M1.5 4.5l1-2.5h9l1 2.5M7 10.5V7M5.2 8.8 7 7l1.8 1.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                ) : (
+                  <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden><path d="M1.5 4.5h11M2.5 4.5v7a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-7M1.5 4.5l1-2.5h9l1 2.5M5.5 7.5h3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                )}
+              </button>
+            )}
+            <button className="ss-rename-btn" onClick={startEdit} title="Rename">✎</button>
+          </span>
           <span className="ss-count ss-count-user" title={countLabel.title} aria-label={countLabel.title}>
             {countLabel.user ?? "?"}
           </span>
@@ -218,7 +235,7 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
   )
 }
 
-export function Sidebar({ projects, projectsLoading, projectsUpdating, totalSessions, listMode, sessionsTruncated, onLoadAllSessions, activeSessionId: activeSessionIdProp, onSelect, width, onDragStart, mobileOpen, onMobileClose }: {
+export function Sidebar({ projects: projectsProp, projectsLoading, projectsUpdating, totalSessions, listMode, sessionsTruncated, onLoadAllSessions, activeSessionId: activeSessionIdProp, onSelect, width, onDragStart, mobileOpen, onMobileClose }: {
   projects: ProjectData[]
   projectsLoading: boolean
   projectsUpdating: boolean
@@ -240,6 +257,48 @@ export function Sidebar({ projects, projectsLoading, projectsUpdating, totalSess
   const [sidebarBottomInView, setSidebarBottomInView] = useState(false)
   const sessionsScrollRef = useRef<HTMLDivElement>(null)
   const sidebarBottomRef = useRef<HTMLDivElement>(null)
+
+  const [archivedKeys, setArchivedKeys] = useState<Set<string>>(new Set())
+  const [showArchived, setShowArchived] = useState(false)
+
+  useEffect(() => {
+    fetch("/api/archived", { credentials: "include" })
+      .then(r => (r.ok ? r.json() : { keys: [] }))
+      .then((data: { keys?: string[] }) => setArchivedKeys(new Set(data.keys ?? [])))
+      .catch(() => {})
+  }, [])
+
+  const archiveKeyFor = (s: SessionMeta, fallbackPath: string) => `${s.projectPath || fallbackPath}/${s.id}`
+
+  function toggleArchive(key: string) {
+    setArchivedKeys(prev => {
+      const next = new Set(prev)
+      const nowArchived = !next.has(key)
+      if (nowArchived) next.add(key)
+      else next.delete(key)
+      fetch("/api/archived", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ key, archived: nowArchived }),
+      }).catch(() => {})
+      return next
+    })
+  }
+
+  const projects = useMemo(() => {
+    if (showArchived || archivedKeys.size === 0) return projectsProp
+    return projectsProp
+      .map(p => ({ ...p, sessions: p.sessions.filter(s => !archivedKeys.has(archiveKeyFor(s, p.path))) }))
+      .filter(p => p.sessions.length > 0)
+  }, [projectsProp, archivedKeys, showArchived])
+
+  const archivedCount = useMemo(() => {
+    if (archivedKeys.size === 0) return 0
+    let n = 0
+    for (const p of projectsProp) for (const s of p.sessions) if (archivedKeys.has(archiveKeyFor(s, p.path))) n++
+    return n
+  }, [projectsProp, archivedKeys])
 
   const [sidebarSearchQuery, setSidebarSearchQuery] = useState("")
   const [sidebarSearchLoading, setSidebarSearchLoading] = useState(false)
@@ -530,6 +589,16 @@ export function Sidebar({ projects, projectsLoading, projectsUpdating, totalSess
               ))}
             </div>
           )}
+          {archivedCount > 0 && (
+            <button
+              type="button"
+              className={`sidebar-archived-toggle ${showArchived ? "active" : ""}`}
+              onClick={() => setShowArchived(v => !v)}
+              title={showArchived ? "Hide archived sessions" : "Show archived sessions"}
+            >
+              {showArchived ? `Hide archived (${archivedCount})` : `Archived (${archivedCount})`}
+            </button>
+          )}
           <div className="sidebar-search-row">
             <span className="sidebar-search-icon" aria-hidden><svg width="13" height="13" viewBox="0 0 13 13" fill="none"><circle cx="5.5" cy="5.5" r="3.75" stroke="currentColor" strokeWidth="1.4"/><line x1="8.6" y1="8.6" x2="12" y2="12" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/></svg></span>
             <input
@@ -594,6 +663,8 @@ export function Sidebar({ projects, projectsLoading, projectsUpdating, totalSess
                     onSelect={() => handleSelect(row.projectPath, row.sessionId)}
                     highlightTitleQuery={row.highlightTitleQuery}
                     searchMatch={row.searchMatch}
+                    archived={archivedKeys.has(archiveKeyFor(row.s as SessionMeta, row.projectPath))}
+                    onToggleArchive={() => toggleArchive(archiveKeyFor(row.s as SessionMeta, row.projectPath))}
                   />
                 ))}
               </>
@@ -633,6 +704,8 @@ export function Sidebar({ projects, projectsLoading, projectsUpdating, totalSess
                               subagentCount={children.length}
                               subagentsExpanded={expanded}
                               onToggleSubagents={children.length > 0 ? () => toggleParent(s.id) : undefined}
+                              archived={archivedKeys.has(archiveKeyFor(s, project.path))}
+                              onToggleArchive={() => toggleArchive(archiveKeyFor(s, project.path))}
                             />
                             {expanded && children.map(cs => (
                               <SessionItem
@@ -641,6 +714,8 @@ export function Sidebar({ projects, projectsLoading, projectsUpdating, totalSess
                                 projectPath={cs.projectPath || project.path}
                                 isSelected={activeSessionIdProp === cs.id}
                                 onSelect={() => handleSelect(cs.projectPath || project.path, cs.id)}
+                                archived={archivedKeys.has(archiveKeyFor(cs, project.path))}
+                                onToggleArchive={() => toggleArchive(archiveKeyFor(cs, project.path))}
                               />
                             ))}
                           </div>
@@ -653,6 +728,8 @@ export function Sidebar({ projects, projectsLoading, projectsUpdating, totalSess
                           projectPath={s.projectPath || project.path}
                           isSelected={activeSessionIdProp === s.id}
                           onSelect={() => handleSelect(s.projectPath || project.path, s.id)}
+                          archived={archivedKeys.has(archiveKeyFor(s, project.path))}
+                          onToggleArchive={() => toggleArchive(archiveKeyFor(s, project.path))}
                         />
                       ))}
                     </div>
@@ -673,6 +750,8 @@ export function Sidebar({ projects, projectsLoading, projectsUpdating, totalSess
                         subagentCount={children.length}
                         subagentsExpanded={expanded}
                         onToggleSubagents={children.length > 0 ? () => toggleParent(s.id) : undefined}
+                        archived={archivedKeys.has(archiveKeyFor(s, projectPath))}
+                        onToggleArchive={() => toggleArchive(archiveKeyFor(s, projectPath))}
                       />
                       {expanded && children.map(({ s: cs, projectPath: cp }) => (
                         <SessionItem
@@ -681,6 +760,8 @@ export function Sidebar({ projects, projectsLoading, projectsUpdating, totalSess
                           projectPath={cp}
                           isSelected={activeSessionIdProp === cs.id}
                           onSelect={() => handleSelect(cp, cs.id)}
+                          archived={archivedKeys.has(archiveKeyFor(cs, cp))}
+                          onToggleArchive={() => toggleArchive(archiveKeyFor(cs, cp))}
                         />
                       ))}
                     </div>
@@ -693,6 +774,8 @@ export function Sidebar({ projects, projectsLoading, projectsUpdating, totalSess
                     projectPath={projectPath}
                     isSelected={activeSessionIdProp === s.id}
                     onSelect={() => handleSelect(projectPath, s.id)}
+                    archived={archivedKeys.has(archiveKeyFor(s, projectPath))}
+                    onToggleArchive={() => toggleArchive(archiveKeyFor(s, projectPath))}
                   />
                 ))}
               </>

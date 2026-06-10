@@ -357,7 +357,7 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
 .sidebar {
   --sidebar-platform-col: 18px;
   --sidebar-toggle-col: 18px;
-  --sidebar-rename-col: 14px;
+  --sidebar-rename-col: 30px;
   --sidebar-count-col: 34px;
   --sidebar-time-col: 34px;
 }
@@ -418,7 +418,8 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   box-shadow: 0 4px 12px rgba(0,0,0,0.45); pointer-events: none;
 }
 .sidebar-session:hover { background: hsla(255,100%,100%,0.04); color: var(--text-100); }
-.sidebar-session:hover .ss-rename-btn { opacity: 1; }
+.sidebar-session:hover .ss-rename-btn,
+.sidebar-session:hover .ss-archive-btn { opacity: 1; }
 .sidebar-session.active { color: var(--text-100); background: hsla(255,100%,100%,0.07); }
 
 .platform-icon-wrap { justify-self: center; }
@@ -438,7 +439,7 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
 .sidebar-session.sidebar-session--multiline > .platform-icon-wrap,
 .sidebar-session.sidebar-session--multiline > .ss-count,
 .sidebar-session.sidebar-session--multiline > .ss-time,
-.sidebar-session.sidebar-session--multiline > .ss-rename-btn,
+.sidebar-session.sidebar-session--multiline > .ss-row-actions,
 .sidebar-session.sidebar-session--multiline > .ss-subagents-toggle {
   margin-top: 2px;
 }
@@ -475,7 +476,7 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
 .sidebar-session.sidechain { opacity: 0.65; padding-left: 22px; }
 .sidebar-session.sidechain.active { opacity: 1; }
 .ss-subagents-toggle { grid-column: 3; justify-self: end; }
-.ss-rename-btn { grid-column: 4; }
+.ss-row-actions { grid-column: 4; display: flex; align-items: center; gap: 2px; justify-self: end; }
 .ss-count-user { grid-column: 5; }
 .ss-count-bot { grid-column: 6; }
 .ss-time { grid-column: 7; }
@@ -499,6 +500,25 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   justify-self: end;
 }
 .ss-rename-btn:hover { color: var(--text-100); }
+.ss-archive-btn {
+  background: none; border: none; color: var(--text-400);
+  cursor: pointer; padding: 0 1px; display: inline-flex; align-items: center;
+  opacity: 0; transition: opacity 0.12s; line-height: 1;
+}
+.ss-archive-btn:hover { color: var(--text-100); }
+.sidebar-archived-toggle {
+  margin: 4px 10px 0;
+  padding: 2px 8px;
+  background: none;
+  border: 0.5px solid var(--border-100);
+  border-radius: 999px;
+  color: var(--text-400);
+  font-size: 10px;
+  cursor: pointer;
+  align-self: flex-start;
+}
+.sidebar-archived-toggle:hover { color: var(--text-100); }
+.sidebar-archived-toggle.active { color: var(--text-100); border-color: var(--text-400); }
 .ss-rename-input {
   width: 100%; background: var(--bg-300); border: 1px solid var(--accent);
   border-radius: 4px; color: var(--text-100);
