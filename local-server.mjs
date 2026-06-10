@@ -577,6 +577,18 @@ function codexTailReasoningText(payload) {
 function codexTailRowsToMessages(sessionId, rows, fallbackTs) {
   const out = []
   let seq = 0
+  // Codex emits each assistant message twice (event_msg agent_message + response_item
+  // message); skip the copy from the other stream — see buildCodexSessionResult.
+  const assistantSeen = new Map()
+  const isDuplicateAssistant = (text, source) => {
+    const prev = assistantSeen.get(text)
+    if (prev && prev !== source) {
+      assistantSeen.delete(text)
+      return true
+    }
+    assistantSeen.set(text, source)
+    return false
+  }
   const push = msg => {
     out.push({
       ...msg,
@@ -600,7 +612,7 @@ function codexTailRowsToMessages(sessionId, rows, fallbackTs) {
     }
     if (row?.type === "event_msg" && row?.payload?.type === "agent_message") {
       const text = typeof row.payload.message === "string" ? row.payload.message.trim() : ""
-      if (!text) continue
+      if (!text || isDuplicateAssistant(text, "event")) continue
       push({
         uuid: `codex-${sessionId}-tail-a-${seq++}`,
         type: "assistant",
@@ -614,7 +626,7 @@ function codexTailRowsToMessages(sessionId, rows, fallbackTs) {
     if (row?.type !== "response_item" || !row?.payload?.type) continue
     if (row.payload.type === "message" && row.payload.role === "assistant") {
       const text = codexTailAssistantText(row.payload.content)
-      if (!text) continue
+      if (!text || isDuplicateAssistant(text, "response")) continue
       push({
         uuid: `codex-${sessionId}-tail-a-${seq++}`,
         type: "assistant",

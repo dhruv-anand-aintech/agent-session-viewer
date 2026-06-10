@@ -1226,6 +1226,19 @@ function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
   let pendingToolResults = []
   let pendingTs = null
   let lastEmittedSig = ""
+  // Codex emits each assistant message twice: once as event_msg agent_message and
+  // again as response_item message. Skip the second copy regardless of which
+  // stream arrives first; a third occurrence of the same text is a real repeat.
+  const assistantSeen = new Map() // text → source ("event" | "response") of last emission
+  function isDuplicateAssistant(text, source) {
+    const prev = assistantSeen.get(text)
+    if (prev && prev !== source) {
+      assistantSeen.delete(text)
+      return true
+    }
+    assistantSeen.set(text, source)
+    return false
+  }
 
   function contentSignature(content) {
     if (typeof content === "string") return content
@@ -1295,7 +1308,7 @@ function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
     if (row.type === "event_msg" && row.payload?.type === "agent_message") {
       flushPending()
       const text = typeof row.payload.message === "string" ? row.payload.message.trim() : ""
-      if (!text) continue
+      if (!text || isDuplicateAssistant(text, "event")) continue
       pushDistinct({
         uuid: `codex-${sessionId}-a-${seq++}`,
         parentUuid: out.length > 0 ? out[out.length - 1].uuid : null,
@@ -1341,7 +1354,7 @@ function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
     if (row.payload.type === "message" && row.payload.role === "assistant") {
       flushPending()
       const text = codexAssistantTextFromContent(row.payload.content)
-      if (!text) continue
+      if (!text || isDuplicateAssistant(text, "response")) continue
       pushDistinct({
         uuid: `codex-${sessionId}-a-${seq++}`,
         parentUuid: out.length > 0 ? out[out.length - 1].uuid : null,
