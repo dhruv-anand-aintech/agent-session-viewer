@@ -61,7 +61,6 @@ export function GlobalSearch({ onNavigate, onClose, sessionTitles }: Props) {
   const [activeIdx, setActiveIdx] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
   const seqRef = useRef(0)
-  const lastAppliedSeq = useRef(0)
   const resultsRef = useRef<HTMLDivElement>(null)
 
   // Focus input on mount
@@ -90,14 +89,12 @@ export function GlobalSearch({ onNavigate, onClose, sessionTitles }: Props) {
       setMs(null)
       setError(null)
       setLoading(false)
-      lastAppliedSeq.current = id
       return
     }
     // Cache hit — apply immediately, skip fetch
     const cached = _cache.get(q)
     if (cached) {
-      if (id > lastAppliedSeq.current) {
-        lastAppliedSeq.current = id
+      if (id === seqRef.current) {
         setHits(cached.hits)
         setMs(cached.ms)
         setError(null)
@@ -119,6 +116,7 @@ export function GlobalSearch({ onNavigate, onClose, sessionTitles }: Props) {
     setLoading(true)
     ;(async () => {
       const allHits: GlobalSearchHit[] = []
+      let finalMs = 0
       try {
         const res = await fetch(`/api/search/global?q=${encodeURIComponent(q)}`, { credentials: "include" })
         if (!res.body) throw new Error("No response body")
@@ -137,27 +135,26 @@ export function GlobalSearch({ onNavigate, onClose, sessionTitles }: Props) {
             let chunk: { hits?: GlobalSearchHit[]; done?: boolean; ms?: number; error?: string }
             try { chunk = JSON.parse(line) } catch { continue }
             if (chunk.error) {
-              if (id > lastAppliedSeq.current) { lastAppliedSeq.current = id; setError(chunk.error) }
+              if (id === seqRef.current) setError(chunk.error)
             }
             if (chunk.hits?.length) {
               allHits.push(...chunk.hits)
               // Apply incrementally — show results as they stream in
-              if (id > lastAppliedSeq.current) {
-                lastAppliedSeq.current = id
+              if (id === seqRef.current) {
                 setHits([...allHits])
                 setActiveIdx(0)
               }
             }
             if (chunk.done && chunk.ms != null) {
-              if (id > lastAppliedSeq.current) setMs(chunk.ms)
+              finalMs = chunk.ms
+              if (id === seqRef.current) setMs(chunk.ms)
             }
           }
         }
         // Cache the final accumulated result
-        _cache.set(q, { hits: allHits, ms: 0 })
+        _cache.set(q, { hits: allHits, ms: finalMs })
       } catch (e: unknown) {
-        if (id > lastAppliedSeq.current) {
-          lastAppliedSeq.current = id
+        if (id === seqRef.current) {
           setError(e instanceof Error ? e.message : "Search failed")
           setHits([])
         }
