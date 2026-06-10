@@ -14,7 +14,7 @@ import https from "https"
 import { fileURLToPath } from "url"
 import { Worker } from "worker_threads"
 import { exec, execFileSync, execSync, spawnSync } from "child_process"
-import { stripXml, trimProjectsByRecentSessionCount, countSessionsInProjects } from "./shared-utils.mjs"
+import { stripXml, trimProjectsByRecentSessionCount, countSessionsInProjects, parseJsonlStream } from "./shared-utils.mjs"
 import { loadSessionMessages } from "./lib/session-message-loader.mjs"
 import { isOnDemandSessionPlatform } from "./lib/session-platform-routing.mjs"
 import { normalizeCodexRateLimit, normalizeResetTime, resetDescription } from "./lib/usage-window-normalizer.mjs"
@@ -87,7 +87,9 @@ try {
 } catch {}
 
 const PLATFORM_LOADER_WORKER = join(__dirname, "lib", "platform-loader-worker.mjs")
-const STREAM_PLATFORM_WORKERS = ["codex", "gemini", "opencode", "hermes", "openclaw", "cursor", "cursor-agent", "antigravity", "antigravity-cli"]
+// Priority order: codex first (Claude scans on the main thread), then cursor/opencode;
+// the rest queue behind the MAX_PLATFORM_WORKERS pool.
+const STREAM_PLATFORM_WORKERS = ["codex", "cursor", "cursor-agent", "opencode", "gemini", "hermes", "openclaw", "antigravity", "antigravity-cli"]
 const BUNDLE_PLATFORM_WORKERS = STREAM_PLATFORM_WORKERS
 const SERVER_START_TIME = Date.now()
 
@@ -699,16 +701,10 @@ function readCodexSessionTailFast(projectPath, sessionId, tail) {
 
 function parseJsonl(fp) {
   const t0 = performance.now()
-  try {
-    const raw = readFileSync(fp, "utf8")
-    const lines = raw.split("\n").filter(Boolean)
-    const result = lines.flatMap(line => {
-      try { return [JSON.parse(line)] } catch { return [] }
-    })
-    const ms = (performance.now() - t0).toFixed(1)
-    if (parseFloat(ms) > 50) debugWarn(`[perf] parseJsonl ${ms}ms — ${result.length} msgs — ${fp.split("/").pop()}`)
-    return result
-  } catch { return [] }
+  const result = parseJsonlStream(fp)
+  const ms = (performance.now() - t0).toFixed(1)
+  if (parseFloat(ms) > 50) debugWarn(`[perf] parseJsonl ${ms}ms — ${result.length} msgs — ${fp.split("/").pop()}`)
+  return result
 }
 
 /**
@@ -1197,17 +1193,45 @@ function scheduleClaudeJsonlIndexing(fileBySessKey, names) {
  * Returns a Promise that resolves to { platform, projects } when the worker finishes.
  * The worker runs in its own V8 isolate, so blocking I/O never stalls the main thread.
  */
-function loadPlatformInWorker(platform) {
+// Worker pool: at most MAX_PLATFORM_WORKERS V8 isolates alive at once (RSS control).
+const MAX_PLATFORM_WORKERS = 5
+let _activePlatformWorkers = 0
+const _platformWorkerQueue = []
+function _acquireWorkerSlot() {
+  if (_activePlatformWorkers < MAX_PLATFORM_WORKERS) {
+    _activePlatformWorkers++
+    return Promise.resolve()
+  }
+  return new Promise(r => _platformWorkerQueue.push(r))
+}
+function _releaseWorkerSlot() {
+  const next = _platformWorkerQueue.shift()
+  if (next) next()
+  else _activePlatformWorkers--
+}
+
+async function loadPlatformInWorker(platform) {
+  await _acquireWorkerSlot()
   return new Promise((resolve) => {
-    const worker = new Worker(PLATFORM_LOADER_WORKER, { workerData: { platform } })
+    let settled = false
+    const done = (result) => {
+      if (settled) return
+      settled = true
+      _releaseWorkerSlot()
+      resolve(result)
+    }
+    const worker = new Worker(PLATFORM_LOADER_WORKER, {
+      workerData: { platform },
+      resourceLimits: { maxOldGenerationSizeMb: 256, maxYoungGenerationSizeMb: 32 },
+    })
     worker.once("message", ({ platform: p, sessions = [], error }) => {
       if (error) console.error(`[platform-worker] ${p}: ${error}`)
       const projects = resultsToProjects(sessions, p)
-      resolve({ platform: p, projects })
+      done({ platform: p, projects })
     })
     worker.once("error", err => {
       console.error(`[platform-worker] ${platform} worker error:`, err.message)
-      resolve({ platform, projects: [] })
+      done({ platform, projects: [] })
     })
   })
 }
@@ -2124,7 +2148,7 @@ setInterval(async () => {
 }, PLATFORM_REFRESH_MS).unref()
 
 // Memory watchdog: exit when RSS exceeds the cap so launchd (KeepAlive) restarts a fresh process.
-const WATCHDOG_MAX_RSS_MB = Number(process.env.WATCHDOG_MAX_RSS_MB ?? 3000)
+const WATCHDOG_MAX_RSS_MB = Number(process.env.WATCHDOG_MAX_RSS_MB ?? 1200)
 setInterval(() => {
   const rssMb = process.memoryUsage().rss / (1024 * 1024)
   if (rssMb > WATCHDOG_MAX_RSS_MB) {

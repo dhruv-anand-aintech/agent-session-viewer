@@ -1,6 +1,44 @@
 /**
  * Shared utilities for local-server and build-cache
  */
+import { openSync, readSync, closeSync } from "node:fs"
+
+/**
+ * Parse a JSONL file by streaming fixed-size chunks instead of reading the whole
+ * file into one string (peak memory ≈ one chunk + parsed objects, not 3-4× file size).
+ * Splits on the newline byte before decoding so multibyte UTF-8 never straddles a decode.
+ */
+export function parseJsonlStream(fp) {
+  const out = []
+  let fd = null
+  try {
+    fd = openSync(fp, "r")
+    const CHUNK = 1 << 20
+    const buf = Buffer.alloc(CHUNK)
+    let carry = Buffer.alloc(0)
+    let bytes
+    while ((bytes = readSync(fd, buf, 0, CHUNK, null)) > 0) {
+      const chunk = carry.length ? Buffer.concat([carry, buf.subarray(0, bytes)]) : buf.subarray(0, bytes)
+      let start = 0
+      let nl
+      while ((nl = chunk.indexOf(10, start)) !== -1) {
+        if (nl > start) {
+          try { out.push(JSON.parse(chunk.toString("utf8", start, nl))) } catch { /* skip bad line */ }
+        }
+        start = nl + 1
+      }
+      carry = Buffer.from(chunk.subarray(start)) // copy: `buf` is reused next iteration
+    }
+    if (carry.length) {
+      try { out.push(JSON.parse(carry.toString("utf8"))) } catch { /* skip bad line */ }
+    }
+    return out
+  } catch {
+    return []
+  } finally {
+    if (fd != null) { try { closeSync(fd) } catch { /* ignore */ } }
+  }
+}
 
 export function stripXml(text) {
   return text
