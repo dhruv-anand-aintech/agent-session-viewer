@@ -92,6 +92,7 @@ const PLATFORM_LOADER_WORKER = join(__dirname, "lib", "platform-loader-worker.mj
 const STREAM_PLATFORM_WORKERS = ["codex", "cursor", "cursor-agent", "opencode", "gemini", "hermes", "openclaw", "antigravity", "antigravity-cli"]
 const BUNDLE_PLATFORM_WORKERS = STREAM_PLATFORM_WORKERS
 const SERVER_START_TIME = Date.now()
+const SERVER_GIT = readServerGitMetadata()
 
 const CLAUDE_DIR = join(homedir(), ".claude", "projects")
 const APP_CONFIG_DIR = join(homedir(), ".config", "agent-session-viewer")
@@ -106,6 +107,27 @@ function wallClock() {
     second: "2-digit",
     fractionalSecondDigits: 3,
   })
+}
+
+function readServerGitMetadata() {
+  const runGit = (args) => {
+    try {
+      return execFileSync("git", args, {
+        cwd: __dirname,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim() || null
+    } catch {
+      return null
+    }
+  }
+
+  return {
+    commit: runGit(["rev-parse", "HEAD"]),
+    shortCommit: runGit(["rev-parse", "--short", "HEAD"]),
+    branch: runGit(["branch", "--show-current"]),
+    commitDate: runGit(["show", "-s", "--format=%cI", "HEAD"]),
+  }
 }
 
 /**
@@ -2928,6 +2950,7 @@ const server = http.createServer(async (req, res) => {
     const mem = process.memoryUsage()
     json({
       ok: true,
+      git: SERVER_GIT,
       uptimeSec: Math.round((Date.now() - SERVER_START_TIME) / 1000),
       rssMb: Math.round(mem.rss / 1024 / 1024),
       heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
