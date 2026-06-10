@@ -122,11 +122,39 @@ function readServerGitMetadata() {
     }
   }
 
+  const status = runGit(["status", "--short"]) ?? ""
+
   return {
     commit: runGit(["rev-parse", "HEAD"]),
     shortCommit: runGit(["rev-parse", "--short", "HEAD"]),
     branch: runGit(["branch", "--show-current"]),
     commitDate: runGit(["show", "-s", "--format=%cI", "HEAD"]),
+    dirtyAtStart: status.length > 0,
+    statusAtStart: status ? status.split("\n") : [],
+  }
+}
+
+function readCurrentGitState() {
+  const runGit = (args) => {
+    try {
+      return execFileSync("git", args, {
+        cwd: __dirname,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim() || null
+    } catch {
+      return null
+    }
+  }
+  const commit = runGit(["rev-parse", "HEAD"])
+  const status = runGit(["status", "--short"]) ?? ""
+  return {
+    commit,
+    shortCommit: runGit(["rev-parse", "--short", "HEAD"]),
+    branch: runGit(["branch", "--show-current"]),
+    dirty: status.length > 0,
+    status: status ? status.split("\n") : [],
+    commitMatchesDeployed: Boolean(commit && SERVER_GIT.commit && commit === SERVER_GIT.commit),
   }
 }
 
@@ -2950,7 +2978,10 @@ const server = http.createServer(async (req, res) => {
     const mem = process.memoryUsage()
     json({
       ok: true,
-      git: SERVER_GIT,
+      git: {
+        ...SERVER_GIT,
+        current: readCurrentGitState(),
+      },
       uptimeSec: Math.round((Date.now() - SERVER_START_TIME) / 1000),
       rssMb: Math.round(mem.rss / 1024 / 1024),
       heapUsedMb: Math.round(mem.heapUsed / 1024 / 1024),
