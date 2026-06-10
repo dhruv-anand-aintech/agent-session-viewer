@@ -13,7 +13,7 @@ import http from "http"
 import https from "https"
 import { fileURLToPath } from "url"
 import { Worker } from "worker_threads"
-import { exec, execFileSync, execSync, spawnSync } from "child_process"
+import { exec, execFile, execFileSync, execSync, spawnSync } from "child_process"
 import { stripXml, trimProjectsByRecentSessionCount, countSessionsInProjects, parseJsonlStream } from "./shared-utils.mjs"
 import { loadSessionMessages } from "./lib/session-message-loader.mjs"
 import { isOnDemandSessionPlatform } from "./lib/session-platform-routing.mjs"
@@ -2156,6 +2156,59 @@ setInterval(() => {
     process.exit(1)
   }
 }, 60_000).unref()
+
+// Lazy backfill: claude sidebar entries with unknown userMessageCount render "?" in the UI
+// (background indexer is disabled, so cheap-scanned sessions never get a count).
+// Sweep them with two ripgrep line counts per batch — no JSONL parsing.
+function rgCountPerFile(pattern, files) {
+  return new Promise(resolve => {
+    execFile("rg", ["-c", "--no-config", "--no-ignore", pattern, ...files], { maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+      const counts = new Map()
+      // exit 1 = no matches (fine); other errors → empty map
+      for (const line of String(stdout ?? "").split("\n")) {
+        const sep = line.lastIndexOf(":")
+        if (sep > 0) counts.set(line.slice(0, sep), Number(line.slice(sep + 1)) || 0)
+      }
+      resolve(counts)
+    })
+  })
+}
+
+let _userCountBackfillRunning = false
+async function backfillClaudeUserCounts() {
+  if (_userCountBackfillRunning) return
+  _userCountBackfillRunning = true
+  try {
+    const todo = []
+    for (const e of getAllSidebarEntries()) {
+      if ((e.source ?? "claude") !== "claude" || e.userMessageCount != null || e.isSidechain) continue
+      const fp = join(e.projectPath, `${e.id}.jsonl`)
+      if (existsSync(fp)) todo.push({ entry: e, fp })
+    }
+    if (!todo.length) return
+    const changed = []
+    for (let i = 0; i < todo.length; i += 50) {
+      const batch = todo.slice(i, i + 50)
+      const files = batch.map(b => b.fp)
+      const userRows = await rgCountPerFile('"type":"user"', files)
+      const toolResultRows = await rgCountPerFile('"type":"user".*"tool_result"', files)
+      for (const { entry: e, fp } of batch) {
+        const count = Math.max(0, (userRows.get(fp) ?? 0) - (toolResultRows.get(fp) ?? 0))
+        const { changed: c, entry } = updateSidebarCacheEntry(e.id, { ...e, userMessageCount: count })
+        if (c) changed.push(entry)
+      }
+      await yieldEventLoopTick()
+    }
+    if (changed.length) sseBroadcastSessionUpserts(changed)
+    debugLog(`[backfill ${wallClock()}] userMessageCount: ${changed.length}/${todo.length} entries updated`)
+  } catch (e) {
+    debugLog(`[backfill ${wallClock()}] userMessageCount failed: ${e.message}`)
+  } finally {
+    _userCountBackfillRunning = false
+  }
+}
+setTimeout(backfillClaudeUserCounts, 20_000).unref()        // after startup settles
+setInterval(backfillClaudeUserCounts, 10 * 60 * 1000).unref() // catch new cheap-scanned sessions
 
 // SSE keepalive: ping every 30s so dead clients error out and get reaped
 // (also keeps idle tunnel connections from buffering/timing out).
