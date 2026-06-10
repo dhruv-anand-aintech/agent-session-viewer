@@ -2071,6 +2071,77 @@ if (existsSync(ANTIGRAVITY_CLI_DIR)) {
   }
 }
 
+// Watch ~/.codex/sessions: upsert the changed rollout file into the sidebar cache and push over SSE.
+function handleCodexFileChange(filename) {
+  if (!filename || !filename.endsWith(".jsonl")) return
+  const fp = join(CODEX_SESSIONS_ROOT, filename)
+  if (!existsSync(fp)) return
+  try {
+    const names = loadConfig().names ?? {}
+    const meta = cheapCodexMetaFromFile(fp, names)
+    if (!meta?.id) return
+    const { changed, entry } = updateSidebarCacheEntry(meta.id, {
+      projectPath: meta.projectPath,
+      projectDisplayName: displayNameForProjectPath(meta.projectPath),
+      source: "codex",
+      messageCount: meta.messageCount ?? 0,
+      userMessageCount: meta.userMessageCount ?? null,
+      firstName: meta.firstName ?? null,
+      lastActivity: meta.lastActivity,
+      mtime: meta.lastActivity,
+      customName: meta.customName ?? null,
+      isSidechain: meta.isSidechain,
+      parentSessionId: meta.parentSessionId,
+      agentType: meta.agentType,
+    })
+    if (changed) sseBroadcastSessionUpserts([entry])
+  } catch { /* ignore */ }
+}
+
+if (existsSync(CODEX_SESSIONS_ROOT)) {
+  try {
+    watch(CODEX_SESSIONS_ROOT, { recursive: true }, (_evt, filename) => handleCodexFileChange(filename))
+  } catch { /* ignore */ }
+}
+
+// Safety net for platforms without (working) fs watchers: refresh all platform
+// readers in worker threads every few minutes and flush deltas into the sidebar cache.
+const PLATFORM_REFRESH_MS = Number(process.env.PLATFORM_REFRESH_MS ?? 5 * 60 * 1000)
+let _platformRefreshRunning = false
+setInterval(async () => {
+  if (_platformRefreshRunning) return
+  _platformRefreshRunning = true
+  try {
+    const projects = await loadPlatformProjectsInWorkers()
+    const changed = flushSidebarCacheFromProjects(projects, null)
+    if (changed.length) sseBroadcastSessionUpserts(changed)
+    debugLog(`[refresh ${wallClock()}] periodic platform refresh: ${changed.length} sidebar deltas`)
+  } catch (e) {
+    debugLog(`[refresh ${wallClock()}] periodic platform refresh failed: ${e.message}`)
+  } finally {
+    _platformRefreshRunning = false
+  }
+}, PLATFORM_REFRESH_MS).unref()
+
+// Memory watchdog: exit when RSS exceeds the cap so launchd (KeepAlive) restarts a fresh process.
+const WATCHDOG_MAX_RSS_MB = Number(process.env.WATCHDOG_MAX_RSS_MB ?? 3000)
+setInterval(() => {
+  const rssMb = process.memoryUsage().rss / (1024 * 1024)
+  if (rssMb > WATCHDOG_MAX_RSS_MB) {
+    console.error(`[watchdog] rss ${rssMb.toFixed(0)}MB > ${WATCHDOG_MAX_RSS_MB}MB cap — exiting for supervisor restart`)
+    process.exit(1)
+  }
+}, 60_000).unref()
+
+// SSE keepalive: ping every 30s so dead clients error out and get reaped
+// (also keeps idle tunnel connections from buffering/timing out).
+setInterval(() => {
+  for (const c of sseClients) {
+    if (c.res.destroyed) { sseClients.delete(c); continue }
+    try { c.res.write(": ping\n\n") } catch { sseClients.delete(c) }
+  }
+}, 30_000).unref()
+
 // --- Static file serving ---
 
 const MIME = {

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 
-// Module-level thread search cache: key = "sessionId:query" → hits[]
+// Module-level thread search cache: key = "projectPath\\x1fsessionId\\x1fquery" -> hits[]
 const _threadCache = new Map<string, { hits: ThreadSearchHit[] }>()
 import type { SessionMessage, SessionMeta, Capabilities } from "./types"
 import MessageBlock from "./MessageBlock"
@@ -239,7 +239,7 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
       return
     }
 
-    const cacheKey = `${sessionMeta.id}:${q}`
+    const cacheKey = `${stableProjectDir}\x1f${sessionMeta.id}\x1f${q.toLowerCase()}`
     const cached = _threadCache.get(cacheKey)
     if (cached) {
       setThreadHits(cached.hits)
