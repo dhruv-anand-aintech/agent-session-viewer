@@ -498,12 +498,20 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
   const chatDirLabel = chatDir ?? stableProjectDir
   const resumeCommand = resumeCommandForSession(stableProjectDir, sessionMeta, chatDir)
   const [resumeCopied, setResumeCopied] = useState(false)
+  const [shareCopied, setShareCopied] = useState(false)
 
   async function copyResumeCommand() {
     if (!resumeCommand) return
     await navigator.clipboard.writeText(resumeCommand)
     setResumeCopied(true)
     window.setTimeout(() => setResumeCopied(false), 1400)
+  }
+
+  async function copyShareLink() {
+    const shareUrl = `${window.location.origin}/?s=${encodeURIComponent(stableProjectDir)}/${sessionMeta.id}`
+    await navigator.clipboard.writeText(shareUrl)
+    setShareCopied(true)
+    window.setTimeout(() => setShareCopied(false), 1400)
   }
 
   return (
@@ -552,6 +560,25 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
             )}
           </button>
         )}
+        <button
+          type="button"
+          className={`session-path-btn resume-copy-btn ${shareCopied ? "copied" : ""}`}
+          onClick={() => void copyShareLink()}
+          title={shareCopied ? "Copied share link" : "Copy share link"}
+          aria-label="Copy share link"
+        >
+          {shareCopied ? (
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              <path d="M2.5 7.2 5.4 10 11.5 3.8" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          ) : (
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              <path d="M5.6 8.4 8.4 5.6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+              <path d="M6.6 3.4 7.8 2.2a2.6 2.6 0 0 1 3.7 3.7L10.3 7.1a2.6 2.6 0 0 1-3.4.25" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+              <path d="M7.4 10.6 6.2 11.8a2.6 2.6 0 0 1-3.7-3.7L3.7 6.9a2.6 2.6 0 0 1 3.4-.25" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+            </svg>
+          )}
+        </button>
         {loading && win && <span className="session-refreshing" title="Refreshing…" />}
         {sessionMeta.gitBranch && <span className="git-branch hide-mobile">⎇ {sessionMeta.gitBranch}</span>}
         {isRecentlyActive(sessionMeta.lastActivity) && <span className="active-badge">● Live</span>}

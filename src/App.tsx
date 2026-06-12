@@ -88,9 +88,10 @@ export default function App() {
 
   useEffect(() => {
     if (!activeProjectPath || !activeSessionId) return
+    if (!selected) return
     const s = encodeURIComponent(canonicalProjectPath ?? activeProjectPath) + "/" + activeSessionId
     history.replaceState(null, "", "?s=" + s)
-  }, [canonicalProjectPath, activeProjectPath, activeSessionId])
+  }, [canonicalProjectPath, activeProjectPath, activeSessionId, selected])
 
   useEffect(() => {
     if (!selected || !activeSessionId || !activeMeta?.projectPath) return
