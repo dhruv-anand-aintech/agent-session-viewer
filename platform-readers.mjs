@@ -1473,6 +1473,64 @@ export function readCodexSession(filePath, cacheGet, cacheSet) {
   return result
 }
 
+function readCodexPrefixRows(filePath, maxBytes = 64 * 1024, maxLines = 100) {
+  let fd
+  try {
+    fd = fs.openSync(filePath, "r")
+    const st = fs.fstatSync(fd)
+    const buf = Buffer.alloc(Math.min(maxBytes, st.size))
+    const n = fs.readSync(fd, buf, 0, buf.length, 0)
+    return buf.toString("utf8", 0, n)
+      .split("\n")
+      .filter(Boolean)
+      .slice(0, maxLines)
+      .flatMap(line => {
+        try { return [JSON.parse(line)] } catch { return [] }
+      })
+  } catch {
+    return []
+  } finally {
+    if (fd != null) {
+      try { fs.closeSync(fd) } catch { /* ignore */ }
+    }
+  }
+}
+
+export function readCodexSessionsCheap() {
+  const results = []
+  for (const filePath of listCodexSessionFiles()) {
+    let st
+    try { st = fs.statSync(filePath) } catch { continue }
+    const rows = readCodexPrefixRows(filePath)
+    const sessionMeta = rows.find(r => r.type === "session_meta")?.payload ?? {}
+    const turnContext = rows.find(r => r.type === "turn_context")?.payload ?? {}
+    const userRow = rows.find(r =>
+      r.type === "event_msg" && r.payload?.type === "user_message" && typeof r.payload.message === "string"
+    )
+    const sessionId = sessionMeta.id ?? path.basename(filePath, ".jsonl").replace(/^rollout-.*-/, "")
+    const projectDir = sessionMeta.cwd ? normProjectDir(sessionMeta.cwd) : path.dirname(filePath)
+    const firstName = userRow?.payload?.message
+      ? userRow.payload.message.replace(/\s+/g, " ").trim().slice(0, 80)
+      : null
+    results.push({
+      meta: {
+        id: sessionId,
+        projectPath: `codex:${projectDir}`,
+        messageCount: 0,
+        userMessageCount: null,
+        lastActivity: new Date(st.mtimeMs).toISOString(),
+        isActive: Date.now() - st.mtimeMs < 5 * 60 * 1000,
+        firstName,
+        source: "codex",
+        version: sessionMeta.cli_version ?? null,
+        lastUsedModel: turnContext.model ?? null,
+      },
+      msgs: [],
+    })
+  }
+  return results
+}
+
 export function readCodexSessionById(sessionId, cacheGet, cacheSet) {
   const filePath = findCodexSessionFile(sessionId)
   return filePath ? readCodexSession(filePath, cacheGet, cacheSet) : null

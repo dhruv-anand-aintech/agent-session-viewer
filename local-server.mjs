@@ -2209,13 +2209,19 @@ setInterval(async () => {
   }
 }, PLATFORM_REFRESH_MS).unref()
 
-// Memory watchdog: exit when RSS exceeds the cap so launchd (KeepAlive) restarts a fresh process.
+// Memory watchdog: alert when RSS exceeds the cap, but keep the process alive for inspection.
 const WATCHDOG_MAX_RSS_MB = Number(process.env.WATCHDOG_MAX_RSS_MB ?? 2000)
+let _watchdogAlerted = false
 setInterval(() => {
   const rssMb = process.memoryUsage().rss / (1024 * 1024)
-  if (rssMb > WATCHDOG_MAX_RSS_MB) {
-    console.error(`[watchdog] rss ${rssMb.toFixed(0)}MB > ${WATCHDOG_MAX_RSS_MB}MB cap — exiting for supervisor restart`)
-    process.exit(1)
+  if (rssMb > WATCHDOG_MAX_RSS_MB && !_watchdogAlerted) {
+    _watchdogAlerted = true
+    const message = `Agent Session Viewer RSS is ${rssMb.toFixed(0)} MB, above the ${WATCHDOG_MAX_RSS_MB} MB cap. Process ${process.pid} is still running for inspection.`
+    console.error(`[watchdog] ${message}`)
+    execFile("osascript", [
+      "-e",
+      `display alert "Agent Session Viewer high memory" message ${JSON.stringify(message)} as warning`,
+    ], () => {})
   }
 }, 60_000).unref()
 
