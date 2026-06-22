@@ -393,7 +393,7 @@ export function UsageLimits({ visible }: { visible: boolean }) {
   const refresh = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
     try {
-      const r = await fetch("/api/usage")
+      const r = await fetch("/api/usage", { credentials: "include" })
       if (!r.ok) throw new Error(`/api/usage returned HTTP ${r.status}`)
       setData(await r.json())
       setLastUpdated(new Date())

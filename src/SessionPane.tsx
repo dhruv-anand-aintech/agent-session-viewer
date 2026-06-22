@@ -316,7 +316,7 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
 
   const [suggestions, setSuggestions] = useState<Record<string, Suggestion>>({})
   useEffect(() => {
-    fetch(`/api/suggestions/${encodeURIComponent(stableProjectDir)}/${sessionMeta.id}`)
+    fetch(`/api/suggestions/${encodeURIComponent(stableProjectDir)}/${sessionMeta.id}`, { credentials: "include" })
       .then(r => r.ok ? r.json() : [])
       .then((list: Suggestion[]) => {
         const map: Record<string, Suggestion> = {}

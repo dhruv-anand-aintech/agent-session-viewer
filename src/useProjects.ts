@@ -15,7 +15,7 @@ export { RECENT_SIDEBAR_SESSIONS, mergeProjectData, mergeSessionUpsert } from ".
 export function useCapabilities(): Capabilities {
   const [caps, setCaps] = useState<Capabilities>({ openPath: false })
   useEffect(() => {
-    fetch("/api/capabilities")
+    fetch("/api/capabilities", { credentials: "include" })
       .then(r => (r.ok ? r.json() : {}))
       .then((c: unknown) => {
         const o =

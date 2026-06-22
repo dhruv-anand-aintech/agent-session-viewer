@@ -15,7 +15,7 @@ import { fileURLToPath } from "url"
 import { Worker } from "worker_threads"
 import { exec, execFile, execFileSync, execSync, spawnSync } from "child_process"
 import { stripXml, trimProjectsByRecentSessionCount, countSessionsInProjects, parseJsonlStream } from "./shared-utils.mjs"
-import { loadSessionMessages } from "./lib/session-message-loader.mjs"
+import { isLegacyCodexProjectPath, loadSessionMessages } from "./lib/session-message-loader.mjs"
 import { isOnDemandSessionPlatform } from "./lib/session-platform-routing.mjs"
 import { normalizeCodexRateLimit, normalizeResetTime, resetDescription } from "./lib/usage-window-normalizer.mjs"
 import {
@@ -748,7 +748,7 @@ function readCodexSessionTailFast(projectPath, sessionId, tail) {
   let stat
   try { stat = statSync(fp) } catch { return null }
   const meta = cheapCodexMetaFromFile(fp, loadConfig().names ?? {})
-  if (!meta || meta.projectPath !== projectPath) return null
+  if (!meta || (meta.projectPath !== projectPath && !isLegacyCodexProjectPath(projectPath, meta.projectPath))) return null
   const jsonRows = readJsonlTail(fp, Math.max(200, Math.min(tail * 4, 1200)))
   const msgs = codexTailRowsToMessages(sessionId, jsonRows, stat.mtime.toISOString())
   if (!msgs.length) return null
