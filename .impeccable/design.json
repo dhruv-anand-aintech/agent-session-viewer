@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-06-23T11:59:20+05:30",
+  "title": "Design System: Agent Session Viewer",
+  "extensions": {
+    "colorMeta": {
+      "accent": {"role": "primary", "displayName": "Clay Accent", "canonical": "#d97757", "tonalRamp": ["oklch(18% 0.035 35)", "oklch(30% 0.06 35)", "oklch(44% 0.09 35)", "oklch(58% 0.12 35)", "oklch(70% 0.1 35)", "oklch(82% 0.06 35)", "oklch(91% 0.03 35)", "oklch(96% 0.015 35)"]},
+      "canvas": {"role": "neutral", "displayName": "Warm Charcoal", "canonical": "#1e1d1a", "tonalRamp": ["oklch(12% 0.01 80)", "oklch(20% 0.01 80)", "oklch(30% 0.01 80)", "oklch(42% 0.01 80)", "oklch(56% 0.01 80)", "oklch(72% 0.01 80)", "oklch(88% 0.01 80)", "oklch(96% 0.01 80)"]}
+    },
+    "shadows": [{"name": "overlay", "value": "0 24px 80px rgba(0, 0, 0, 0.6)", "purpose": "Global search and modal panels."}],
+    "motion": [{"name": "state-fast", "value": "120ms ease-out", "purpose": "Hover, selection, and filter feedback."}],
+    "breakpoints": [{"name": "mobile", "value": "900px", "purpose": "Sidebar moves to drawer behavior."}]
+  },
+  "components": [
+    {
+      "name": "Quiet Button",
+      "kind": "button",
+      "refersTo": "button-quiet",
+      "description": "Low-drama control for transcript actions.",
+      "html": "<button class=\"ds-btn-quiet\">Search</button>",
+      "css": ".ds-btn-quiet{border:1px solid #3a3933;border-radius:6px;background:#2f2f2a;color:#bdb4a4;padding:4px 10px;font:500 12px system-ui,sans-serif;cursor:pointer}.ds-btn-quiet:hover{background:#383832;color:#f7f1e6}.ds-btn-quiet:focus-visible{outline:2px solid #d97757;outline-offset:2px}"
+    },
+    {
+      "name": "Platform Chip",
+      "kind": "chip",
+      "refersTo": "platform-chip",
+      "description": "Small provenance marker for agent platforms.",
+      "html": "<span class=\"ds-platform-chip\">Claude</span>",
+      "css": ".ds-platform-chip{display:inline-flex;border:1px solid #d97757;border-radius:12px;background:#3a241d;color:#e29a80;padding:2px 8px;font:600 11px ui-monospace,monospace}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Transcript Reading Room",
+    "overview": "A warm dark product workspace for reading, searching, and sharing coding-agent transcripts.",
+    "keyCharacteristics": ["Warm dark neutrals", "Small provenance color", "Dense sidebar navigation", "Quiet reading pane"],
+    "rules": [{"name": "The Reading First Rule", "body": "Never let platform colors compete with transcript text.", "section": "colors"}],
+    "dos": ["Do optimize for reading and session recovery.", "Do keep platform colors small and provenance-specific."],
+    "donts": ["Don't turn the viewer into a generic analytics dashboard.", "Don't use neon terminal styling or decorative glow."]
+  }
+}
