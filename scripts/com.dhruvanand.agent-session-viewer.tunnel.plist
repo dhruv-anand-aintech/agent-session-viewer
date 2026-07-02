@@ -11,6 +11,8 @@
 		<string>--no-autoupdate</string>
 		<string>--protocol</string>
 		<string>http2</string>
+		<string>--config</string>
+		<string>CONFIG_PLACEHOLDER</string>
 		<string>run</string>
 		<string>agent-session-viewer</string>
 	</array>

@@ -3760,6 +3760,7 @@ process.once("SIGTERM", shutdown)
 
 process.on("uncaughtException", err => {
   console.error(`${ts()} [uncaughtException]`, err.stack || err)
+  if (err?.code === "EADDRINUSE") process.exit(1)
 })
 process.on("unhandledRejection", (reason, promise) => {
   console.error(`${ts()} [unhandledRejection] at:`, promise, "reason:", reason)
@@ -3767,6 +3768,10 @@ process.on("unhandledRejection", (reason, promise) => {
 
 const BIND_HOST = process.env.HOST ?? "127.0.0.1"
 initSidebarCache()
+server.on("error", err => {
+  console.error(`${ts()} [serverError]`, err.stack || err)
+  process.exit(1)
+})
 server.listen(PORT, BIND_HOST, () => {
   const displayHost = BIND_HOST === "0.0.0.0" ? "0.0.0.0 (all interfaces)" : "localhost"
   console.log(`${ts()} \n  Agent Session Viewer (local mode)`)

@@ -7,6 +7,7 @@ PLIST_SRC="$ROOT/scripts/${LABEL}.plist"
 LA_DIR="$HOME/Library/LaunchAgents"
 LA_PLIST="$LA_DIR/${LABEL}.plist"
 LOG_DIR="$HOME/Library/Logs"
+CONFIG="${CLOUDFLARE_TUNNEL_CONFIG:-$HOME/.cloudflared/config.yml}"
 UID_NUM="$(id -u)"
 
 CLOUDFLARED="$(command -v cloudflared || true)"
@@ -19,6 +20,7 @@ mkdir -p "$LA_DIR" "$LOG_DIR"
 
 sed -e "s|CLOUDFLARED_PLACEHOLDER|$CLOUDFLARED|g" \
     -e "s|LOG_PLACEHOLDER|$LOG_DIR|g" \
+    -e "s|CONFIG_PLACEHOLDER|$CONFIG|g" \
     "$PLIST_SRC" > "$LA_PLIST"
 
 if launchctl print "gui/${UID_NUM}/${LABEL}" &>/dev/null; then
@@ -30,6 +32,6 @@ launchctl bootstrap "gui/${UID_NUM}" "$LA_PLIST"
 launchctl enable "gui/${UID_NUM}/${LABEL}"
 
 echo "Installed: $LA_PLIST"
-echo "Tunnel:  agent-session-viewer (protocol http2)"
+echo "Tunnel:  agent-session-viewer (protocol http2, config $CONFIG)"
 echo "Logs:    $LOG_DIR/agent-session-viewer-tunnel.err.log"
 echo "Restart: launchctl kickstart -k gui/${UID_NUM}/${LABEL}"

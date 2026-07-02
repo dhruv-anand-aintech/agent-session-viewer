@@ -76,6 +76,13 @@ Change-detection: each reader returns `{ meta, msgs }[]`; callers pass `cacheGet
 - `npm run local` — full stack without any cloud account.
 - `npm run build` — must pass before publishing.
 
+## Persistent service ops
+
+- Public `502` usually means the Cloudflare tunnel is up but the local origin is unhealthy. Check both layers: `curl -sS http://127.0.0.1:3001/api/health`, `curl -sS https://agent-session-viewer.ainorthstar.tech/api/health`, `launchctl print gui/$(id -u)/com.dhruvanand.agent-session-viewer.local-server`, and `launchctl print gui/$(id -u)/com.dhruvanand.agent-session-viewer.tunnel`.
+- Named Cloudflare tunnel config for `agent-session-viewer.ainorthstar.tech` must point at `http://127.0.0.1:3001`, not `http://localhost:3001`. `localhost` can resolve to `[::1]`, but the local server binds IPv4 only, causing intermittent origin failures and `502`.
+- Do not trust launchd `state = running` by itself. The wrapper can be alive while Node is wedged or not listening on `127.0.0.1:3001`; verify with `lsof -nP -iTCP:3001 -sTCP:LISTEN` and the local `/api/health` response before saying the site is working.
+- If port binding fails with `EADDRINUSE`, the process must exit so launchd can restart cleanly. A live Node process with no listening socket is worse than a crash because the tunnel keeps returning `502`.
+
 ## Publishing a new npm/npx package version
 
 Publishing is triggered by pushing a git tag — **do not run `npm publish` manually**.

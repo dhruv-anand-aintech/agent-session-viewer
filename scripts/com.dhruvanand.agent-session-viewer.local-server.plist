@@ -21,7 +21,5 @@
 	<string>LOG_PLACEHOLDER/agent-session-viewer-local-server.log</string>
 	<key>StandardErrorPath</key>
 	<string>LOG_PLACEHOLDER/agent-session-viewer-local-server.err.log</string>
-	<key>ProcessType</key>
-	<string>Background</string>
 </dict>
 </plist>
