@@ -174,6 +174,7 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
     hasLater,
     loadEarlier,
     loadLater,
+    loadFirstPage,
     loadError,
     loadingEarlierRef,
     loadingLaterRef,
@@ -480,18 +481,14 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
     }
   }
 
-  function jumpToFirst() {
-    if (win && win.startIdx === 0) {
+  async function jumpToFirst() {
+    if (win && win.startIdx === 0 && !hasEarlier) {
       scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" })
     } else {
-      pendingPrevNav.current = true
-      loadEarlierPreserveScroll()
-      const check = setInterval(() => {
-        if (!pendingPrevNav.current) {
-          clearInterval(check)
-          scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" })
-        }
-      }, 200)
+      await loadFirstPage()
+      requestAnimationFrame(() => {
+        scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" })
+      })
     }
   }
 

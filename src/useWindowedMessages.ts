@@ -350,6 +350,34 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
     }
   }
 
+  async function loadFirstPage() {
+    if (!win || !projectDir || !sessionId) return
+    if (!hasEarlier) return
+    setLoadingMore(true)
+    try {
+      const total = win.filteredTotal || win.total
+      const fetchCount = Math.min(MAX_DOM, total)
+      const skip = Math.max(0, total - fetchCount)
+      const t0 = performance.now()
+      const r = await fetch(sessionUrl(projectDir, sessionId, fetchCount, skip), { credentials: "include" })
+      if (!r.ok) return
+      const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || total
+      const newMsgs: SessionMessage[] = await r.json()
+      markChunkLoad(sessionId, newMsgs.length, skip, performance.now() - t0)
+      const newFiltered = newMsgs.filter(m => m.type !== "file-history-snapshot")
+      fullRef.current = newFiltered
+      setWin({
+        msgs: newFiltered.slice(0, MAX_DOM),
+        startIdx: 0,
+        total: serverTotal,
+        filteredTotal: serverTotal,
+        serverFetchedFrom: 0,
+        globalOffset: 0,
+      })
+    } catch { /* ignore */ }
+    finally { setLoadingMore(false) }
+  }
+
   const bringMessageIndexIntoView = useCallback((targetFullRefIdx: number) => {
     setWin(prev => {
       if (!prev) return prev
@@ -414,6 +442,7 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
     hasLater,
     loadEarlier,
     loadLater,
+    loadFirstPage,
     fullRef,
     loadingEarlierRef,
     loadingLaterRef,

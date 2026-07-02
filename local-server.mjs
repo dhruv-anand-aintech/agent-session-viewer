@@ -322,6 +322,33 @@ function loadCachedSidebarState() {
  */
 function loadPinnedSessionEntry(pinProjectPath, pinSessionId, names) {
   if (!pinProjectPath || !pinSessionId) return null
+  if (pinProjectPath.startsWith("codex:")) {
+    const fp = findCodexSessionFile(pinSessionId)
+    if (!fp) return null
+    let stat
+    try { stat = statSync(fp) } catch { return null }
+    const parsed = readCodexSessionById(pinSessionId, null, null)
+    const parsedMeta = parsed?.meta
+    const meta = parsedMeta ?? cheapCodexMetaFromFile(fp, names)
+    if (!meta || (meta.projectPath !== pinProjectPath && !isLegacyCodexProjectPath(pinProjectPath, meta.projectPath))) return null
+    return {
+      id: pinSessionId,
+      projectPath: meta.projectPath,
+      projectDisplayName: displayNameForProjectPath(meta.projectPath),
+      source: "codex",
+      messageCount: parsed?.msgs?.length ?? meta.messageCount ?? countJsonlLines(fp),
+      userMessageCount: meta.userMessageCount ?? null,
+      firstName: meta.firstName ?? pinSessionId.slice(0, 8),
+      lastActivity: meta.lastActivity ?? stat.mtime.toISOString(),
+      mtime: stat.mtimeMs,
+      customName: names[`${meta.projectPath}/${pinSessionId}`] ?? meta.customName ?? null,
+      ...(meta.isSidechain ? {
+        isSidechain: true,
+        parentSessionId: meta.parentSessionId,
+        agentType: meta.agentType,
+      } : {}),
+    }
+  }
   const msgs = loadSessionMessages(pinProjectPath, pinSessionId)
   if (!Array.isArray(msgs) || !msgs.length) return null
   const source = pinProjectPath.match(/^([a-z-]+):/)?.[1] ?? "claude"
@@ -367,7 +394,6 @@ function loadProjectsFromSidebarCache(maxSessions, pinSessionId = null, pinProje
   const n = Number(maxSessions)
   let entries = Number.isFinite(n) && n > 0 ? getTopSidebarEntries(n) : getAllSidebarEntries()
   if (pinSessionId) {
-    backfillPinnedSessionLinkage(pinSessionId)
     const pinned = getSidebarEntry(pinSessionId) ?? loadPinnedSessionEntry(pinProjectPath, pinSessionId, names)
     if (pinned?.id) entries = expandSidebarLinkageEntries([...entries, pinned])
   }
@@ -743,19 +769,14 @@ function codexTailRowsToMessages(sessionId, rows, fallbackTs) {
 }
 
 function readCodexSessionTailFast(projectPath, sessionId, tail) {
-  const fp = findCodexSessionFile(sessionId)
-  if (!fp) return null
-  let stat
-  try { stat = statSync(fp) } catch { return null }
-  const meta = cheapCodexMetaFromFile(fp, loadConfig().names ?? {})
-  if (!meta || (meta.projectPath !== projectPath && !isLegacyCodexProjectPath(projectPath, meta.projectPath))) return null
-  const jsonRows = readJsonlTail(fp, Math.max(200, Math.min(tail * 4, 1200)))
-  const msgs = codexTailRowsToMessages(sessionId, jsonRows, stat.mtime.toISOString())
+  const result = readCodexSessionById(sessionId, null, null)
+  if (!result?.meta || !Array.isArray(result.msgs)) return null
+  if (result.meta.projectPath !== projectPath && !isLegacyCodexProjectPath(projectPath, result.meta.projectPath)) return null
+  const msgs = result.msgs
   if (!msgs.length) return null
-  const cachedTotal = loadSidebarCache()._map.get(sessionId)?.messageCount
   return {
     msgs: msgs.slice(-tail),
-    total: cachedTotal && cachedTotal >= msgs.length ? cachedTotal : msgs.length,
+    total: msgs.length,
   }
 }
 
