@@ -13,6 +13,7 @@ import path from "node:path"
 import { homedir } from "node:os"
 import { execFileSync } from "node:child_process"
 import { createRequire } from "node:module"
+import { inferClaudeCodexParent } from "./lib/codex-claude-lineage.mjs"
 
 // ── better-sqlite3 (optional native driver, avoids sqlite3 subprocess overhead) ─
 let _BetterSqlite
@@ -1371,6 +1372,7 @@ function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
   if (!out.length) return null
 
   const firstUserText = out.find(m => m.message?.role === "user" && typeof m.message?.content === "string")?.message?.content
+  const claudeCodexParent = isSubagent ? null : inferClaudeCodexParent({ sessionMeta, turnContext, firstUserText })
   const subagentNickname = sessionMeta.agent_nickname ??
     sessionMeta.source?.subagent?.thread_spawn?.agent_nickname ??
     null
@@ -1395,6 +1397,11 @@ function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
       version: sessionMeta.cli_version ?? null,
       lastUsedModel: turnContext.model ?? null,
       ...(isSubagent ? { isSidechain: true, parentSessionId, agentType: "subagent" } : {}),
+      ...(claudeCodexParent ? {
+        isSidechain: true,
+        parentSessionId: claudeCodexParent.parentSessionId,
+        agentType: claudeCodexParent.agentType,
+      } : {}),
     },
     msgs: out,
   }
@@ -1473,7 +1480,7 @@ export function readCodexSession(filePath, cacheGet, cacheSet) {
   return result
 }
 
-function readCodexPrefixRows(filePath, maxBytes = 64 * 1024, maxLines = 100) {
+function readCodexPrefixRows(filePath, maxBytes = 1024 * 1024, maxLines = 100) {
   let fd
   try {
     fd = fs.openSync(filePath, "r")
@@ -1507,10 +1514,18 @@ export function readCodexSessionsCheap() {
     const userRow = rows.find(r =>
       r.type === "event_msg" && r.payload?.type === "user_message" && typeof r.payload.message === "string"
     )
+    const firstUserText = typeof userRow?.payload?.message === "string" ? userRow.payload.message : ""
+    const isSubagent = sessionMeta.thread_source === "subagent" ||
+      (typeof sessionMeta.source === "object" && sessionMeta.source?.subagent != null)
+    const parentSessionId = sessionMeta.forked_from_id ??
+      sessionMeta.parent_thread_id ??
+      sessionMeta.source?.subagent?.thread_spawn?.parent_thread_id ??
+      null
+    const claudeCodexParent = isSubagent ? null : inferClaudeCodexParent({ sessionMeta, turnContext, firstUserText })
     const sessionId = sessionMeta.id ?? path.basename(filePath, ".jsonl").replace(/^rollout-.*-/, "")
     const projectDir = sessionMeta.cwd ? normProjectDir(sessionMeta.cwd) : path.dirname(filePath)
-    const firstName = userRow?.payload?.message
-      ? userRow.payload.message.replace(/\s+/g, " ").trim().slice(0, 80)
+    const firstName = firstUserText
+      ? firstUserText.replace(/\s+/g, " ").trim().slice(0, 80)
       : null
     results.push({
       meta: {
@@ -1524,6 +1539,12 @@ export function readCodexSessionsCheap() {
         source: "codex",
         version: sessionMeta.cli_version ?? null,
         lastUsedModel: turnContext.model ?? null,
+        ...(isSubagent ? { isSidechain: true, parentSessionId, agentType: "subagent" } : {}),
+        ...(claudeCodexParent ? {
+          isSidechain: true,
+          parentSessionId: claudeCodexParent.parentSessionId,
+          agentType: claudeCodexParent.agentType,
+        } : {}),
       },
       msgs: [],
     })

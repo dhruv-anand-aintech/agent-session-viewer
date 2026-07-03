@@ -53,6 +53,7 @@ import {
   GEMINI_TMP_ROOT,
 } from "./platform-readers.mjs"
 import { buildSidebarSearchDoc, runSidebarSessionSearch, runThreadKeywordSearch } from "./lib/session-search-core.mjs"
+import { inferClaudeCodexParent } from "./lib/codex-claude-lineage.mjs"
 import { indexSession, removeSession, getSearchRows } from "./lib/search-index.mjs"
 import { rgGlobalSearch } from "./lib/rg-search.mjs"
 import { contentSearchStream } from "./lib/content-search.mjs"
@@ -480,7 +481,7 @@ function codexSessionIdFromFile(filePath) {
   return matches?.at(-1) ?? base
 }
 
-function readJsonlPrefixRows(filePath, maxBytes = 64 * 1024, maxLines = 100) {
+function readJsonlPrefixRows(filePath, maxBytes = 1024 * 1024, maxLines = 100) {
   let fd = null
   try {
     const st = statSync(filePath)
@@ -526,10 +527,12 @@ function cheapCodexMetaFromFile(filePath, names) {
     sessionMeta.source?.subagent?.thread_spawn?.agent_nickname ??
     null
   const firstUser = rows.find(r => r?.type === "event_msg" && r?.payload?.type === "user_message")
+  const firstUserText = typeof firstUser?.payload?.message === "string" ? firstUser.payload.message : ""
+  const claudeCodexParent = isSubagent ? null : inferClaudeCodexParent({ sessionMeta, turnContext, firstUserText })
   const firstName = isSubagent && typeof subagentNickname === "string" && subagentNickname.trim()
     ? subagentNickname.trim()
-    : typeof firstUser?.payload?.message === "string"
-      ? stripXml(firstUser.payload.message).replace(/\s+/g, " ").trim().slice(0, 80)
+    : firstUserText
+      ? stripXml(firstUserText).replace(/\s+/g, " ").trim().slice(0, 80)
       : cacheEntry?.firstName ?? null
   return {
     id: sessionId,
@@ -544,6 +547,11 @@ function cheapCodexMetaFromFile(filePath, names) {
     version: sessionMeta.cli_version ?? cacheEntry?.version ?? null,
     lastUsedModel: turnContext.model ?? cacheEntry?.lastUsedModel ?? null,
     ...(isSubagent ? { isSidechain: true, parentSessionId, agentType: "subagent" } : {}),
+    ...(claudeCodexParent ? {
+      isSidechain: true,
+      parentSessionId: claudeCodexParent.parentSessionId,
+      agentType: claudeCodexParent.agentType,
+    } : {}),
   }
 }
 

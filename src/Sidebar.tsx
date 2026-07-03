@@ -99,7 +99,7 @@ function useIsMobile() {
   return mobile
 }
 
-function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, subagentsExpanded, onToggleSubagents, searchHint, searchMatch, highlightTitleQuery, archived, onToggleArchive }: {
+function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, subagentsExpanded, onToggleSubagents, searchHint, searchMatch, highlightTitleQuery, archived, onToggleArchive, depth = s.isSidechain ? 1 : 0 }: {
   s: SessionMeta
   projectPath: string
   isSelected: boolean
@@ -112,6 +112,7 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
   highlightTitleQuery?: string
   archived?: boolean
   onToggleArchive?: () => void
+  depth?: number
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState("")
@@ -152,6 +153,7 @@ function SessionItem({ s, projectPath, isSelected, onSelect, subagentCount, suba
   return (
     <div
       className={`sidebar-session ${isSelected ? "active" : ""} ${s.isSidechain ? "sidechain" : ""} ${searchHint || searchMatch ? "sidebar-session--multiline" : ""}`}
+      style={s.isSidechain ? { paddingLeft: `${8 + Math.max(1, depth) * 14}px` } : undefined}
       onClick={onSelect}
     >
       {editing ? (
@@ -464,16 +466,28 @@ export function Sidebar({ projects: projectsProp, projectsLoading, projectsUpdat
     })
   }
 
-  // Deep-link / selection: reveal the active parent or active subagent.
+  // Deep-link / selection: reveal the active session's full sidechain ancestry.
   useEffect(() => {
     if (!activeSessionIdProp || projectsLoading) return
     const flat = projects.flatMap(p => p.sessions.map(s => ({ s, projectPath: s.projectPath || p.path })))
     const active = flat.find(({ s }) => s.id === activeSessionIdProp)
     if (!active) return
+    const byId = new Map(flat.map(({ s }) => [s.id, s]))
+    const toExpand: string[] = []
     if (active.s.isSidechain && active.s.parentSessionId) {
-      setExpandedParents(prev => (
-        prev.has(active.s.parentSessionId!) ? prev : new Set(prev).add(active.s.parentSessionId!)
-      ))
+      let parentId: string | undefined = active.s.parentSessionId
+      const seen = new Set<string>()
+      while (parentId && !seen.has(parentId)) {
+        seen.add(parentId)
+        toExpand.push(parentId)
+        parentId = byId.get(parentId)?.parentSessionId
+      }
+      setExpandedParents(prev => {
+        if (toExpand.every(id => prev.has(id))) return prev
+        const next = new Set(prev)
+        for (const id of toExpand) next.add(id)
+        return next
+      })
       return
     }
     if (active.s.isSidechain) return
@@ -536,6 +550,7 @@ export function Sidebar({ projects: projectsProp, projectsLoading, projectsUpdat
 
   const subagentsByParent = new Map<string, { s: SessionMeta; projectPath: string }[]>()
   const topLevel: { s: SessionMeta; projectPath: string }[] = []
+  const allIds = new Set(allFlat.map(({ s }) => s.id))
   for (const item of allFlat) {
     if (item.s.isSidechain && item.s.parentSessionId) {
       const arr = subagentsByParent.get(item.s.parentSessionId) ?? []
@@ -545,7 +560,7 @@ export function Sidebar({ projects: projectsProp, projectsLoading, projectsUpdat
       topLevel.push(item)
     }
   }
-  const orphans = allFlat.filter(({ s }) => s.isSidechain && (!s.parentSessionId || !subagentsByParent.has(s.parentSessionId) || !topLevel.find(t => t.s.id === s.parentSessionId)))
+  const orphans = allFlat.filter(({ s }) => s.isSidechain && (!s.parentSessionId || !allIds.has(s.parentSessionId)))
 
   function handleSelect(p: string, s: string) {
     markSessionClick(s)
@@ -562,6 +577,34 @@ export function Sidebar({ projects: projectsProp, projectsLoading, projectsUpdat
     moreSessionsHidden > 0 &&
     !searchBrowseActive &&
     !sidebarBottomInView
+
+  function renderSessionTree(
+    item: { s: SessionMeta; projectPath: string },
+    childrenByParent: Map<string, { s: SessionMeta; projectPath: string }[]>,
+    depth = 0,
+    archiveFallbackPath = item.projectPath,
+  ): React.ReactNode {
+    const { s, projectPath } = item
+    const children = childrenByParent.get(s.id) ?? []
+    const expanded = expandedParents.has(s.id)
+    return (
+      <div key={`${projectPath}/${s.id}`}>
+        <SessionItem
+          s={s}
+          projectPath={projectPath}
+          isSelected={activeSessionIdProp === s.id}
+          onSelect={() => handleSelect(projectPath, s.id)}
+          subagentCount={children.length}
+          subagentsExpanded={expanded}
+          onToggleSubagents={children.length > 0 ? () => toggleParent(s.id) : undefined}
+          archived={archivedKeys.has(archiveKeyFor(s, archiveFallbackPath))}
+          onToggleArchive={() => toggleArchive(archiveKeyFor(s, archiveFallbackPath))}
+          depth={depth}
+        />
+        {expanded && children.map(child => renderSessionTree(child, childrenByParent, depth + 1, archiveFallbackPath))}
+      </div>
+    )
+  }
 
   return (
     <>
@@ -676,108 +719,36 @@ export function Sidebar({ projects: projectsProp, projectsLoading, projectsUpdat
                 }))
                 .filter(p => p.sessions.length > 0)
                 .map(project => {
-                  const projSubagents = new Map<string, SessionMeta[]>()
-                  const projTopLevel: SessionMeta[] = []
+                  const projSubagents = new Map<string, { s: SessionMeta; projectPath: string }[]>()
+                  const projTopLevel: { s: SessionMeta; projectPath: string }[] = []
+                  const projIds = new Set(project.sessions.map(s => s.id))
                   for (const s of project.sessions) {
+                    const item = { s, projectPath: s.projectPath || project.path }
                     if (s.isSidechain && s.parentSessionId) {
                       const arr = projSubagents.get(s.parentSessionId) ?? []
-                      arr.push(s)
+                      arr.push(item)
                       projSubagents.set(s.parentSessionId, arr)
                     } else {
-                      projTopLevel.push(s)
+                      projTopLevel.push(item)
                     }
                   }
-                  const projOrphans = project.sessions.filter(s => s.isSidechain && (!s.parentSessionId || !projTopLevel.find(t => t.id === s.parentSessionId)))
+                  const projOrphans = project.sessions
+                    .filter(s => s.isSidechain && (!s.parentSessionId || !projIds.has(s.parentSessionId)))
+                    .map(s => ({ s, projectPath: s.projectPath || project.path }))
                   return (
                     <div key={project.path} className="sidebar-project">
                       <div className="sidebar-project-name" data-tooltip={project.groupPath ?? project.path}>{project.displayName}</div>
-                      {projTopLevel.map(s => {
-                        const children = projSubagents.get(s.id) ?? []
-                        const expanded = expandedParents.has(s.id)
-                        return (
-                          <div key={`${project.path}/${s.id}`}>
-                            <SessionItem
-                              s={s}
-                              projectPath={s.projectPath || project.path}
-                              isSelected={activeSessionIdProp === s.id}
-                              onSelect={() => handleSelect(s.projectPath || project.path, s.id)}
-                              subagentCount={children.length}
-                              subagentsExpanded={expanded}
-                              onToggleSubagents={children.length > 0 ? () => toggleParent(s.id) : undefined}
-                              archived={archivedKeys.has(archiveKeyFor(s, project.path))}
-                              onToggleArchive={() => toggleArchive(archiveKeyFor(s, project.path))}
-                            />
-                            {expanded && children.map(cs => (
-                              <SessionItem
-                                key={`${project.path}/${cs.id}`}
-                                s={cs}
-                                projectPath={cs.projectPath || project.path}
-                                isSelected={activeSessionIdProp === cs.id}
-                                onSelect={() => handleSelect(cs.projectPath || project.path, cs.id)}
-                                archived={archivedKeys.has(archiveKeyFor(cs, project.path))}
-                                onToggleArchive={() => toggleArchive(archiveKeyFor(cs, project.path))}
-                              />
-                            ))}
-                          </div>
-                        )
-                      })}
-                      {projOrphans.map(s => (
-                        <SessionItem
-                          key={`${project.path}/${s.id}`}
-                          s={s}
-                          projectPath={s.projectPath || project.path}
-                          isSelected={activeSessionIdProp === s.id}
-                          onSelect={() => handleSelect(s.projectPath || project.path, s.id)}
-                          archived={archivedKeys.has(archiveKeyFor(s, project.path))}
-                          onToggleArchive={() => toggleArchive(archiveKeyFor(s, project.path))}
-                        />
-                      ))}
+                      {projTopLevel.map(item => renderSessionTree(item, projSubagents, 0, project.path))}
+                      {projOrphans.map(item => renderSessionTree(item, projSubagents, 1, project.path))}
                     </div>
                   )
                 })
             ) : (
               <>
                 {topLevel.map(({ s, projectPath }) => {
-                  const children = subagentsByParent.get(s.id) ?? []
-                  const expanded = expandedParents.has(s.id)
-                  return (
-                    <div key={`${projectPath}/${s.id}`}>
-                      <SessionItem
-                        s={s}
-                        projectPath={projectPath}
-                        isSelected={activeSessionIdProp === s.id}
-                        onSelect={() => handleSelect(projectPath, s.id)}
-                        subagentCount={children.length}
-                        subagentsExpanded={expanded}
-                        onToggleSubagents={children.length > 0 ? () => toggleParent(s.id) : undefined}
-                        archived={archivedKeys.has(archiveKeyFor(s, projectPath))}
-                        onToggleArchive={() => toggleArchive(archiveKeyFor(s, projectPath))}
-                      />
-                      {expanded && children.map(({ s: cs, projectPath: cp }) => (
-                        <SessionItem
-                          key={`${cp}/${cs.id}`}
-                          s={cs}
-                          projectPath={cp}
-                          isSelected={activeSessionIdProp === cs.id}
-                          onSelect={() => handleSelect(cp, cs.id)}
-                          archived={archivedKeys.has(archiveKeyFor(cs, cp))}
-                          onToggleArchive={() => toggleArchive(archiveKeyFor(cs, cp))}
-                        />
-                      ))}
-                    </div>
-                  )
+                  return renderSessionTree({ s, projectPath }, subagentsByParent, 0, projectPath)
                 })}
-                {orphans.map(({ s, projectPath }) => (
-                  <SessionItem
-                    key={`${projectPath}/${s.id}`}
-                    s={s}
-                    projectPath={projectPath}
-                    isSelected={activeSessionIdProp === s.id}
-                    onSelect={() => handleSelect(projectPath, s.id)}
-                    archived={archivedKeys.has(archiveKeyFor(s, projectPath))}
-                    onToggleArchive={() => toggleArchive(archiveKeyFor(s, projectPath))}
-                  />
-                ))}
+                {orphans.map(item => renderSessionTree(item, subagentsByParent, 1, item.projectPath))}
               </>
             )}
             {!searchBrowseActive && (

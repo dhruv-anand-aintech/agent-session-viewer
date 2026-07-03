@@ -53,6 +53,7 @@ Flags skip the menu: `--lan`, `--cf`, `--ngrok`, `--port`, `--open`, `--skip-cac
 ## Platform readers (`platform-readers.mjs`)
 
 - **Claude Code** — `local-server.mjs` reads `~/.claude/projects/**/*.jsonl` directly (not in `platform-readers.mjs`).
+- **Claude Code remote-control sessions** — claude.ai/code remote-control rows use server ids like `session_...` in URLs and `cse_...` in API/storage. Local Claude JSONLs can contain `{"type":"bridge-session","bridgeSessionId":"cse_..."}` records. When reconciling/deleting noisy remote-control sessions, protect any `bridgeSessionId` that appears in a local JSONL with real message records or a non-zero `lastSequenceNum`; those are the sessions with local transcript value. Empty auto-created remote-control sessions usually have no protected local bridge id and only system/control events server-side. Do not trust claude.ai's `user_message_count` alone; it can be `0` for sessions that have real `user`/`assistant` events.
 - **Cursor** — Reads `~/Library/Application Support/Cursor/User/globalStorage/state.vscdb` (`cursorDiskKV`). Keys `composerData:{id}` and `bubbleId:{composerId}:{bubbleId}`. **Important:** composer row keys must use `substr(key,14)` (not `13` — that included a leading `:` and broke metadata join). Newer bubbles may omit per-bubble `createdAt`; use `composerData` `createdAt`/`lastUpdatedAt` and interpolation.
 - **OpenCode / Antigravity / Hermes** — See file headers for paths and formats.
 

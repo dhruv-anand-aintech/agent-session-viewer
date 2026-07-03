@@ -78,6 +78,8 @@ All platforms are auto-detected from their standard locations — no configurati
 
 **Codex** — rollout transcripts are read from `~/.codex/sessions/`. Structured `function_call` / `function_call_output` entries render as proper tool-use cards in Pretty mode.
 
+**Claude Code remote control** — claude.ai/code remote-control sessions use web ids like `session_...`, while local Claude Code JSONLs record the related bridge id as `bridgeSessionId: "cse_..."`. If claude.ai accumulates empty auto-created remote-control sessions, the safe cleanup rule is: preserve any `cse_...` bridge id that appears in local JSONLs with real user/assistant records or non-zero bridge sequence data; only delete remote rows without a protected local bridge id. The web `user_message_count` field can be wrong, so do not use it as the only signal for content.
+
 **Cursor** — sessions are read from the SQLite blob store. Workspace → folder mapping is resolved via `workspaceStorage/`. macOS only (path is hardcoded to `~/Library/Application Support/Cursor/`).
 
 **OpenCode** — reads from `~/.local/share/opencode/opencode.db` (newer releases) with fallback to the flat `storage/` directory layout.
