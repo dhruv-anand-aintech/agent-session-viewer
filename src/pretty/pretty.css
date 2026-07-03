@@ -7,6 +7,9 @@
   position: relative;
   padding: 22px 16px 4px;
   transition: background 0.1s;
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
 }
 .pp-user-row:hover {
   background: hsla(255, 100%, 100%, 0.02);
@@ -32,6 +35,9 @@
   padding: 22px 16px 4px;
   transition: background 0.1s;
   min-width: 0;
+  box-sizing: border-box;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 .pp-assistant-row:hover {
   background: hsla(255, 100%, 100%, 0.02);
@@ -152,6 +158,18 @@
   word-break: normal;
 }
 .pp-markdown p { margin: 0 0 0.7em; min-width: 0; overflow-wrap: anywhere; }
+.pp-markdown-placeholder {
+  color: var(--text-300);
+  opacity: 0.68;
+  max-height: 9lh;
+  overflow: hidden;
+}
+.pp-pre-placeholder {
+  color: var(--text-300);
+  opacity: 0.68;
+  max-height: 160px;
+  overflow: hidden;
+}
 .pp-markdown p:last-child { margin-bottom: 0; }
 .pp-markdown h1, .pp-markdown h2, .pp-markdown h3 {
   font-weight: 600; margin: 1em 0 0.4em; color: var(--text-000);

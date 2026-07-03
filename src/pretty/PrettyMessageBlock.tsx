@@ -1,4 +1,5 @@
-import { useState, useMemo, memo } from "react"
+import { useState, useMemo, useEffect, useRef, memo } from "react"
+import type { ReactNode } from "react"
 import { marked } from "marked"
 import type { SessionMessage, ContentBlock } from "../types"
 import { stripXml, linkifyPaths, classifyTool, TOOL_META, charCount } from "./utils"
@@ -8,6 +9,38 @@ import "./pretty.css"
 marked.setOptions({ breaks: true, gfm: true })
 
 // ── Primitives ────────────────────────────────────────────────────────────────
+
+function LazyRender({
+  children,
+  fallback,
+}: {
+  children: ReactNode
+  fallback: ReactNode
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [ready, setReady] = useState(false)
+
+  useEffect(() => {
+    if (ready) return
+    const el = ref.current
+    if (!el || !("IntersectionObserver" in window)) {
+      setReady(true)
+      return
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry.isIntersecting) return
+        setReady(true)
+        observer.disconnect()
+      },
+      { rootMargin: "900px 0px" },
+    )
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [ready])
+
+  return <div ref={ref}>{ready ? children : fallback}</div>
+}
 
 function openPath(path: string) {
   fetch(`/api/open?path=${encodeURIComponent(path)}`, { method: "POST", credentials: "include" }).catch(() => {})
@@ -36,7 +69,20 @@ function TextContent({ text }: { text: string }) {
 
 function MarkdownContent({ text }: { text: string }) {
   const html = useMemo(() => marked.parse(text) as string, [text])
-  return <div className="pp-markdown" dangerouslySetInnerHTML={{ __html: html }} />
+  return (
+    <LazyRender fallback={<div className="pp-markdown pp-markdown-placeholder">{text.slice(0, 360)}</div>}>
+      <div className="pp-markdown" dangerouslySetInnerHTML={{ __html: html }} />
+    </LazyRender>
+  )
+}
+
+function LazyPre({ className, children }: { className: string; children: string | string[] }) {
+  const text = Array.isArray(children) ? children.join("") : children
+  return (
+    <LazyRender fallback={<pre className={`${className} pp-pre-placeholder`}>{text.slice(0, 240)}</pre>}>
+      <pre className={className}>{text}</pre>
+    </LazyRender>
+  )
 }
 
 // ── Thinking block ────────────────────────────────────────────────────────────
@@ -70,8 +116,8 @@ function BashCard({ input, result }: { input: Record<string, unknown>; result?: 
       </div>
       {open && (
         <div className="pp-bash-body">
-          <pre className="pp-bash-full-cmd">{cmd}</pre>
-          {result && <pre className="pp-bash-result">{result.slice(0, 3000)}{result.length > 3000 ? "\n…[truncated]" : ""}</pre>}
+          <LazyPre className="pp-bash-full-cmd">{cmd}</LazyPre>
+          {result && <LazyPre className="pp-bash-result">{result.slice(0, 3000)}{result.length > 3000 ? "\n…[truncated]" : ""}</LazyPre>}
         </div>
       )}
     </div>
@@ -90,7 +136,7 @@ function FileReadCard({ input, result }: { input: Record<string, unknown>; resul
         <span className="pp-file-path-muted">{path.replace(filename, "")}</span>
         <span className="pp-fold-arrow">{open ? "▾" : "▸"}</span>
       </div>
-      {open && result && <pre className="pp-file-body">{result.slice(0, 4000)}{result.length > 4000 ? "\n…[truncated]" : ""}</pre>}
+      {open && result && <LazyPre className="pp-file-body">{result.slice(0, 4000)}{result.length > 4000 ? "\n…[truncated]" : ""}</LazyPre>}
     </div>
   )
 }
@@ -132,7 +178,7 @@ function FileWriteCard({ input }: { input: Record<string, unknown> }) {
         <span className="pp-file-path-muted">{dirPart}</span>
         <span className="pp-fold-arrow">{open ? "▾" : "▸"}</span>
       </div>
-      {open && <pre className="pp-file-body">{displayContent.slice(0, 4000)}{displayContent.length > 4000 ? "\n…[truncated]" : ""}</pre>}
+      {open && <LazyPre className="pp-file-body">{displayContent.slice(0, 4000)}{displayContent.length > 4000 ? "\n…[truncated]" : ""}</LazyPre>}
     </div>
   )
 }
@@ -173,7 +219,7 @@ function SearchCard({ name, input, result }: { name: string; input: Record<strin
         <code className="pp-search-query">{query.slice(0, 60)}</code>
         <span className="pp-fold-arrow">{open ? "▾" : "▸"}</span>
       </div>
-      {open && result && <pre className="pp-file-body">{result.slice(0, 3000)}</pre>}
+      {open && result && <LazyPre className="pp-file-body">{result.slice(0, 3000)}</LazyPre>}
     </div>
   )
 }
@@ -190,7 +236,7 @@ function WebCard({ name, input, result }: { name: string; input: Record<string, 
         <span className="pp-web-url">{url.slice(0, 60)}{url.length > 60 ? "…" : ""}</span>
         <span className="pp-fold-arrow">{open ? "▾" : "▸"}</span>
       </div>
-      {open && result && <pre className="pp-file-body">{result.slice(0, 4000)}</pre>}
+      {open && result && <LazyPre className="pp-file-body">{result.slice(0, 4000)}</LazyPre>}
     </div>
   )
 }
@@ -250,7 +296,7 @@ function AgentCard({
       </div>
       {open && (
         <div className="pp-bash-body">
-          {prompt && <pre className="pp-file-body">{prompt.slice(0, 2000)}</pre>}
+          {prompt && <LazyPre className="pp-file-body">{prompt.slice(0, 2000)}</LazyPre>}
           {spawn?.agentId && (
             <div className="pp-agent-spawn-meta">
               {spawn.nickname && <span>{spawn.nickname}</span>}
@@ -258,8 +304,8 @@ function AgentCard({
               {sessionHref && <a href={sessionHref}>Open session →</a>}
             </div>
           )}
-          {spawn?.error && <pre className="pp-bash-result">{spawn.error}</pre>}
-          {!isSpawn && result && <pre className="pp-bash-result">{result.slice(0, 3000)}</pre>}
+          {spawn?.error && <LazyPre className="pp-bash-result">{spawn.error}</LazyPre>}
+          {!isSpawn && result && <LazyPre className="pp-bash-result">{result.slice(0, 3000)}</LazyPre>}
         </div>
       )}
     </div>
@@ -280,8 +326,8 @@ function GenericMcpCard({ name, input, result }: { name: string; input: Record<s
       </div>
       {open && (
         <div className="pp-bash-body">
-          <pre className="pp-bash-full-cmd">{JSON.stringify(input, null, 2)}</pre>
-          {result && <pre className="pp-bash-result">{result.slice(0, 3000)}</pre>}
+          <LazyPre className="pp-bash-full-cmd">{JSON.stringify(input, null, 2)}</LazyPre>
+          {result && <LazyPre className="pp-bash-result">{result.slice(0, 3000)}</LazyPre>}
         </div>
       )}
     </div>

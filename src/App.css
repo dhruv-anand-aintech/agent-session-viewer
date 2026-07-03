@@ -761,6 +761,25 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
 .messages-scroll::-webkit-scrollbar { width: 4px; }
 .messages-scroll::-webkit-scrollbar-track { background: transparent; }
 .messages-scroll::-webkit-scrollbar-thumb { background: var(--border-100); border-radius: 2px; }
+.messages-virtual-space {
+  position: relative;
+  width: 100%;
+}
+.message-virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  content-visibility: auto;
+  contain-intrinsic-size: 160px;
+}
+.message-virtual-row > [data-msg-index] {
+  max-width: 100%;
+  overflow-x: hidden;
+}
 
 .load-more-wrap { display: flex; justify-content: center; padding: 8px 16px; }
 .load-more-pill {

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react"
+import { useVirtualizer } from "@tanstack/react-virtual"
 
 // Module-level thread search cache: key = "projectPath\\x1fsessionId\\x1fquery" -> hits[]
 const _threadCache = new Map<string, { hits: ThreadSearchHit[] }>()
@@ -152,6 +153,25 @@ function wordOverlap(a: string, b: string): number {
   let hits = 0
   wa.forEach(w => { if (wb.has(w)) hits++ })
   return wa.size ? hits / wa.size : 0
+}
+
+function messageTextLength(msg?: SessionMessage): number {
+  const content = msg?.message?.content
+  if (!content) return 0
+  if (typeof content === "string") return content.length
+  return content.reduce((sum, block) => {
+    if (block.type === "text") return sum + (block.text?.length ?? 0)
+    if (block.type === "thinking") return sum + (block.thinking?.length ?? 0)
+    return sum + 160
+  }, 0)
+}
+
+function estimateMessageHeight(msg?: SessionMessage): number {
+  if (!msg) return 96
+  const len = messageTextLength(msg)
+  const base = msg.message?.role === "user" ? 76 : 108
+  const blocks = Array.isArray(msg.message?.content) ? msg.message.content.length : 1
+  return Math.min(720, Math.max(72, base + Math.ceil(len / 95) * 20 + Math.max(0, blocks - 1) * 26))
 }
 
 export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, initialQuery }: { projectDir: string; sessionMeta: SessionMeta; onBack?: () => void; capabilities: Capabilities; initialQuery?: string }) {
@@ -330,6 +350,14 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
   const topSentinelRef = useRef<HTMLDivElement>(null)
   const bottomSentinelRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const rowVirtualizer = useVirtualizer({
+    count: visible.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: index => estimateMessageHeight(visible[index]),
+    overscan: 8,
+    getItemKey: index => visible[index]?.uuid ?? `${globalOffset + startIdx + index}`,
+  })
+  const virtualRows = rowVirtualizer.getVirtualItems()
   const [autoScroll, setAutoScroll] = useState(true)
   const [prettyMode, setPrettyMode] = useState(true)
   const pendingPrevNav = useRef(false)
@@ -366,14 +394,18 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
 
   const loadEarlierControl = getLoadEarlierControlState(win, loadingMore, initialRemotePending)
 
-  const lastScrollRef = useRef<{ dir: "up" | "down"; time: number; scrollTop: number } | null>(null)
+  const scrollSeqRef = useRef(0)
+  const lastScrollRef = useRef<{ dir: "up" | "down"; time: number; scrollTop: number; seq: number } | null>(null)
+  const lastAutoLoadEarlierSeqRef = useRef(0)
+  const lastAutoLoadLaterSeqRef = useRef(0)
 
   const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget
     const now = Date.now()
     const prev = lastScrollRef.current
     const dir = prev && el.scrollTop < prev.scrollTop ? "up" : "down"
-    lastScrollRef.current = { dir, time: now, scrollTop: el.scrollTop }
+    const seq = ++scrollSeqRef.current
+    lastScrollRef.current = { dir, time: now, scrollTop: el.scrollTop, seq }
     setAutoScroll(el.scrollHeight - el.scrollTop - el.clientHeight < 40)
   }, [])
 
@@ -383,10 +415,10 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
     setAutoScroll(true)
   }
 
-  function loadEarlierPreserveScroll() {
+  async function loadEarlierPreserveScroll() {
     const el = scrollRef.current
     const prevHeight = el?.scrollHeight ?? 0
-    loadEarlier()
+    await loadEarlier()
     requestAnimationFrame(() => {
       if (el) el.scrollTop += el.scrollHeight - prevHeight
     })
@@ -402,8 +434,10 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
         const scroll = lastScrollRef.current
         const hasUpPressure = scroll && scroll.dir === "up" && Date.now() - scroll.time < 2000
         if (!hasUpPressure) return
+        if (scroll.seq <= lastAutoLoadEarlierSeqRef.current) return
+        lastAutoLoadEarlierSeqRef.current = scroll.seq
         loadingEarlierRef.current = true
-        loadEarlierPreserveScroll()
+        void loadEarlierPreserveScroll()
         setTimeout(() => { loadingEarlierRef.current = false }, 400)
       },
       { root: scrollRef.current, threshold: 0.1 }
@@ -423,8 +457,10 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
         const scroll = lastScrollRef.current
         const hasDownPressure = scroll && scroll.dir === "down" && Date.now() - scroll.time < 2000
         if (!hasDownPressure) return
+        if (scroll.seq <= lastAutoLoadLaterSeqRef.current) return
+        lastAutoLoadLaterSeqRef.current = scroll.seq
         loadingLaterRef.current = true
-        loadLater()
+        void loadLater()
         setTimeout(() => { loadingLaterRef.current = false }, 400)
       },
       { root: scrollRef.current, threshold: 0.1 }
@@ -451,7 +487,7 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
       pendingPrevNav.current = false
       above[above.length - 1].scrollIntoView({ behavior: "smooth", block: "start" })
     } else if (hasEarlier) {
-      loadEarlierPreserveScroll()
+      void loadEarlierPreserveScroll()
     } else {
       pendingPrevNav.current = false
       turns[0]?.scrollIntoView({ behavior: "smooth", block: "start" })
@@ -474,7 +510,7 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
         above[above.length - 1].scrollIntoView({ behavior: "smooth", block: "start" })
       } else if (hasEarlier) {
         pendingPrevNav.current = true
-        loadEarlierPreserveScroll()
+        void loadEarlierPreserveScroll()
       } else {
         turns[0]?.scrollIntoView({ behavior: "smooth", block: "start" })
       }
@@ -672,47 +708,60 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
           <div>
             <div ref={topSentinelRef} style={{ height: 1 }} />
             <div className="load-more-wrap">
-              <button className="load-more-pill" onClick={loadEarlierControl.disabled ? undefined : loadEarlierPreserveScroll} disabled={loadEarlierControl.disabled}>
+              <button className="load-more-pill" onClick={loadEarlierControl.disabled ? undefined : () => void loadEarlierPreserveScroll()} disabled={loadEarlierControl.disabled}>
                 {loadEarlierControl.label}
                 {!loadEarlierControl.disabled && hasEarlier && <span className="load-more-count">{(win?.serverFetchedFrom ?? 0) + startIdx} remaining</span>}
               </button>
             </div>
           </div>
         )}
-        {visible.map((msg, i) => {
-          const sugg = msg.uuid ? suggestions[msg.uuid] : undefined
-          const nextUserMsg = sugg ? visible.slice(i + 1).find(m => m.type === "user") : undefined
-          const nextText = nextUserMsg ? (typeof nextUserMsg.message?.content === "string" ? nextUserMsg.message.content : (nextUserMsg.message?.content as {type:string;text?:string}[])?.filter(b => b.type === "text").map(b => b.text).join("") ?? "") : ""
-          const chosen = sugg && nextText ? wordOverlap(sugg.text, nextText) > 0.4 : false
-          const activeHit = threadSearchOpen && threadHits.length > 0 ? threadHits[threadHitPos] : undefined
-          const isThreadSearchHit = activeHit
-            ? (activeHit.uuid ? activeHit.uuid === msg.uuid : activeHit.idx === globalOffset + startIdx + i)
-            : false
-          const isNew = !!(msg.uuid && newMsgUuids.has(msg.uuid) && (msg.type === "user" || msg.type === "assistant" || msg.type === "human"))
-          return (
-            <div
-              key={msg.uuid ? `${msg.uuid}:${globalOffset + startIdx + i}` : globalOffset + startIdx + i}
-              className={[sugg ? "msg-with-suggestion" : "", isThreadSearchHit ? "msg-search-hit-wrap" : "", isNew ? "msg-new" : ""].filter(Boolean).join(" ") || undefined}
-              data-msg-index={globalOffset + startIdx + i}
-            >
-              {isNew && <span className="new-msg-dot" title="New since load" />}
-              <Block
-                msg={msg}
-                index={globalOffset + startIdx + i}
-                nextMsg={visible[i + 1]}
-                source={sessionMeta.source}
-                {...(prettyMode ? { projectPath: projectDir } : {})}
-              />
-              {sugg && (
-                <div className="suggestion-pill" title={sugg.text}>
-                  <span className="suggestion-icon">{chosen ? "✓" : "💡"}</span>
-                  <span className="suggestion-text">{sugg.text.slice(0, 80)}{sugg.text.length > 80 ? "…" : ""}</span>
-                  {chosen && <span className="suggestion-chosen">chosen</span>}
+        <div className="messages-virtual-space" style={{ height: rowVirtualizer.getTotalSize() }}>
+          {virtualRows.map(virtualRow => {
+            const i = virtualRow.index
+            const msg = visible[i]
+            if (!msg) return null
+            const absoluteIndex = globalOffset + startIdx + i
+            const sugg = msg.uuid ? suggestions[msg.uuid] : undefined
+            const nextUserMsg = sugg ? visible.slice(i + 1).find(m => m.type === "user") : undefined
+            const nextText = nextUserMsg ? (typeof nextUserMsg.message?.content === "string" ? nextUserMsg.message.content : (nextUserMsg.message?.content as {type:string;text?:string}[])?.filter(b => b.type === "text").map(b => b.text).join("") ?? "") : ""
+            const chosen = sugg && nextText ? wordOverlap(sugg.text, nextText) > 0.4 : false
+            const activeHit = threadSearchOpen && threadHits.length > 0 ? threadHits[threadHitPos] : undefined
+            const isThreadSearchHit = activeHit
+              ? (activeHit.uuid ? activeHit.uuid === msg.uuid : activeHit.idx === absoluteIndex)
+              : false
+            const isNew = !!(msg.uuid && newMsgUuids.has(msg.uuid) && (msg.type === "user" || msg.type === "assistant" || msg.type === "human"))
+            return (
+              <div
+                key={virtualRow.key}
+                data-index={virtualRow.index}
+                ref={rowVirtualizer.measureElement}
+                className="message-virtual-row"
+                style={{ transform: `translateY(${virtualRow.start}px)` }}
+              >
+                <div
+                  className={[sugg ? "msg-with-suggestion" : "", isThreadSearchHit ? "msg-search-hit-wrap" : "", isNew ? "msg-new" : ""].filter(Boolean).join(" ") || undefined}
+                  data-msg-index={absoluteIndex}
+                >
+                  {isNew && <span className="new-msg-dot" title="New since load" />}
+                  <Block
+                    msg={msg}
+                    index={absoluteIndex}
+                    nextMsg={visible[i + 1]}
+                    source={sessionMeta.source}
+                    {...(prettyMode ? { projectPath: projectDir } : {})}
+                  />
+                  {sugg && (
+                    <div className="suggestion-pill" title={sugg.text}>
+                      <span className="suggestion-icon">{chosen ? "✓" : "💡"}</span>
+                      <span className="suggestion-text">{sugg.text.slice(0, 80)}{sugg.text.length > 80 ? "…" : ""}</span>
+                      {chosen && <span className="suggestion-chosen">chosen</span>}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          )
-        })}
+              </div>
+            )
+          })}
+        </div>
         {!loading && hasLater && (
           <div>
             <div ref={bottomSentinelRef} style={{ height: 1 }} />

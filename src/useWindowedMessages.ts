@@ -7,11 +7,45 @@ import { markIDBResult, markRemoteFetch, markChunkLoad } from "./perf"
 import { wallClock } from "./utils"
 import { debugLog } from "./debug-trace"
 import { trackedEventSource } from "./sse-lifecycle"
+import { getMessageRange, putMessageChunk } from "./sessionMessageChunks"
 
 export const CHUNK = 60
-export const MAX_DOM = 180
+export const MIN_DOM = 180
+export const DEFAULT_DOM = 360
+export const MAX_DOM = 480
+export const MEMORY_SAMPLE_MS = 5000
+export const MAX_LOADED_MULTIPLIER = 2
 const INITIAL_TAIL = 20
 const IDB_KEY = (projectDir: string, sessionId: string) => `sess/${projectDir}/${sessionId}`
+
+interface BrowserMemoryInfo {
+  usedJSHeapSize: number
+  jsHeapSizeLimit: number
+}
+
+function browserMemory(): BrowserMemoryInfo | null {
+  const perf = performance as Performance & { memory?: Partial<BrowserMemoryInfo> }
+  const memory = perf.memory
+  if (
+    typeof memory?.usedJSHeapSize !== "number" ||
+    typeof memory?.jsHeapSizeLimit !== "number" ||
+    memory.jsHeapSizeLimit <= 0
+  ) return null
+  return {
+    usedJSHeapSize: memory.usedJSHeapSize,
+    jsHeapSizeLimit: memory.jsHeapSizeLimit,
+  }
+}
+
+export function domLimitForMemory(memory: BrowserMemoryInfo | null): number {
+  if (!memory) return DEFAULT_DOM
+  const usedMb = memory.usedJSHeapSize / 1024 / 1024
+  const heapRatio = memory.usedJSHeapSize / memory.jsHeapSizeLimit
+  if (usedMb >= 512 || heapRatio >= 0.25) return MIN_DOM
+  if (usedMb >= 320 || heapRatio >= 0.16) return 240
+  if (usedMb >= 160 || heapRatio >= 0.08) return DEFAULT_DOM
+  return MAX_DOM
+}
 
 const CHAR_TARGET = 5000
 export function adaptivePage(all: SessionMessage[], fromIdx: number): number {
@@ -41,6 +75,8 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
   const [loadError, setLoadError] = useState<string | null>(null)
   const [chatDir, setChatDir] = useState<string | null>(null)
   const fullRef = useRef<SessionMessage[]>([])
+  const latestTotalRef = useRef(0)
+  const domLimitRef = useRef(domLimitForMemory(browserMemory()))
   const loadSeqRef = useRef(0)
   const seenUuidsRef = useRef<Set<string>>(new Set())
   const [newMsgUuids, setNewMsgUuids] = useState<ReadonlySet<string>>(new Set())
@@ -52,6 +88,23 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
     return `${sessionId?.slice(0, 8) ?? "none"}#${loadSeq}`
   }, [sessionId])
 
+  const maxLoadedMessages = useCallback(() => {
+    return Math.max(DEFAULT_DOM, domLimitRef.current * MAX_LOADED_MULTIPLIER)
+  }, [])
+
+  const rememberChunk = useCallback((start: number, msgs: SessionMessage[], total: number) => {
+    void putMessageChunk(idbKey, start, msgs, total).catch(() => {})
+  }, [idbKey])
+
+  useEffect(() => {
+    function sampleDomLimit() {
+      domLimitRef.current = domLimitForMemory(browserMemory())
+    }
+    sampleDomLimit()
+    const timer = window.setInterval(sampleDomLimit, MEMORY_SAMPLE_MS)
+    return () => window.clearInterval(timer)
+  }, [])
+
   const updateChatDir = useCallback((msgs: SessionMessage[]) => {
     const cwd = msgs.find(m => typeof m.cwd === "string" && m.cwd.trim())?.cwd?.trim() ?? null
     setChatDir(cwd)
@@ -61,13 +114,15 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
     const filtered = msgs.filter(m => m.type !== "file-history-snapshot")
     fullRef.current = filtered
     updateChatDir(filtered)
-    const startIdx = Math.max(0, filtered.length - MAX_DOM)
+    const domLimit = domLimitRef.current
+    const startIdx = Math.max(0, filtered.length - domLimit)
     seenUuidsRef.current = new Set(filtered.map(m => m.uuid).filter(Boolean) as string[])
     setNewMsgUuids(new Set())
     const serverFetchedFrom = serverTotal - msgs.length
     const globalOffset = Math.max(0, serverTotal - filtered.length)
+    rememberChunk(globalOffset, filtered, serverTotal)
     setWin({ msgs: filtered.slice(startIdx), startIdx, total: serverTotal, filteredTotal: serverTotal, serverFetchedFrom, globalOffset })
-  }, [updateChatDir])
+  }, [rememberChunk, updateChatDir])
 
   const fetchRemote = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -130,9 +185,14 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
   useEffect(() => {
     return () => {
       if (!idbKey || fullRef.current.length === 0) return
-      void idbPut(idbKey, { msgs: fullRef.current, total: fullRef.current.length })
+      void idbPut(idbKey, { msgs: fullRef.current, total: latestTotalRef.current || fullRef.current.length })
     }
   }, [idbKey])
+
+  useEffect(() => {
+    if (!win) return
+    latestTotalRef.current = win.filteredTotal || win.total || latestTotalRef.current
+  }, [win])
 
   useEffect(() => {
     if (!projectDir || !sessionId || !idbKey) return
@@ -184,23 +244,30 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
         })
       }
       setWin(prev => {
+        const nextTotal = total || filtered.length
         if (!prev) {
-          const startIdx = Math.max(0, filtered.length - MAX_DOM)
+          const domLimit = domLimitRef.current
+          const startIdx = Math.max(0, filtered.length - domLimit)
           fullRef.current = filtered
           updateChatDir(filtered)
-          return { msgs: filtered.slice(startIdx), startIdx, total: total || filtered.length, filteredTotal: filtered.length, serverFetchedFrom: (total || filtered.length) - filtered.length, globalOffset: 0 }
+          const globalOffset = Math.max(0, nextTotal - filtered.length)
+          return { msgs: filtered.slice(startIdx), startIdx, total: nextTotal, filteredTotal: nextTotal, serverFetchedFrom: globalOffset, globalOffset }
         }
+        const domLimit = domLimitRef.current
         const alreadyHeld = fullRef.current.slice(0, Math.max(0, fullRef.current.length - filtered.length))
         const merged = [...alreadyHeld, ...filtered]
+        const mergedTotal = total || Math.max(prev.total, merged.length)
+        const totalDelta = Math.max(0, mergedTotal - prev.total)
+        const serverFetchedFrom = Math.max(0, prev.serverFetchedFrom + totalDelta)
         fullRef.current = merged
         updateChatDir(merged)
         const newStart = prev.startIdx
         const newMsgs = merged.slice(newStart)
-        if (newMsgs.length > MAX_DOM) {
-          const trimStart = newStart + (newMsgs.length - MAX_DOM)
-          return { msgs: merged.slice(trimStart), startIdx: trimStart, total: total || merged.length, filteredTotal: merged.length, serverFetchedFrom: (total || merged.length) - merged.length, globalOffset: 0 }
+        if (newMsgs.length > domLimit) {
+          const trimStart = newStart + (newMsgs.length - domLimit)
+          return { msgs: merged.slice(trimStart), startIdx: trimStart, total: mergedTotal, filteredTotal: mergedTotal, serverFetchedFrom, globalOffset: prev.globalOffset }
         }
-        return { msgs: newMsgs, startIdx: newStart, total: total || merged.length, filteredTotal: merged.length, serverFetchedFrom: (total || merged.length) - merged.length, globalOffset: 0 }
+        return { msgs: newMsgs, startIdx: newStart, total: mergedTotal, filteredTotal: mergedTotal, serverFetchedFrom, globalOffset: prev.globalOffset }
       })
     }
 
@@ -248,60 +315,48 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
     const full = fullRef.current
 
     if (win.startIdx > 0) {
+      const domLimit = domLimitRef.current
       const newStart = Math.max(0, win.startIdx - adaptivePage(full, win.startIdx))
       const existingEnd = win.startIdx + win.msgs.length
       const newMsgs = full.slice(newStart, existingEnd)
-      const trimmed = newMsgs.length > MAX_DOM ? newMsgs.slice(0, MAX_DOM) : newMsgs
+      const trimmed = newMsgs.length > domLimit ? newMsgs.slice(0, domLimit) : newMsgs
       setWin({ ...win, msgs: trimmed, startIdx: newStart })
       return
     }
 
-    if (win.globalOffset > 0 && win.serverFetchedFrom === 0) {
-      setLoadingMore(true)
-      try {
-        const fetchCount = Math.min(CHUNK, win.globalOffset)
+    if (win.globalOffset <= 0) return
+    setLoadingMore(true)
+    try {
+      const fetchCount = Math.min(CHUNK, win.globalOffset)
+      const rangeStart = win.globalOffset - fetchCount
+      const cached = await getMessageRange(idbKey, rangeStart, fetchCount)
+      let serverTotal = win.total
+      let newFiltered = cached
+      const t0 = performance.now()
+      if (!newFiltered) {
         const skip = win.filteredTotal - win.globalOffset
         const r = await fetch(sessionUrl(projectDir, sessionId, fetchCount, skip), { credentials: "include" })
         if (!r.ok) return
+        serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || win.total
         const newMsgs: SessionMessage[] = await r.json()
-        const newFiltered = newMsgs.filter(m => m.type !== "file-history-snapshot")
-        const merged = [...newFiltered, ...full]
-        fullRef.current = merged
-        const newEnd = newFiltered.length + Math.min(win.msgs.length, MAX_DOM - newFiltered.length)
-        setWin({
-          ...win,
-          msgs: merged.slice(0, Math.min(MAX_DOM, newEnd)),
-          startIdx: 0,
-          globalOffset: win.globalOffset - newFiltered.length,
-          serverFetchedFrom: 0,
-        })
-      } catch { /* ignore */ }
-      finally { setLoadingMore(false) }
-      return
-    }
-
-    if (win.serverFetchedFrom <= 0) return
-    setLoadingMore(true)
-    try {
-      const skip = win.total - win.serverFetchedFrom
-      const t0 = performance.now()
-      const r = await fetch(sessionUrl(projectDir, sessionId, CHUNK, skip), { credentials: "include" })
-      if (!r.ok) return
-      const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || win.total
-      const newMsgs: SessionMessage[] = await r.json()
-      markChunkLoad(sessionId!, newMsgs.length, skip, performance.now() - t0)
-      const newFiltered = newMsgs.filter(m => m.type !== "file-history-snapshot")
+        markChunkLoad(sessionId, newMsgs.length, skip, performance.now() - t0)
+        newFiltered = newMsgs.filter(m => m.type !== "file-history-snapshot")
+      }
+      rememberChunk(rangeStart, newFiltered, serverTotal)
       const merged = [...newFiltered, ...full]
-      fullRef.current = merged
-      const newServerFetchedFrom = Math.max(0, win.serverFetchedFrom - newMsgs.length)
-      const newEnd = newFiltered.length + Math.min(win.msgs.length, MAX_DOM - newFiltered.length)
+      const maxLoaded = maxLoadedMessages()
+      const kept = merged.length > maxLoaded ? merged.slice(0, maxLoaded) : merged
+      const domLimit = domLimitRef.current
+      fullRef.current = kept
+      const newGlobalOffset = Math.max(0, win.globalOffset - newFiltered.length)
+      const newEnd = newFiltered.length + Math.min(win.msgs.length, domLimit - newFiltered.length)
       setWin({
-        msgs: merged.slice(0, Math.min(MAX_DOM, newEnd)),
+        msgs: kept.slice(0, Math.min(domLimit, newEnd)),
         startIdx: 0,
         total: serverTotal,
-        filteredTotal: win.filteredTotal,
-        serverFetchedFrom: newServerFetchedFrom,
-        globalOffset: win.globalOffset - newFiltered.length,
+        filteredTotal: serverTotal,
+        serverFetchedFrom: newGlobalOffset,
+        globalOffset: newGlobalOffset,
       })
     } catch { /* ignore */ }
     finally { setLoadingMore(false) }
@@ -313,10 +368,11 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
     const currentEnd = win.startIdx + win.msgs.length
 
     if (currentEnd < full.length) {
+      const domLimit = domLimitRef.current
       const newEnd = Math.min(full.length, currentEnd + CHUNK)
       const newMsgs = full.slice(win.startIdx, newEnd)
-      if (newMsgs.length > MAX_DOM) {
-        const trimStart = win.startIdx + (newMsgs.length - MAX_DOM)
+      if (newMsgs.length > domLimit) {
+        const trimStart = win.startIdx + (newMsgs.length - domLimit)
         setWin({ ...win, msgs: full.slice(trimStart, newEnd), startIdx: trimStart })
       } else {
         setWin({ ...win, msgs: newMsgs })
@@ -324,27 +380,32 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
       return
     }
 
-    if (win.globalOffset + full.length < win.filteredTotal && win.serverFetchedFrom === 0 && projectDir && sessionId) {
+    if (win.globalOffset + full.length < win.filteredTotal && projectDir && sessionId) {
       setLoadingMore(true)
       try {
         const afterStart = win.globalOffset + full.length
         const remaining = win.filteredTotal - afterStart
         const fetchCount = Math.min(CHUNK, remaining)
-        const skip = remaining - fetchCount
-        const r = await fetch(sessionUrl(projectDir, sessionId, fetchCount, skip), { credentials: "include" })
-        if (!r.ok) return
-        const newMsgs: SessionMessage[] = await r.json()
-        const newFiltered = newMsgs.filter(m => m.type !== "file-history-snapshot")
-        const appended = [...full, ...newFiltered]
-        fullRef.current = appended
-        const newEnd = Math.min(appended.length, currentEnd + newFiltered.length)
-        const newSlice = appended.slice(win.startIdx, newEnd)
-        if (newSlice.length > MAX_DOM) {
-          const trimStart = win.startIdx + (newSlice.length - MAX_DOM)
-          setWin({ ...win, msgs: appended.slice(trimStart, newEnd), startIdx: trimStart })
-        } else {
-          setWin({ ...win, msgs: newSlice })
+        const cached = await getMessageRange(idbKey, afterStart, fetchCount)
+        let newFiltered = cached
+        if (!newFiltered) {
+          const skip = remaining - fetchCount
+          const r = await fetch(sessionUrl(projectDir, sessionId, fetchCount, skip), { credentials: "include" })
+          if (!r.ok) return
+          const newMsgs: SessionMessage[] = await r.json()
+          newFiltered = newMsgs.filter(m => m.type !== "file-history-snapshot")
+          rememberChunk(afterStart, newFiltered, win.filteredTotal)
         }
+        const appended = [...full, ...newFiltered]
+        const domLimit = domLimitRef.current
+        const maxLoaded = maxLoadedMessages()
+        const drop = Math.max(0, appended.length - maxLoaded)
+        const kept = drop > 0 ? appended.slice(drop) : appended
+        const nextGlobalOffset = win.globalOffset + drop
+        fullRef.current = kept
+        const nextEnd = kept.length
+        const nextStart = Math.max(0, nextEnd - domLimit)
+        setWin({ ...win, msgs: kept.slice(nextStart, nextEnd), startIdx: nextStart, globalOffset: nextGlobalOffset, serverFetchedFrom: nextGlobalOffset })
       } catch { /* ignore */ }
       finally { setLoadingMore(false) }
     }
@@ -356,7 +417,8 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
     setLoadingMore(true)
     try {
       const total = win.filteredTotal || win.total
-      const fetchCount = Math.min(MAX_DOM, total)
+      const domLimit = domLimitRef.current
+      const fetchCount = Math.min(domLimit, total)
       const skip = Math.max(0, total - fetchCount)
       const t0 = performance.now()
       const r = await fetch(sessionUrl(projectDir, sessionId, fetchCount, skip), { credentials: "include" })
@@ -365,9 +427,10 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
       const newMsgs: SessionMessage[] = await r.json()
       markChunkLoad(sessionId, newMsgs.length, skip, performance.now() - t0)
       const newFiltered = newMsgs.filter(m => m.type !== "file-history-snapshot")
+      rememberChunk(0, newFiltered, serverTotal)
       fullRef.current = newFiltered
       setWin({
-        msgs: newFiltered.slice(0, MAX_DOM),
+        msgs: newFiltered.slice(0, domLimit),
         startIdx: 0,
         total: serverTotal,
         filteredTotal: serverTotal,
@@ -384,9 +447,10 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
       const full = fullRef.current
       if (targetFullRefIdx < 0 || targetFullRefIdx >= full.length) return prev
       if (targetFullRefIdx >= prev.startIdx && targetFullRefIdx < prev.startIdx + prev.msgs.length) return prev
-      const half = Math.floor(MAX_DOM / 2)
-      const newStart = Math.min(Math.max(0, targetFullRefIdx - half), Math.max(0, full.length - MAX_DOM))
-      const end = Math.min(full.length, newStart + MAX_DOM)
+      const domLimit = domLimitRef.current
+      const half = Math.floor(domLimit / 2)
+      const newStart = Math.min(Math.max(0, targetFullRefIdx - half), Math.max(0, full.length - domLimit))
+      const end = Math.min(full.length, newStart + domLimit)
       return { ...prev, startIdx: newStart, msgs: full.slice(newStart, end) }
     })
   }, [])
@@ -414,9 +478,10 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
       const msgs: SessionMessage[] = await r.json()
       fullRef.current = msgs
       const targetIdx = msgs.findIndex(m => m.uuid === uuid)
-      const half = Math.floor(MAX_DOM / 2)
-      const newStart = Math.min(Math.max(0, targetIdx - half), Math.max(0, msgs.length - MAX_DOM))
-      const newEnd = Math.min(msgs.length, newStart + MAX_DOM)
+      const domLimit = domLimitRef.current
+      const half = Math.floor(domLimit / 2)
+      const newStart = Math.min(Math.max(0, targetIdx - half), Math.max(0, msgs.length - domLimit))
+      const newEnd = Math.min(msgs.length, newStart + domLimit)
       setWin(prev => ({
         msgs: msgs.slice(newStart, newEnd),
         startIdx: newStart,
