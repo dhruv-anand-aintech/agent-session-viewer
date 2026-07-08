@@ -9,6 +9,123 @@ type Provider = {
   authToken?: string
 }
 
+type ModelOption = {
+  value: string
+  label: string
+  model?: string
+  modelClass?: "fast" | "pro"
+  noModel?: boolean
+  useExtraModelArg?: boolean
+}
+
+const OPENCODE_MODELS = [
+  "opencode/big-pickle",
+  "opencode/claude-fable-5",
+  "opencode/claude-haiku-4-5",
+  "opencode/claude-opus-4-1",
+  "opencode/claude-opus-4-5",
+  "opencode/claude-opus-4-6",
+  "opencode/claude-opus-4-7",
+  "opencode/claude-opus-4-8",
+  "opencode/claude-sonnet-4",
+  "opencode/claude-sonnet-4-5",
+  "opencode/claude-sonnet-4-6",
+  "opencode/claude-sonnet-5",
+  "opencode/deepseek-v4-flash",
+  "opencode/deepseek-v4-pro",
+  "opencode/gemini-3-flash",
+  "opencode/gemini-3.1-pro",
+  "opencode/gemini-3.5-flash",
+  "opencode/glm-5",
+  "opencode/glm-5.1",
+  "opencode/glm-5.2",
+  "opencode/gpt-5",
+  "opencode/gpt-5-codex",
+  "opencode/gpt-5.1",
+  "opencode/gpt-5.1-codex",
+  "opencode/gpt-5.2",
+  "opencode/gpt-5.3-codex",
+  "opencode/gpt-5.4",
+  "opencode/gpt-5.4-mini",
+  "opencode/gpt-5.5",
+  "opencode/kimi-k2.6",
+  "opencode/kimi-k2.7-code",
+  "opencode/minimax-m3",
+  "opencode/qwen3.6-plus",
+  "opencode-go/deepseek-v4-flash",
+  "opencode-go/deepseek-v4-pro",
+  "opencode-go/glm-5.1",
+  "opencode-go/glm-5.2",
+  "opencode-go/kimi-k2.6",
+  "opencode-go/kimi-k2.7-code",
+  "opencode-go/mimo-v2.5",
+  "opencode-go/mimo-v2.5-pro",
+  "opencode-go/minimax-m2.7",
+  "opencode-go/minimax-m3",
+  "opencode-go/qwen3.6-plus",
+  "opencode-go/qwen3.7-max",
+  "opencode-go/qwen3.7-plus",
+  "google/gemini-2.5-flash",
+  "google/gemini-2.5-pro",
+  "google/gemini-3-flash-preview",
+  "google/gemini-3.1-flash-lite",
+  "google/gemini-3.1-pro-preview",
+  "google/gemini-3.5-flash",
+  "mistral/codestral-latest",
+  "mistral/mistral-large-latest",
+  "mistral/mistral-medium-latest",
+  "mistral/mistral-small-latest",
+]
+
+function modelClassForModel(model: string): "fast" | "pro" {
+  return /flash|haiku|mini|nano|lite|fast|free|small/i.test(model) ? "fast" : "pro"
+}
+
+function modelLabel(model: string): string {
+  return model
+    .replace(/^opencode-go\//, "OpenCode Go / ")
+    .replace(/^opencode\//, "OpenCode / ")
+    .replace(/^google\//, "Google / ")
+    .replace(/^mistral\//, "Mistral / ")
+}
+
+function modelOptions(models: string[], extra: Partial<ModelOption> = {}): ModelOption[] {
+  return models.map(model => ({
+    value: model,
+    label: modelLabel(model),
+    model,
+    modelClass: modelClassForModel(model),
+    ...extra,
+  }))
+}
+
+const MODEL_OPTIONS_BY_AGENT: Record<string, ModelOption[]> = {
+  random: [
+    { value: "pro", label: "Auto pro", modelClass: "pro" },
+    { value: "fast", label: "Auto fast", modelClass: "fast" },
+  ],
+  codex: modelOptions(["gpt-5.5", "gpt-5.4-mini", "gpt-5.1-codex", "gpt-5-codex"]),
+  claude: modelOptions(["sonnet", "haiku", "opus"]),
+  cursor: modelOptions(["composer-2.5-fast"]),
+  gemini: modelOptions(["gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.1-pro-preview", "gemini-3.5-flash"]),
+  opencode: modelOptions(OPENCODE_MODELS),
+  pi: modelOptions(OPENCODE_MODELS),
+  pier: modelOptions(["pier-hybrid", "sarvam-30b"]),
+  droid: modelOptions(["claude-opus-4-8", "claude-opus-4-8-fast"]),
+  antigravity: modelOptions([
+    "Gemini 3.5 Flash (Medium)",
+    "Gemini 3.5 Flash (High)",
+    "Gemini 3.5 Flash (Low)",
+    "Gemini 3.1 Pro (Low)",
+    "Gemini 3.1 Pro (High)",
+    "Claude Sonnet 4.6 (Thinking)",
+    "Claude Opus 4.6 (Thinking)",
+    "GPT-OSS 120B (Medium)",
+  ], { useExtraModelArg: true }),
+  amp: [{ value: "default", label: "Default", noModel: true, modelClass: "pro" }],
+  "worker-js": [{ value: "default", label: "Worker JS", noModel: true, modelClass: "pro" }],
+}
+
 type User = {
   sub: string
   email: string
@@ -561,7 +678,9 @@ export default {
           agent: "random",
           mode: "ask",
           modelClass: "pro",
+          model: "",
         },
+        modelOptionsByAgent: MODEL_OPTIONS_BY_AGENT,
       })
     }
 

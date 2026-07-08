@@ -877,6 +877,12 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   font: 12px var(--font-ui);
   padding: 0 8px;
 }
+.agent-console-controls .agent-directory-select {
+  min-width: 190px;
+  max-width: 280px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
 .agent-console-controls select:focus,
 .agent-chat-input-row textarea:focus {
   outline: none;

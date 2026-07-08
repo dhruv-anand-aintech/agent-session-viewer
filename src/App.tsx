@@ -4,6 +4,7 @@ import { canonicalizeSelectedProjectPath } from "./sessionPaneState"
 import { parseUrlSession } from "./urlSession"
 import { markAppInit, markSessionClick } from "./perf"
 import { useProjects, useCapabilities } from "./useProjects"
+import type { ProjectData } from "./types"
 import { SessionPane } from "./SessionPane"
 import { Sidebar } from "./Sidebar"
 import { SettingsModal } from "./SettingsModal"
@@ -18,6 +19,35 @@ markAppInit()
 const SIDEBAR_MIN = 300
 const SIDEBAR_MAX = 520
 const SIDEBAR_DEFAULT = 320
+
+function directoryFromProjectPath(projectPath: string): string | null {
+  const prefixed = projectPath.match(/^[a-z-]+:(\/.+)$/)
+  if (prefixed) return prefixed[1]
+  if (projectPath.startsWith("/") && !projectPath.includes("/.claude/projects/")) return projectPath
+  return null
+}
+
+function commonDirectoriesFromProjects(projects: ProjectData[]): string[] {
+  const counts = new Map<string, number>()
+  for (const project of projects) {
+    const dir = directoryFromProjectPath(project.path)
+    if (!dir) continue
+    counts.set(dir, (counts.get(dir) ?? 0) + Math.max(1, project.sessions.length))
+  }
+  const dirs = new Set(counts.keys())
+  const isSplitHyphenAlias = (dir: string) => {
+    const prefix = "/Users/dhruvanand/Code/"
+    if (!dir.startsWith(prefix)) return false
+    const tail = dir.slice(prefix.length).split("/").filter(Boolean)
+    if (tail.length < 2) return false
+    return dirs.has(`${prefix}${tail.join("-")}`)
+  }
+  return [...counts.entries()]
+    .filter(([dir]) => !isSplitHyphenAlias(dir))
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 30)
+    .map(([dir]) => dir)
+}
 
 export default function App() {
   const {
@@ -73,6 +103,7 @@ export default function App() {
 
   const defaultProject = !selected ? projects[0]?.path ?? null : null
   const defaultSession = !selected ? projects[0]?.sessions[0]?.id ?? null : null
+  const commonDirectories = useMemo(() => commonDirectoriesFromProjects(projects), [projects])
   const activeProjectPath = selected?.project ?? defaultProject
   const activeSessionId = selected?.session ?? defaultSession
   const activeProject = activeProjectPath
@@ -200,6 +231,7 @@ export default function App() {
                   onBack={() => setMobileSidebarOpen(true)}
                   capabilities={capabilities}
                   initialQuery={selected?.session === effectiveMeta.id ? selected?.initialQuery : undefined}
+                  commonDirectories={commonDirectories}
                 />
               : <div className="empty-state">Select a session from the sidebar</div>}
           </div>

@@ -13,8 +13,13 @@ const agent = args[args.indexOf("-a") + 1]
 const cwd = args[args.indexOf("-C") + 1]
 const resumeIdx = args.indexOf("--resume")
 const resume = resumeIdx >= 0 ? args[resumeIdx + 1] : null
+const modelIdx = args.indexOf("--model")
+const model = modelIdx >= 0 ? args[modelIdx + 1] : null
+const modelClassIdx = args.indexOf("--model-class")
+const modelClass = modelClassIdx >= 0 ? args[modelClassIdx + 1] : null
+const noModel = args.includes("--no-model")
 const prompt = fs.readFileSync(promptFile, "utf8")
-console.log(JSON.stringify({ agent, cwd, resume, hasSession: prompt.includes("Session ID: session-123"), hasUser: prompt.includes("USER MESSAGE\\nWhat changed?") }))
+console.log(JSON.stringify({ agent, cwd, resume, model, modelClass, noModel, hasSession: prompt.includes("Session ID: session-123"), hasUser: prompt.includes("USER MESSAGE\\nWhat changed?") }))
 `, "utf8")
 chmodSync(mockAgl, 0o755)
 process.env.AGENT_SESSION_AGL_PATH = mockAgl
@@ -56,6 +61,7 @@ try {
     agent: "codex",
     mode: "ask",
     modelClass: "pro",
+    model: "gpt-5.5",
     resume: "session-123",
     cwd: root,
     prompt: "What changed?",
@@ -69,7 +75,7 @@ try {
   })
   assert.equal(result.ok, true)
   const payload = JSON.parse(result.text)
-  assert.deepEqual(payload, { agent: "codex", cwd: root, resume: "session-123", hasSession: true, hasUser: true })
+  assert.deepEqual(payload, { agent: "codex", cwd: root, resume: "session-123", model: "gpt-5.5", modelClass: null, noModel: false, hasSession: true, hasUser: true })
 
   console.log("agent chat core tests passed")
 } finally {

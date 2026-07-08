@@ -176,7 +176,21 @@ function estimateMessageHeight(msg?: SessionMessage): number {
   return Math.min(720, Math.max(72, base + Math.ceil(len / 95) * 20 + Math.max(0, blocks - 1) * 26))
 }
 
-export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, initialQuery }: { projectDir: string; sessionMeta: SessionMeta; onBack?: () => void; capabilities: Capabilities; initialQuery?: string }) {
+export function SessionPane({
+  projectDir,
+  sessionMeta,
+  onBack,
+  capabilities,
+  initialQuery,
+  commonDirectories,
+}: {
+  projectDir: string
+  sessionMeta: SessionMeta
+  onBack?: () => void
+  capabilities: Capabilities
+  initialQuery?: string
+  commonDirectories?: string[]
+}) {
   const paintLogged = useRef(false)
   const stableProjectDirRef = useRef(createPinnedProjectPath(projectDir))
   const stableProjectDir = stableProjectDirRef.current.current
@@ -660,6 +674,7 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
           sessionMeta={sessionMeta}
           cwd={agentCwd}
           messages={agentMessages}
+          commonDirectories={commonDirectories}
           onTranscriptUpdated={refreshTail}
         />
       )}
