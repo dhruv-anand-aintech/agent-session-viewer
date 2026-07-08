@@ -10,6 +10,7 @@ declare const process:
 export type AgentProvider = {
   id: string;
   label: string;
+  kind?: "local-tunnel" | "worker-js" | "cloud-http" | string;
   status?: "available" | "missing" | string;
   agents?: string[];
   detail?: string;

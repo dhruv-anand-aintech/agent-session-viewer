@@ -61,6 +61,7 @@ type SelectOption = {
 
 const STORAGE_KEY = "asv.mobile.state.v1";
 const THINKING_LEVELS = ["auto", "low", "medium", "high"];
+const CLOUD_AGENT_CWD = "/opt/asv-agent/work";
 const NativeWebView = WebView as React.ComponentType<any>;
 
 function escapeScriptValue(value: unknown): string {
@@ -109,6 +110,12 @@ function agentLabel(id: string): string {
 
 function sessionCanResumeWithClaude(session?: SessionMeta | null): boolean {
   return String(session?.source ?? "").toLowerCase() === "claude";
+}
+
+function executionCwdForProvider(provider?: AgentProvider | null): string | undefined {
+  if (!provider) return undefined;
+  if (provider.id === "gcp-claude" || provider.kind === "cloud-http") return CLOUD_AGENT_CWD;
+  return undefined;
 }
 
 function mobileAuthTokenFromUrl(url: string): string {
@@ -455,6 +462,7 @@ function AppContent() {
     setStatus("Running agent");
     setReply("");
     try {
+      const executionCwd = executionCwdForProvider(selectedProvider);
       const body = {
         provider: providerId,
         agent: agentId,
@@ -464,7 +472,7 @@ function AppContent() {
         thinkingLevel,
         noModel: selectedModelOption?.noModel,
         useExtraModelArg: selectedModelOption?.useExtraModelArg,
-        cwd: MOBILE_AGENT_HOME,
+        cwd: executionCwd,
         sessionId: sessionId || undefined,
         prompt: trimmed,
         conversation: [{ role: "user", content: trimmed }],
@@ -473,7 +481,8 @@ function AppContent() {
           mobileRuntime: selectedAgent.runtime,
           installCommand: selectedAgent.installCommand,
           loginCommand: selectedAgent.loginCommand,
-          home: MOBILE_AGENT_HOME,
+          executionCwd,
+          mobileHome: MOBILE_AGENT_HOME,
           prefix: MOBILE_AGENT_PREFIX
         }
       };
@@ -491,7 +500,7 @@ function AppContent() {
     } finally {
       setBusy(false);
     }
-  }, [agentId, bridgeFetch, busy, model, prompt, providerId, selectedAgent, selectedModelOption, sessionId, thinkingLevel]);
+  }, [agentId, bridgeFetch, busy, model, prompt, providerId, selectedAgent, selectedModelOption, selectedProvider, sessionId, thinkingLevel]);
 
   const sendSessionPrompt = useCallback(async () => {
     const trimmed = sessionPrompt.trim();
