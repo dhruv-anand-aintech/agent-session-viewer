@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import { useVirtualizer } from "@tanstack/react-virtual"
+import { Bot } from "lucide-react"
 
 // Module-level thread search cache: key = "projectPath\\x1fsessionId\\x1fquery" -> hits[]
 const _threadCache = new Map<string, { hits: ThreadSearchHit[] }>()
@@ -13,6 +14,7 @@ import { markFirstPaint, markSessionClick } from "./perf"
 import { isRecentlyActive, wallClock } from "./utils"
 import { debugLog, debugWarn } from "./debug-trace"
 import { useWindowedMessages } from "./useWindowedMessages"
+import { AgentConsole } from "./AgentConsole"
 
 type Suggestion = { parentUuid: string; text: string; id: string }
 type ThreadSearchHit = { idx: number; text: string; uuid?: string; score?: number }
@@ -360,6 +362,7 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
   const virtualRows = rowVirtualizer.getVirtualItems()
   const [autoScroll, setAutoScroll] = useState(true)
   const [prettyMode, setPrettyMode] = useState(true)
+  const [agentConsoleOpen, setAgentConsoleOpen] = useState(false)
   const pendingPrevNav = useRef(false)
   const initialScrollDone = useRef(false)
 
@@ -529,6 +532,8 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
   }
 
   const chatDirLabel = chatDir ?? stableProjectDir
+  const agentCwd = cwdFromProjectPath(stableProjectDir, chatDir)
+  const agentMessages = fullRef.current.length ? fullRef.current : visible
   const resumeCommand = resumeCommandForSession(stableProjectDir, sessionMeta, chatDir)
   const [resumeCopied, setResumeCopied] = useState(false)
   const [shareCopied, setShareCopied] = useState(false)
@@ -612,6 +617,16 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
             </svg>
           )}
         </button>
+        <button
+          type="button"
+          className={`session-path-btn agent-toggle-btn ${agentConsoleOpen ? "active" : ""}`}
+          onClick={() => setAgentConsoleOpen(open => !open)}
+          title={agentConsoleOpen ? "Hide agent console" : "Open agent console"}
+          aria-label={agentConsoleOpen ? "Hide agent console" : "Open agent console"}
+        >
+          <Bot size={14} aria-hidden="true" />
+          <span className="hide-mobile">Agent</span>
+        </button>
         {loading && win && <span className="session-refreshing" title="Refreshing…" />}
         {sessionMeta.gitBranch && <span className="git-branch hide-mobile">⎇ {sessionMeta.gitBranch}</span>}
         {isRecentlyActive(sessionMeta.lastActivity) && <span className="active-badge">● Live</span>}
@@ -637,6 +652,15 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
           <button className={`mode-toggle-btn ${prettyMode ? "active" : ""}`} onClick={() => setPrettyMode(true)}>Pretty</button>
         </div>
       </div>
+      {agentConsoleOpen && (
+        <AgentConsole
+          key={`${stableProjectDir}/${sessionMeta.id}`}
+          projectPath={stableProjectDir}
+          sessionMeta={sessionMeta}
+          cwd={agentCwd}
+          messages={agentMessages}
+        />
+      )}
       {threadSearchOpen && (
         <>
           <div className="thread-search-panel">

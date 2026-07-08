@@ -58,6 +58,7 @@ import { indexSession, removeSession, getSearchRows } from "./lib/search-index.m
 import { rgGlobalSearch } from "./lib/rg-search.mjs"
 import { contentSearchStream } from "./lib/content-search.mjs"
 import { isDebugTrace, debugLog, debugWarn } from "./lib/debug-trace.mjs"
+import { getAgentProviders, parseConfiguredProviders, runLocalAglChat } from "./lib/agent-chat-core.mjs"
 import {
   openSidebarCacheDb,
   getSidebarCacheMap,
@@ -3071,6 +3072,53 @@ const server = http.createServer(async (req, res) => {
   // All remaining /api/* require cookie auth
   if (url.pathname.startsWith("/api/") && !checkCookieAuth(req)) {
     json({ error: "Unauthorized" }, 401)
+    return
+  }
+
+  // GET /api/agent/providers — available execution surfaces for the agent console.
+  if (url.pathname === "/api/agent/providers" && req.method === "GET") {
+    json(getAgentProviders())
+    return
+  }
+
+  // POST /api/agent/chat — chat through agl locally, or proxy to a configured provider.
+  if (url.pathname === "/api/agent/chat" && req.method === "POST") {
+    const body = await readBody()
+    const provider = String(body.provider ?? "local")
+    const sessionContext = body.sessionContext && typeof body.sessionContext === "object"
+      ? { ...body.sessionContext }
+      : {}
+
+    if ((!Array.isArray(sessionContext.messages) || sessionContext.messages.length === 0) && sessionContext.projectPath && sessionContext.sessionId) {
+      const loaded = loadSessionMessagesOndemand(String(sessionContext.projectPath), String(sessionContext.sessionId))
+      if (Array.isArray(loaded)) sessionContext.messages = loaded.slice(-100)
+    }
+
+    if (provider === "local") {
+      const result = await runLocalAglChat({ ...body, sessionContext })
+      json(result, result.ok ? 200 : 500)
+      return
+    }
+
+    const configured = parseConfiguredProviders(process.env.AGENT_SESSION_AGENT_PROVIDERS_JSON)
+    const target = configured.find(entry => entry.id === provider && entry.endpoint)
+    if (!target) {
+      json({ ok: false, error: `Unknown agent provider: ${provider}` }, 400)
+      return
+    }
+
+    try {
+      const upstream = await fetch(target.endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...body, sessionContext }),
+      })
+      const text = await upstream.text()
+      res.writeHead(upstream.status, { "Content-Type": upstream.headers.get("Content-Type") ?? "application/json" })
+      res.end(text)
+    } catch (err) {
+      json({ ok: false, error: err?.message ?? String(err) }, 502)
+    }
     return
   }
 

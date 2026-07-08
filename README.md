@@ -56,6 +56,7 @@ npm run local -- --lan
 - **Flat or grouped sidebar** — all sessions sorted by last activity, or grouped by project
 - **Session renaming** — give sessions memorable names via the pencil icon
 - **Thread search** — fuzzy in-sidebar search across all sessions
+- **Agent Console** — chat with the selected transcript as context through `agl`, with provider/agent/mode switching
 - **Mobile-friendly** — slide-in sidebar drawer, back button, safe-area aware
 - **PIN-protected** — simple cookie auth for remote access
 - **Optional rate-limit alerts** — a separate machine runner tails new transcript lines/files and shows persistent macOS applet alerts when a coding agent hits a usage limit
@@ -143,16 +144,39 @@ npx agent-session-viewer@latest --lan      # local network only (same WiFi)
 
 Or omit flags to get an interactive menu at startup.
 
-## Cloudflare custom domain deploy
+## Agent Console providers
 
-For a deployed Worker URL on a Cloudflare-managed hostname, pass a subdomain on setup or deploy:
+The Agent Console uses `agl` locally by default:
 
 ```bash
-npm run setup:cloudflare -- --domain sessions.example.com
-npm run deploy -- --domain sessions.example.com
+agl --help
+npm run local
 ```
 
-This writes a Wrangler `[[routes]]` entry with `custom_domain = true`, so Cloudflare manages DNS and SSL for the active zone.
+Open a session, click **Agent**, choose a provider/agent/mode, and send a message. The UI sends the active transcript context to `/api/agent/chat`; the server hides the translated backend command.
+
+Additional HTTP providers can be added with:
+
+```bash
+export AGENT_SESSION_AGENT_PROVIDERS_JSON='{"providers":[{"id":"modal","label":"Modal","kind":"cloud-http","endpoint":"https://example.com/api/agent/chat","agents":["codex"]}]}'
+```
+
+## Cloudflare Worker and tunnel mode
+
+The Worker can serve the web UI and route `/api/agent/*` to one of three execution surfaces:
+
+- `local` — proxies to `LOCAL_AGENT_BASE_URL`, usually a Cloudflare Tunnel pointing at the local `npm run local` server.
+- `worker-js` — runs in the Worker runtime and is intended only for lightweight JavaScript agents.
+- `cloud-http` — proxies to providers configured in `AGENT_PROVIDER_CONFIG`.
+
+Build and run the Worker locally:
+
+```bash
+npm run build
+npx wrangler dev
+```
+
+For a deployed Worker URL on a Cloudflare-managed hostname, use a Wrangler `[[routes]]` entry with `custom_domain = true`, so Cloudflare manages DNS and SSL for the active zone. The zone must already be active on Cloudflare nameservers.
 
 ## Other commands
 
