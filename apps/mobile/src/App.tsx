@@ -119,6 +119,7 @@ function AppContent() {
   const [model, setModel] = useState("");
   const [thinkingLevel, setThinkingLevel] = useState("auto");
   const [authToken, setAuthToken] = useState("");
+  const [bridgeReady, setBridgeReady] = useState(!canUseEmbeddedAuth());
   const [prompt, setPrompt] = useState("");
   const [status, setStatus] = useState("Ready");
   const [busy, setBusy] = useState(false);
@@ -222,21 +223,27 @@ function AppContent() {
 
   const bridgeFetch = useCallback(
     async <T,>(request: AsvBridgeRequest): Promise<T> => {
-      if (authToken) return asvFetch<T>({ ...request, authToken });
-      if (!canUseEmbeddedAuth() || !webViewRef.current) {
+      if (!canUseEmbeddedAuth()) {
         return asvFetch<T>(request);
+      }
+      if (!bridgeReady || !webViewRef.current) {
+        throw new Error("Browser bridge is starting");
       }
       const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
       const promise = new Promise<T>((resolve, reject) => {
         pendingRequests.current.set(requestId, { resolve: resolve as (value: unknown) => void, reject });
       });
+      const requestAuthToken = request.authToken ?? authToken;
       const script = `
         (async function() {
           try {
             var response = await fetch(${escapeScriptValue(`${ASV_BASE_URL}${request.path}`)}, {
               method: ${escapeScriptValue(request.method ?? (request.body ? "POST" : "GET"))},
               credentials: "include",
-              headers: { "content-type": "application/json" },
+              headers: ${escapeScriptValue({
+                "content-type": "application/json",
+                ...(requestAuthToken ? { Authorization: `Bearer ${requestAuthToken}` } : {})
+              })},
               body: ${request.body ? escapeScriptValue(JSON.stringify(request.body)) : "undefined"}
             });
             var text = await response.text();
@@ -261,7 +268,7 @@ function AppContent() {
       webViewRef.current.injectJavaScript(script);
       return promise;
     },
-    [authToken]
+    [authToken, bridgeReady]
   );
 
   const startMobileSignIn = useCallback(() => {
@@ -272,6 +279,10 @@ function AppContent() {
   }, []);
 
   const loadProviders = useCallback(async () => {
+    if (canUseEmbeddedAuth() && !bridgeReady) {
+      setStatus("Preparing browser bridge");
+      return;
+    }
     setStatus("Loading providers");
     try {
       const data = await bridgeFetch<ProvidersResponse>({ path: "/api/agent/providers" });
@@ -285,7 +296,7 @@ function AppContent() {
     } catch (error) {
       setStatus(Platform.OS === "web" ? "ASV web auth not connected" : error instanceof Error ? error.message : "Provider load failed");
     }
-  }, [bridgeFetch, providerId]);
+  }, [bridgeFetch, bridgeReady, providerId]);
 
   const checkForUpdates = useCallback(async () => {
     if (!Updates.isEnabled) {
@@ -610,6 +621,8 @@ function AppContent() {
             source={{ uri: authToken ? `${ASV_BASE_URL}/api/auth/mobile/finish?token=${encodeURIComponent(authToken)}` : ASV_BASE_URL }}
             sharedCookiesEnabled
             thirdPartyCookiesEnabled
+            onLoadStart={() => setBridgeReady(false)}
+            onLoadEnd={() => setBridgeReady(true)}
             onMessage={onBridgeMessage}
           />
         </View>
