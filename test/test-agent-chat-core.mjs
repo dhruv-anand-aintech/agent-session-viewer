@@ -11,14 +11,17 @@ const args = process.argv.slice(2)
 const promptFile = args[args.indexOf("--prompt-file") + 1]
 const agent = args[args.indexOf("-a") + 1]
 const cwd = args[args.indexOf("-C") + 1]
+const resumeIdx = args.indexOf("--resume")
+const resume = resumeIdx >= 0 ? args[resumeIdx + 1] : null
 const prompt = fs.readFileSync(promptFile, "utf8")
-console.log(JSON.stringify({ agent, cwd, hasSession: prompt.includes("Session ID: session-123"), hasUser: prompt.includes("USER MESSAGE\\nWhat changed?") }))
+console.log(JSON.stringify({ agent, cwd, resume, hasSession: prompt.includes("Session ID: session-123"), hasUser: prompt.includes("USER MESSAGE\\nWhat changed?") }))
 `, "utf8")
 chmodSync(mockAgl, 0o755)
 process.env.AGENT_SESSION_AGL_PATH = mockAgl
 
 const {
   buildAgentPrompt,
+  canResumeSessionWithAgl,
   getAgentProviders,
   runLocalAglChat,
 } = await import("../lib/agent-chat-core.mjs")
@@ -45,12 +48,15 @@ try {
   const providerInfo = getAgentProviders()
   assert.equal(providerInfo.providers[0].id, "local")
   assert.equal(providerInfo.providers[0].status, "available")
+  assert.equal(canResumeSessionWithAgl("codex", "codex"), true)
+  assert.equal(canResumeSessionWithAgl("codex", "claude"), false)
 
   const result = await runLocalAglChat({
     provider: "local",
     agent: "codex",
     mode: "ask",
     modelClass: "pro",
+    resume: "session-123",
     cwd: root,
     prompt: "What changed?",
     sessionContext: {
@@ -63,7 +69,7 @@ try {
   })
   assert.equal(result.ok, true)
   const payload = JSON.parse(result.text)
-  assert.deepEqual(payload, { agent: "codex", cwd: root, hasSession: true, hasUser: true })
+  assert.deepEqual(payload, { agent: "codex", cwd: root, resume: "session-123", hasSession: true, hasUser: true })
 
   console.log("agent chat core tests passed")
 } finally {

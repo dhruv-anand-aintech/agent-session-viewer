@@ -229,47 +229,61 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
     }
   }, [projectDir, sessionId, idbKey, fetchRemote, initWindow, updateChatDir, traceLabel])
 
-  useEffect(() => {
-    if (!isActive || !projectDir || !sessionId || !idbKey) return
-
-    function applyTailUpdate(msgs: SessionMessage[], total: number) {
-      const filtered = msgs.filter(m => m.type !== "file-history-snapshot")
-      const brandNew = filtered.filter(m => m.uuid && !seenUuidsRef.current.has(m.uuid))
-      if (brandNew.length > 0) {
-        setNewMsgUuids(prev => {
-          const next = new Set(prev)
-          brandNew.forEach(m => next.add(m.uuid!))
-          brandNew.forEach(m => seenUuidsRef.current.add(m.uuid!))
-          return next as ReadonlySet<string>
-        })
-      }
-      setWin(prev => {
-        const nextTotal = total || filtered.length
-        if (!prev) {
-          const domLimit = domLimitRef.current
-          const startIdx = Math.max(0, filtered.length - domLimit)
-          fullRef.current = filtered
-          updateChatDir(filtered)
-          const globalOffset = Math.max(0, nextTotal - filtered.length)
-          return { msgs: filtered.slice(startIdx), startIdx, total: nextTotal, filteredTotal: nextTotal, serverFetchedFrom: globalOffset, globalOffset }
-        }
-        const domLimit = domLimitRef.current
-        const alreadyHeld = fullRef.current.slice(0, Math.max(0, fullRef.current.length - filtered.length))
-        const merged = [...alreadyHeld, ...filtered]
-        const mergedTotal = total || Math.max(prev.total, merged.length)
-        const totalDelta = Math.max(0, mergedTotal - prev.total)
-        const serverFetchedFrom = Math.max(0, prev.serverFetchedFrom + totalDelta)
-        fullRef.current = merged
-        updateChatDir(merged)
-        const newStart = prev.startIdx
-        const newMsgs = merged.slice(newStart)
-        if (newMsgs.length > domLimit) {
-          const trimStart = newStart + (newMsgs.length - domLimit)
-          return { msgs: merged.slice(trimStart), startIdx: trimStart, total: mergedTotal, filteredTotal: mergedTotal, serverFetchedFrom, globalOffset: prev.globalOffset }
-        }
-        return { msgs: newMsgs, startIdx: newStart, total: mergedTotal, filteredTotal: mergedTotal, serverFetchedFrom, globalOffset: prev.globalOffset }
+  const applyTailUpdate = useCallback((msgs: SessionMessage[], total: number) => {
+    const filtered = msgs.filter(m => m.type !== "file-history-snapshot")
+    const brandNew = filtered.filter(m => m.uuid && !seenUuidsRef.current.has(m.uuid))
+    if (brandNew.length > 0) {
+      setNewMsgUuids(prev => {
+        const next = new Set(prev)
+        brandNew.forEach(m => next.add(m.uuid!))
+        brandNew.forEach(m => seenUuidsRef.current.add(m.uuid!))
+        return next as ReadonlySet<string>
       })
     }
+    setWin(prev => {
+      const nextTotal = total || filtered.length
+      if (!prev) {
+        const domLimit = domLimitRef.current
+        const startIdx = Math.max(0, filtered.length - domLimit)
+        fullRef.current = filtered
+        updateChatDir(filtered)
+        const globalOffset = Math.max(0, nextTotal - filtered.length)
+        return { msgs: filtered.slice(startIdx), startIdx, total: nextTotal, filteredTotal: nextTotal, serverFetchedFrom: globalOffset, globalOffset }
+      }
+      const domLimit = domLimitRef.current
+      const alreadyHeld = fullRef.current.slice(0, Math.max(0, fullRef.current.length - filtered.length))
+      const merged = [...alreadyHeld, ...filtered]
+      const mergedTotal = total || Math.max(prev.total, merged.length)
+      const totalDelta = Math.max(0, mergedTotal - prev.total)
+      const serverFetchedFrom = Math.max(0, prev.serverFetchedFrom + totalDelta)
+      fullRef.current = merged
+      updateChatDir(merged)
+      const newStart = prev.startIdx
+      const newMsgs = merged.slice(newStart)
+      if (newMsgs.length > domLimit) {
+        const trimStart = newStart + (newMsgs.length - domLimit)
+        return { msgs: merged.slice(trimStart), startIdx: trimStart, total: mergedTotal, filteredTotal: mergedTotal, serverFetchedFrom, globalOffset: prev.globalOffset }
+      }
+      return { msgs: newMsgs, startIdx: newStart, total: mergedTotal, filteredTotal: mergedTotal, serverFetchedFrom, globalOffset: prev.globalOffset }
+    })
+  }, [updateChatDir])
+
+  const refreshTail = useCallback(async () => {
+    if (!projectDir || !sessionId) return false
+    try {
+      const r = await fetch(sessionUrl(projectDir, sessionId, INITIAL_TAIL), { credentials: "include", cache: "no-store" })
+      if (!r.ok) return false
+      const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || 0
+      const msgs: SessionMessage[] = await r.json()
+      applyTailUpdate(msgs, serverTotal)
+      return true
+    } catch {
+      return false
+    }
+  }, [applyTailUpdate, projectDir, sessionId])
+
+  useEffect(() => {
+    if (!isActive || !projectDir || !sessionId || !idbKey) return
 
     const qs = `?project=${encodeURIComponent(projectDir)}&session=${encodeURIComponent(sessionId)}&tail=${INITIAL_TAIL}`
     const es = trackedEventSource(`/api/session-watch${qs}`)
@@ -286,11 +300,7 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
       es.close()
       pollFallback = setInterval(async () => {
         try {
-          const r = await fetch(sessionUrl(projectDir, sessionId, INITIAL_TAIL), { credentials: "include" })
-          if (!r.ok) return
-          const serverTotal = parseInt(r.headers.get("X-Message-Total") ?? "0") || 0
-          const msgs: SessionMessage[] = await r.json()
-          applyTailUpdate(msgs, serverTotal)
+          await refreshTail()
         } catch { /* ignore */ }
       }, 4000)
     })
@@ -299,7 +309,7 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
       es.close()
       if (pollFallback) clearInterval(pollFallback)
     }
-  }, [isActive, projectDir, sessionId, idbKey, updateChatDir])
+  }, [isActive, projectDir, sessionId, idbKey, applyTailUpdate, refreshTail])
 
   const hasEarlier = hasEarlierMessages(win)
   const hasLater = win
@@ -508,6 +518,7 @@ export function useWindowedMessages(projectDir: string | null, sessionId: string
     loadEarlier,
     loadLater,
     loadFirstPage,
+    refreshTail,
     fullRef,
     loadingEarlierRef,
     loadingLaterRef,

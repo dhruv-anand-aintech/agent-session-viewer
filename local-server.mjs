@@ -58,7 +58,7 @@ import { indexSession, removeSession, getSearchRows } from "./lib/search-index.m
 import { rgGlobalSearch } from "./lib/rg-search.mjs"
 import { contentSearchStream } from "./lib/content-search.mjs"
 import { isDebugTrace, debugLog, debugWarn } from "./lib/debug-trace.mjs"
-import { getAgentProviders, parseConfiguredProviders, runLocalAglChat } from "./lib/agent-chat-core.mjs"
+import { aglAgentForSessionSource, canResumeSessionWithAgl, getAgentProviders, parseConfiguredProviders, runLocalAglChat } from "./lib/agent-chat-core.mjs"
 import {
   openSidebarCacheDb,
   getSidebarCacheMap,
@@ -3095,7 +3095,25 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (provider === "local") {
-      const result = await runLocalAglChat({ ...body, sessionContext })
+      const requestedAgent = String(body.agent ?? "random")
+      const resumeCurrentSession = body.resumeCurrentSession === true &&
+        typeof sessionContext.sessionId === "string" &&
+        typeof sessionContext.projectPath === "string" &&
+        canResumeSessionWithAgl(sessionContext.source, requestedAgent)
+      const resumeAgent = resumeCurrentSession
+        ? (aglAgentForSessionSource(sessionContext.source) ?? requestedAgent)
+        : requestedAgent
+      const result = await runLocalAglChat({
+        ...body,
+        agent: resumeAgent,
+        resume: resumeCurrentSession ? sessionContext.sessionId : body.resume,
+        sessionContext,
+      })
+      if (resumeCurrentSession) {
+        msgCacheDelete(`${sessionContext.projectPath}/${sessionContext.sessionId}`)
+      }
+      result.resumedSession = resumeCurrentSession
+      result.sessionId = resumeCurrentSession ? sessionContext.sessionId : undefined
       json(result, result.ok ? 200 : 500)
       return
     }

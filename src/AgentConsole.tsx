@@ -28,6 +28,21 @@ type ChatTurn = {
   agent?: string
 }
 
+const SESSION_SOURCE_TO_AGL_AGENT: Record<string, string> = {
+  claude: "claude",
+  codex: "codex",
+  cursor: "cursor",
+  "cursor-agent": "cursor",
+  opencode: "opencode",
+  gemini: "gemini",
+  antigravity: "antigravity",
+  "antigravity-cli": "antigravity",
+}
+
+function agentForSessionSource(source?: string): string | null {
+  return SESSION_SOURCE_TO_AGL_AGENT[String(source ?? "").toLowerCase()] ?? null
+}
+
 function messagePreview(content: string): string {
   return content.length > 3600 ? `${content.slice(0, 3600)}\n[truncated]` : content
 }
@@ -37,11 +52,13 @@ export function AgentConsole({
   sessionMeta,
   cwd,
   messages,
+  onTranscriptUpdated,
 }: {
   projectPath: string
   sessionMeta: SessionMeta
   cwd: string | null
   messages: SessionMessage[]
+  onTranscriptUpdated: () => Promise<boolean>
 }) {
   const [providers, setProviders] = useState<Provider[]>([])
   const [provider, setProvider] = useState("local")
@@ -53,10 +70,13 @@ export function AgentConsole({
   const [loadingProviders, setLoadingProviders] = useState(false)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [transcriptStatus, setTranscriptStatus] = useState<string | null>(null)
 
   const activeProvider = providers.find(entry => entry.id === provider)
   const agentOptions = activeProvider?.agents?.length ? activeProvider.agents : ["random"]
   const contextMessages = useMemo(() => messages.slice(-100), [messages])
+  const sessionAgent = agentForSessionSource(sessionMeta.source)
+  const resumeCurrentSession = provider === "local" && !!sessionAgent && (agent === sessionAgent || agent === "random")
 
   async function loadProviders() {
     setLoadingProviders(true)
@@ -89,6 +109,7 @@ export function AgentConsole({
     setTurns([])
     setPrompt("")
     setError(null)
+    setTranscriptStatus(null)
   }, [sessionMeta.id, projectPath])
 
   async function sendMessage() {
@@ -114,6 +135,7 @@ export function AgentConsole({
           modelClass,
           prompt: trimmed,
           conversation: nextTurns,
+          resumeCurrentSession,
           sessionContext: {
             projectPath,
             sessionId: sessionMeta.id,
@@ -123,8 +145,16 @@ export function AgentConsole({
           },
         }),
       })
-      const data = await response.json().catch(() => ({})) as { ok?: boolean; text?: string; error?: string; provider?: string; agent?: string }
+      const data = await response.json().catch(() => ({})) as { ok?: boolean; text?: string; error?: string; provider?: string; agent?: string; resumedSession?: boolean }
       if (!response.ok || data.ok === false) throw new Error(data.error ?? `Agent request failed (${response.status})`)
+      if (data.resumedSession) {
+        const refreshed = await onTranscriptUpdated()
+        setTurns([])
+        setTranscriptStatus(refreshed
+          ? `Updated current ${data.agent ?? agent} transcript.`
+          : `Agent finished, but transcript refresh did not return new data.`)
+        return
+      }
       setTurns(current => [
         ...current,
         {
@@ -138,6 +168,7 @@ export function AgentConsole({
       setError(err instanceof Error ? err.message : String(err))
       setTurns(current => current.filter(turn => turn !== userTurn))
       setPrompt(trimmed)
+      setTranscriptStatus(null)
     } finally {
       setSending(false)
     }
@@ -178,6 +209,11 @@ export function AgentConsole({
       </div>
 
       {activeProvider?.detail && <div className="agent-provider-detail">{activeProvider.detail}</div>}
+      {resumeCurrentSession && <div className="agent-transcript-status">Messages will resume this open {sessionMeta.source ?? "agent"} session and refresh the transcript view.</div>}
+      {!resumeCurrentSession && sessionAgent && provider === "local" && (
+        <div className="agent-transcript-status">Selected agent will start a separate session with this transcript as context.</div>
+      )}
+      {transcriptStatus && <div className="agent-transcript-status">{transcriptStatus}</div>}
       {error && <div className="agent-console-error">{error}</div>}
 
       <div className="agent-chat-log">

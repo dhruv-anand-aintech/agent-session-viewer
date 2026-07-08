@@ -197,6 +197,7 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
     loadEarlier,
     loadLater,
     loadFirstPage,
+    refreshTail,
     loadError,
     loadingEarlierRef,
     loadingLaterRef,
@@ -659,6 +660,7 @@ export function SessionPane({ projectDir, sessionMeta, onBack, capabilities, ini
           sessionMeta={sessionMeta}
           cwd={agentCwd}
           messages={agentMessages}
+          onTranscriptUpdated={refreshTail}
         />
       )}
       {threadSearchOpen && (

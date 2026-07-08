@@ -855,6 +855,7 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   opacity: 0.45;
 }
 .agent-provider-detail,
+.agent-transcript-status,
 .agent-console-error {
   margin: 8px 14px 0;
   padding: 7px 9px;
@@ -866,6 +867,11 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   color: var(--text-400);
   background: hsla(255, 100%, 100%, 0.03);
   border: 1px solid var(--border-200);
+}
+.agent-transcript-status {
+  color: hsl(140, 46%, 68%);
+  background: hsla(140, 45%, 44%, 0.09);
+  border: 1px solid hsla(140, 45%, 44%, 0.2);
 }
 .agent-console-error {
   color: hsl(0, 78%, 76%);
@@ -1202,6 +1208,7 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   .agent-console-controls select { flex: 1 1 42%; min-width: 0; max-width: none; font-size: 12px; }
   .agent-chat-log { padding: 9px 10px; }
   .agent-provider-detail,
+  .agent-transcript-status,
   .agent-console-error { margin-left: 10px; margin-right: 10px; }
   .agent-chat-input-row { grid-template-columns: 1fr 44px; padding: 0 10px 10px; }
   .agent-send-btn { width: 44px; min-height: 58px; }
