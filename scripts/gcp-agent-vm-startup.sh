@@ -3,6 +3,9 @@ set -euo pipefail
 
 apt-get update
 apt-get install -y ca-certificates curl git python3 python3-venv nodejs npm
+npm install -g n
+n 22
+hash -r
 
 install -d -m 0755 /opt/asv-agent/bin /opt/asv-agent/work
 
@@ -56,7 +59,7 @@ Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=ASV_RUNNER_HOST=127.0.0.1
 Environment=ASV_RUNNER_PORT=3002
 Environment=ASV_RUNNER_TOKEN=${ASV_RUNNER_TOKEN}
-ExecStart=/usr/bin/node /opt/asv-agent/agent-session-viewer/scripts/asv-agent-runner.mjs
+ExecStart=/usr/bin/env node /opt/asv-agent/agent-session-viewer/scripts/asv-agent-runner.mjs
 Restart=always
 RestartSec=5
 
@@ -70,7 +73,29 @@ systemctl enable --now asv-agent-runner.service
 if [[ -n "${CLOUDFLARED_TOKEN:-}" ]]; then
   curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o /tmp/cloudflared.deb
   dpkg -i /tmp/cloudflared.deb
-  cloudflared service install "$CLOUDFLARED_TOKEN"
+  install -d -m 0700 /etc/cloudflared
+  printf '%s' "$CLOUDFLARED_TOKEN" >/etc/cloudflared/asv-gcp-runner.token
+  chmod 0600 /etc/cloudflared/asv-gcp-runner.token
+
+  cat >/etc/systemd/system/cloudflared.service <<EOF
+[Unit]
+Description=cloudflared tunnel for ASV GCP runner
+After=network-online.target asv-agent-runner.service
+Wants=network-online.target
+Requires=asv-agent-runner.service
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel --url http://127.0.0.1:3002 run --token-file /etc/cloudflared/asv-gcp-runner.token
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now cloudflared.service
 fi
 
 cat >/opt/asv-agent/README.txt <<'EOF'
@@ -82,6 +107,7 @@ Authenticate Claude Code once as the asvagent user, then verify:
   agl -a claude -n -m ask -C /opt/asv-agent/work -p "say ok"
   systemctl status asv-agent-runner
   curl -H "authorization: Bearer $ASV_RUNNER_TOKEN" http://127.0.0.1:3002/api/agent/providers
+  curl https://asv-gcp-runner.ainorthstar.tech/api/health
 
 Recommended: keep long-lived session data synced to Agent Session Viewer through
 the local broadcaster rather than storing large archives on the VM boot disk.
