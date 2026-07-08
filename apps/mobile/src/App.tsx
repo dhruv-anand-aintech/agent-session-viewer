@@ -584,6 +584,7 @@ function AppContent() {
                   onToggle={() => setOpenSelect(openSelect === "provider" ? null : "provider")}
                   onChange={(value) => {
                     setProviderId(value);
+                    setModel("");
                     setOpenSelect(null);
                   }}
                 />
@@ -595,6 +596,7 @@ function AppContent() {
                   onToggle={() => setOpenSelect(openSelect === "agent" ? null : "agent")}
                   onChange={(value) => {
                     setAgentId(value);
+                    setModel("");
                     setOpenSelect(null);
                   }}
                 />

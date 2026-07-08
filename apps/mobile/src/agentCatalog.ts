@@ -1,7 +1,7 @@
-import { Bot, Code2, Cpu, TerminalSquare } from "lucide-react-native";
+import { Bot, Cloud, Code2, Cpu, TerminalSquare } from "lucide-react-native";
 import type { ComponentType } from "react";
 
-export type MobileAgentId = "codex" | "claude" | "opencode" | "cursor";
+export type MobileAgentId = string;
 
 export type MobileAgent = {
   id: MobileAgentId;
@@ -59,5 +59,12 @@ export const MOBILE_AGENT_CHOICES = MOBILE_AGENTS.map((agent) => ({
 }));
 
 export function getMobileAgent(id: string): MobileAgent {
-  return MOBILE_AGENTS.find((agent) => agent.id === id) ?? MOBILE_AGENTS[0];
+  return MOBILE_AGENTS.find((agent) => agent.id === id) ?? {
+    id,
+    label: id,
+    runtime: "asv",
+    installCommand: "",
+    loginCommand: "",
+    icon: Cloud
+  };
 }
