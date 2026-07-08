@@ -118,11 +118,14 @@ expect(
   `${home}/Code/home-debug/CloudSweeper`
 )
 
-// Flat with dashes: home-debug-librera-voice is a real top-level dir (not nested)
+// Flat with dashes: when home-debug-librera-voice exists as a real top-level
+// dir, it beats the nested home-debug fallback. If it is absent on this
+// machine, the resolver should fall back under the existing home-debug dir.
+const flatHomeDebugLibrera = `${home}/Code/home-debug-librera-voice`
 expect(
-  "home-debug-librera-voice (flat with dashes, beats nested home-debug)",
+  "home-debug-librera-voice (flat with dashes if present, otherwise nested fallback)",
   resolveProjectDir(`${CLAUDE_DIR}/-Users-dhruvanand-Code-home-debug-librera-voice`),
-  `${home}/Code/home-debug-librera-voice`
+  existsSync(flatHomeDebugLibrera) ? flatHomeDebugLibrera : `${home}/Code/home-debug/librera-voice`
 )
 
 // Nested where inner dir has dashes: home-debug/location-pois doesn't exist on disk,
