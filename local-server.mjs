@@ -3069,8 +3069,8 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  // All remaining /api/* require cookie auth
-  if (url.pathname.startsWith("/api/") && !checkCookieAuth(req)) {
+  // All remaining /api/* require cookie auth, or header auth for trusted automation/proxy callers.
+  if (url.pathname.startsWith("/api/") && !checkCookieAuth(req) && !checkHeaderAuth(req)) {
     json({ error: "Unauthorized" }, 401)
     return
   }

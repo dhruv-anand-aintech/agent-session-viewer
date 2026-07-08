@@ -7,6 +7,7 @@ type Provider = {
   detail?: string
   endpoint?: string
   authToken?: string
+  authPin?: string
 }
 
 type ModelOption = {
@@ -142,6 +143,7 @@ type Env = {
   GCP_SERVICE_ACCOUNT_EMAIL?: string
   GCP_PRIVATE_KEY?: string
   LOCAL_AGENT_BASE_URL?: string
+  LOCAL_AGENT_AUTH_PIN?: string
   AGENT_PROVIDER_CONFIG?: string
   GOOGLE_CLIENT_ID?: string
   GOOGLE_CLIENT_SECRET?: string
@@ -476,6 +478,7 @@ function providers(env: Env): Provider[] {
       agents: ["random", "codex", "claude", "cursor", "opencode", "gemini", "antigravity"],
       detail: localBase ? `proxying to ${localBase}` : "Set LOCAL_AGENT_BASE_URL to a Cloudflare Tunnel or other local origin URL.",
       endpoint: localBase ? `${localBase}/api/agent/chat` : undefined,
+      authPin: env.LOCAL_AGENT_AUTH_PIN,
     },
     {
       id: "worker-js",
@@ -490,9 +493,10 @@ function providers(env: Env): Provider[] {
 }
 
 function publicProvider(provider: Provider): Provider {
-  const { endpoint, authToken, ...safe } = provider
+  const { endpoint, authToken, authPin, ...safe } = provider
   void endpoint
   void authToken
+  void authPin
   return safe
 }
 
@@ -500,6 +504,7 @@ async function proxyChat(provider: Provider, request: Request): Promise<Response
   if (!provider.endpoint) return json({ ok: false, error: `Provider is not configured: ${provider.id}` }, 400)
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (provider.authToken) headers.Authorization = `Bearer ${provider.authToken}`
+  if (provider.authPin) headers["X-Auth-Pin"] = provider.authPin
   const upstream = await fetch(provider.endpoint, {
     method: "POST",
     headers,
