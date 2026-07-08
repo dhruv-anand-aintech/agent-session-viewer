@@ -4,8 +4,16 @@
     "slug": "agent-session-viewer-mobile",
     "scheme": "asv",
     "version": "0.1.0",
+    "runtimeVersion": "0.1.0",
     "orientation": "default",
     "userInterfaceStyle": "automatic",
+    "plugins": [
+      "expo-updates"
+    ],
+    "updates": {
+      "url": "https://agent-session-viewer.ainorthstar.tech/mobile-updates/manifest",
+      "fallbackToCacheTimeout": 0
+    },
     "assetBundlePatterns": [
       "**/*"
     ],
@@ -14,7 +22,8 @@
       "bundleIdentifier": "tech.ainorthstar.agentSessionViewer"
     },
     "android": {
-      "package": "tech.ainorthstar.agent_session_viewer"
+      "package": "tech.ainorthstar.agent_session_viewer",
+      "versionCode": 1
     },
     "web": {
       "bundler": "metro",

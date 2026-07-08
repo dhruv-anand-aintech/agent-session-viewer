@@ -5,16 +5,19 @@
   "main": "index.js",
   "scripts": {
     "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
+    "android": "expo run:android",
+    "android:device": "expo run:android --device",
+    "ios": "expo run:ios",
     "web": "expo start --web",
     "web:export": "expo export --platform web",
+    "updates:export": "expo export --platform android --output-dir dist-update",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@expo/metro-runtime": "latest",
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "57.0.4",
+    "expo-updates": "~57.0.6",
     "lucide-react-native": "1.23.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",

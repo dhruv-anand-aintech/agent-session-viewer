@@ -28,6 +28,7 @@ const {
   buildAgentPrompt,
   canResumeSessionWithAgl,
   getAgentProviders,
+  prepareAglChatRequest,
   runLocalAglChat,
 } = await import("../lib/agent-chat-core.mjs")
 
@@ -55,6 +56,20 @@ try {
   assert.equal(providerInfo.providers[0].status, "available")
   assert.equal(canResumeSessionWithAgl("codex", "codex"), true)
   assert.equal(canResumeSessionWithAgl("codex", "claude"), false)
+  assert.deepEqual(
+    prepareAglChatRequest({
+      agent: "random",
+      resumeCurrentSession: true,
+      sessionContext: { source: "claude", sessionId: "claude-session-1" },
+    }),
+    {
+      agent: "claude",
+      resumeCurrentSession: true,
+      resume: "claude-session-1",
+      sessionContext: { source: "claude", sessionId: "claude-session-1" },
+      resumedSession: true,
+    },
+  )
 
   const result = await runLocalAglChat({
     provider: "local",
@@ -76,6 +91,28 @@ try {
   assert.equal(result.ok, true)
   const payload = JSON.parse(result.text)
   assert.deepEqual(payload, { agent: "codex", cwd: root, resume: "session-123", model: "gpt-5.5", modelClass: null, noModel: false, hasSession: true, hasUser: true })
+
+  const resumedResult = await runLocalAglChat({
+    provider: "local",
+    agent: "random",
+    mode: "ask",
+    modelClass: "pro",
+    resumeCurrentSession: true,
+    cwd: root,
+    prompt: "What changed?",
+    sessionContext: {
+      projectPath: "/tmp/project",
+      sessionId: "session-123",
+      source: "codex",
+      cwd: root,
+      messages: [{ type: "human", message: { role: "user", content: "context" } }],
+    },
+  })
+  assert.equal(resumedResult.resumedSession, true)
+  assert.equal(resumedResult.sessionId, "session-123")
+  const resumedPayload = JSON.parse(resumedResult.text)
+  assert.equal(resumedPayload.agent, "codex")
+  assert.equal(resumedPayload.resume, "session-123")
 
   console.log("agent chat core tests passed")
 } finally {

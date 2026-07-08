@@ -66,6 +66,13 @@ function withCustomDomainRoute(toml, hostname) {
   return `${withoutExistingCustomDomain}${routeBlock}`
 }
 
+function withBuildCommit(toml, commit) {
+  if (!commit) return toml
+  if (/^BUILD_COMMIT\s*=/m.test(toml)) return toml.replace(/^BUILD_COMMIT\s*=.*$/m, `BUILD_COMMIT = "${commit}"`)
+  if (toml.includes("[vars]")) return toml.replace("[vars]\n", `[vars]\nBUILD_COMMIT = "${commit}"\n`)
+  return `${toml.trimEnd()}\n\n[vars]\nBUILD_COMMIT = "${commit}"\n`
+}
+
 // Load .env file if present (simple KEY=VALUE parser, no dependencies needed)
 const envPath = path.join(root, ".env")
 if (existsSync(envPath)) {
@@ -90,6 +97,7 @@ const checks = [
   "npx tsx test/test-session-pane-state.ts",
   "npx tsx test/test-sidebar-search-state.ts",
   "npm run build",
+  "npm run mobile:updates:stage",
 ]
 
 for (const cmd of checks) {
@@ -100,7 +108,8 @@ for (const cmd of checks) {
 const tomlPath = new URL("wrangler.toml", import.meta.url).pathname
 const original = readFileSync(tomlPath, "utf8")
 
-const patched = original
+const headCommit = execSync("git rev-parse HEAD", { cwd: root, encoding: "utf8" }).trim()
+const patched = withBuildCommit(original, headCommit)
   .replace("PLACEHOLDER_KV_ID", kvId)
   .replace("PLACEHOLDER_KV_PREVIEW_ID", kvPreviewId)
 const domain = validateHostname(customDomainFromEnvOrArgs())

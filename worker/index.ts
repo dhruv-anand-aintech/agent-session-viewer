@@ -621,6 +621,61 @@ async function enqueueCommand(request: Request, env: Env, user: User, machineId:
   return json({ id })
 }
 
+async function serveMobileUpdateManifest(request: Request, env: Env): Promise<Response> {
+  if (!env.ASSETS) return json({ error: "ASSETS is not configured" }, 503)
+  const requestPlatform = request.headers.get("Expo-Platform")?.toLowerCase()
+  const requestRuntime = request.headers.get("Expo-Runtime-Version")
+  const origin = originFrom(request)
+  const stagedRes = await env.ASSETS.fetch(new Request(`${origin}/mobile-updates/latest/asv-manifest.json`))
+  if (!stagedRes.ok) return json({ error: "Mobile update is not staged" }, 404)
+  const staged = await stagedRes.json() as {
+    id: string
+    createdAt: string
+    runtimeVersion: string
+    commit?: string
+    launchAsset: { key: string; hash?: string; contentType: string; fileExtension?: string; path: string }
+    assets?: Array<{ key: string; hash?: string; contentType: string; fileExtension?: string; path: string }>
+  }
+  const headers = {
+    "Content-Type": "application/expo+json",
+    "Expo-Protocol-Version": "1",
+    "Expo-SFV-Version": "0",
+    "Cache-Control": "private, max-age=0, no-cache",
+  }
+  if (requestPlatform && requestPlatform !== "android") return new Response(null, { status: 204, headers })
+  if (requestRuntime && requestRuntime !== staged.runtimeVersion) return new Response(null, { status: 204, headers })
+  const assetUrl = (asset: { path: string }) => `${origin}${asset.path}`
+  return new Response(JSON.stringify({
+    id: staged.id,
+    createdAt: staged.createdAt,
+    runtimeVersion: staged.runtimeVersion,
+    launchAsset: {
+      key: staged.launchAsset.key,
+      hash: staged.launchAsset.hash,
+      contentType: staged.launchAsset.contentType,
+      fileExtension: staged.launchAsset.fileExtension,
+      url: assetUrl(staged.launchAsset),
+    },
+    assets: (staged.assets ?? []).map(asset => ({
+      key: asset.key,
+      hash: asset.hash,
+      contentType: asset.contentType,
+      fileExtension: asset.fileExtension,
+      url: assetUrl(asset),
+    })),
+    metadata: { commit: staged.commit ?? "" },
+    extra: {
+      scopeKey: "tech.ainorthstar.agent_session_viewer",
+      expoClient: {
+        name: "Agent Session Viewer",
+        slug: "agent-session-viewer-mobile",
+        version: "0.1.0",
+        android: { package: "tech.ainorthstar.agent_session_viewer" },
+      },
+    },
+  }), { headers })
+}
+
 async function serveAssets(request: Request, env: Env): Promise<Response> {
   if (!env.ASSETS) return new Response("Agent Session Viewer Worker is running.", { headers: { "Content-Type": "text/plain" } })
   const response = await env.ASSETS.fetch(request)
@@ -649,6 +704,7 @@ export default {
     if (url.pathname === "/api/auth/google/callback") return authCallback(request, env)
     if (url.pathname === "/api/auth/logout") return redirect("/", { "Set-Cookie": cookie("asv_session", "", 0) })
     if (url.pathname === "/api/auth/me") return json({ user: await readUser(request, env) })
+    if (url.pathname === "/mobile-updates/manifest" && request.method === "GET") return serveMobileUpdateManifest(request, env)
     if (url.pathname === "/api/cloud/ingest" && request.method === "POST") return ingest(request, env)
     if (url.pathname === "/api/cloud/poll" && request.method === "GET") return pollCommands(request, env)
 

@@ -24,6 +24,37 @@ export type ChatResponse = {
   text?: string;
   error?: string;
   sessionId?: string;
+  resumedSession?: boolean;
+  provider?: string;
+  agent?: string;
+};
+
+export type SessionMeta = {
+  id: string;
+  projectPath?: string;
+  source?: string;
+  firstName?: string | null;
+  customName?: string | null;
+  lastActivity?: string;
+  messageCount?: number;
+  userMessageCount?: number | null;
+  isActive?: boolean;
+};
+
+export type ProjectSummary = {
+  path: string;
+  name?: string;
+  sessions?: SessionMeta[];
+};
+
+export type TranscriptMessage = {
+  type?: string;
+  timestamp?: string;
+  message?: {
+    role?: string;
+    content?: unknown;
+  };
+  [key: string]: unknown;
 };
 
 export type AsvBridgeRequest = {

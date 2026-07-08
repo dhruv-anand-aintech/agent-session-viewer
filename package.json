@@ -54,6 +54,7 @@
     "setup": "node setup-local.mjs",
     "setup:cloudflare": "node setup.mjs",
     "deploy": "node deploy.mjs",
+    "mobile:updates:stage": "node scripts/stage-mobile-updates.mjs",
     "publish:studies": "node scripts/publish-studies.mjs",
     "configure:directory": "node scripts/configure-worker-directory.mjs",
     "deploy:directory": "npx wrangler deploy --config wrangler.directory.toml",

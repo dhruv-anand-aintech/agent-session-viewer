@@ -1,5 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { ExternalLink, Play, RefreshCw, Send, Smartphone, TerminalSquare } from "lucide-react-native";
+import * as Updates from "expo-updates";
+import { ExternalLink, ListTree, MessageSquare, Play, RefreshCw, Send, Smartphone, TerminalSquare } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -29,11 +30,14 @@ import {
   type AgentProvider,
   type AsvBridgeRequest,
   type ChatResponse,
-  type ProvidersResponse
+  type ProjectSummary,
+  type ProvidersResponse,
+  type SessionMeta,
+  type TranscriptMessage
 } from "./asvApi";
 import { colors, spacing } from "./theme";
 
-type TabId = "chat" | "viewer" | "agents";
+type TabId = "chat" | "sessions" | "viewer" | "agents";
 
 type BridgeResult = {
   requestId: string;
@@ -55,6 +59,46 @@ function escapeScriptValue(value: unknown): string {
   return JSON.stringify(value).replace(/<\/script/gi, "<\\/script");
 }
 
+function textFromContent(content: unknown): string {
+  if (!content) return "";
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => {
+      if (!block || typeof block !== "object") return "";
+      const typed = block as { type?: string; text?: string; thinking?: string; name?: string };
+      if (typed.type === "text") return typed.text ?? "";
+      if (typed.type === "thinking") return typed.thinking ?? "";
+      if (typed.type === "tool_use") return `[tool_use ${typed.name ?? ""}]`;
+      if (typed.type === "tool_result") return "[tool_result]";
+      return typed.type ? `[${typed.type}]` : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function messageText(message: TranscriptMessage): string {
+  return textFromContent(message.message?.content).trim();
+}
+
+function messageRole(message: TranscriptMessage): string {
+  return message.message?.role || message.type || "message";
+}
+
+function sessionTitle(session: SessionMeta): string {
+  return session.customName || session.firstName || session.id.slice(0, 8);
+}
+
+function projectLabel(path: string): string {
+  const clean = path.replace(/^[a-z-]+:/, "");
+  const parts = clean.split("/").filter(Boolean);
+  return parts.slice(-2).join("/") || path;
+}
+
+function sessionCanResumeWithClaude(session?: SessionMeta | null): boolean {
+  return String(session?.source ?? "").toLowerCase() === "claude";
+}
+
 function AppContent() {
   const webViewRef = useRef<any>(null);
   const pendingRequests = useRef(new Map<string, PendingBridgeRequest>());
@@ -68,6 +112,14 @@ function AppContent() {
   const [providers, setProviders] = useState<AgentProvider[]>([]);
   const [reply, setReply] = useState("");
   const [sessionId, setSessionId] = useState("");
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [selectedProjectPath, setSelectedProjectPath] = useState("");
+  const [selectedSession, setSelectedSession] = useState<SessionMeta | null>(null);
+  const [transcript, setTranscript] = useState<TranscriptMessage[]>([]);
+  const [sessionPrompt, setSessionPrompt] = useState("");
+  const [sessionReply, setSessionReply] = useState("");
+  const [loadingSessions, setLoadingSessions] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState("");
 
   const selectedAgent = useMemo(() => getMobileAgent(agentId), [agentId]);
   const selectedProvider = useMemo(
@@ -79,6 +131,11 @@ function AppContent() {
     const defaults = selectedAgent.defaultModel ? [selectedAgent.defaultModel] : [];
     return Array.from(new Set([...fromProvider, ...defaults])).filter(Boolean);
   }, [agentId, selectedAgent.defaultModel, selectedProvider]);
+  const selectedProject = useMemo(
+    () => projects.find((project) => project.path === selectedProjectPath) ?? projects[0] ?? null,
+    [projects, selectedProjectPath]
+  );
+  const projectSessions = selectedProject?.sessions ?? [];
 
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEY)
@@ -157,13 +214,35 @@ function AppContent() {
     try {
       const data = await bridgeFetch<ProvidersResponse>({ path: "/api/agent/providers" });
       setProviders(data.providers ?? []);
-      const local = data.providers?.find((provider) => provider.id === providerId);
-      if (!local && data.providers?.[0]) setProviderId(data.providers[0].id);
+      const current = data.providers?.find((provider) => provider.id === providerId);
+      const cloudClaude = data.providers?.find((provider) => provider.id === "gcp-claude");
+      if (!current && cloudClaude) setProviderId(cloudClaude.id);
+      if (!current && !cloudClaude && data.providers?.[0]) setProviderId(data.providers[0].id);
       setStatus("Providers loaded");
     } catch (error) {
       setStatus(Platform.OS === "web" ? "ASV web auth not connected" : error instanceof Error ? error.message : "Provider load failed");
     }
   }, [bridgeFetch, providerId]);
+
+  const checkForUpdates = useCallback(async () => {
+    if (!Updates.isEnabled) {
+      setUpdateStatus("Updates active in release builds");
+      return;
+    }
+    setUpdateStatus("Checking for update");
+    try {
+      const check = await Updates.checkForUpdateAsync();
+      if (!check.isAvailable) {
+        setUpdateStatus("App is current");
+        return;
+      }
+      await Updates.fetchUpdateAsync();
+      setUpdateStatus("Update downloaded; restarting");
+      await Updates.reloadAsync();
+    } catch (error) {
+      setUpdateStatus(error instanceof Error ? error.message : "Update check failed");
+    }
+  }, []);
 
   useEffect(() => {
     loadProviders();
@@ -187,6 +266,58 @@ function AppContent() {
     const json = parsed.text ? JSON.parse(parsed.text) : {};
     pending.resolve(json);
   }, []);
+
+  const loadSessions = useCallback(async () => {
+    setLoadingSessions(true);
+    setStatus("Loading cloud sessions");
+    try {
+      const data = await bridgeFetch<ProjectSummary[]>({ path: "/api/projects?maxSessions=40" });
+      setProjects(data);
+      const nextProject = data.find((project) => project.path === selectedProjectPath) ?? data[0] ?? null;
+      setSelectedProjectPath(nextProject?.path ?? "");
+      const nextSession = nextProject?.sessions?.find((session) => session.id === selectedSession?.id) ?? nextProject?.sessions?.[0] ?? null;
+      setSelectedSession(nextSession);
+      setStatus(nextSession ? "Cloud sessions loaded" : "No synced sessions");
+      if (nextSession) {
+        const projectPath = nextSession.projectPath || nextProject?.path || "";
+        const messages = await bridgeFetch<TranscriptMessage[]>({
+          path: `/api/session/${encodeURIComponent(projectPath)}/${encodeURIComponent(nextSession.id)}?tail=120`
+        });
+        setTranscript(messages);
+      } else {
+        setTranscript([]);
+      }
+    } catch (error) {
+      setStatus(Platform.OS === "web" ? "Open ASV to authenticate" : error instanceof Error ? error.message : "Session load failed");
+    } finally {
+      setLoadingSessions(false);
+    }
+  }, [bridgeFetch, selectedProjectPath, selectedSession?.id]);
+
+  const openSession = useCallback(async (project: ProjectSummary, session: SessionMeta) => {
+    setSelectedProjectPath(project.path);
+    setSelectedSession(session);
+    setTranscript([]);
+    setSessionReply("");
+    setStatus("Loading transcript");
+    try {
+      const projectPath = session.projectPath || project.path;
+      const messages = await bridgeFetch<TranscriptMessage[]>({
+        path: `/api/session/${encodeURIComponent(projectPath)}/${encodeURIComponent(session.id)}?tail=160`
+      });
+      setTranscript(messages);
+      setStatus("Transcript loaded");
+      setActiveTab("sessions");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Transcript load failed");
+    }
+  }, [bridgeFetch]);
+
+  useEffect(() => {
+    if (activeTab === "sessions" && projects.length === 0 && !loadingSessions) {
+      void loadSessions();
+    }
+  }, [activeTab, loadSessions, loadingSessions, projects.length]);
 
   const sendPrompt = useCallback(async () => {
     const trimmed = prompt.trim();
@@ -229,6 +360,50 @@ function AppContent() {
     }
   }, [agentId, bridgeFetch, busy, model, prompt, providerId, selectedAgent, sessionId]);
 
+  const sendSessionPrompt = useCallback(async () => {
+    const trimmed = sessionPrompt.trim();
+    if (!trimmed || busy || !selectedSession) return;
+    const projectPath = selectedSession.projectPath || selectedProject?.path || selectedProjectPath;
+    setBusy(true);
+    setSessionReply("");
+    setStatus("Sending to cloud Claude");
+    try {
+      const data = await bridgeFetch<ChatResponse>({
+        path: "/api/agent/chat",
+        method: "POST",
+        body: {
+          provider: "gcp-claude",
+          agent: "claude",
+          mode: "ask",
+          model: "sonnet",
+          cwd: "/opt/asv-agent/work",
+          prompt: trimmed,
+          conversation: [{ role: "user", content: trimmed }],
+          resumeCurrentSession: sessionCanResumeWithClaude(selectedSession),
+          sessionContext: {
+            projectPath,
+            sessionId: selectedSession.id,
+            source: selectedSession.source || "claude",
+            cwd: "/opt/asv-agent/work",
+            messages: transcript
+          }
+        }
+      });
+      if (data.ok === false) throw new Error(data.error || "Cloud Claude request failed");
+      setSessionReply(data.text || "");
+      setSessionPrompt("");
+      setStatus(data.resumedSession ? "Cloud Claude resumed session" : "Cloud Claude replied");
+      if (data.resumedSession) {
+        await openSession({ path: projectPath, sessions: [selectedSession] }, selectedSession);
+      }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Cloud Claude request failed");
+      setSessionReply("");
+    } finally {
+      setBusy(false);
+    }
+  }, [bridgeFetch, busy, openSession, selectedProject?.path, selectedProjectPath, selectedSession, sessionPrompt, transcript]);
+
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.root}>
@@ -244,6 +419,7 @@ function AppContent() {
 
         <View style={styles.tabs}>
           <TabButton id="chat" activeTab={activeTab} setActiveTab={setActiveTab} label="Chat" />
+          <TabButton id="sessions" activeTab={activeTab} setActiveTab={setActiveTab} label="Sessions" />
           <TabButton id="viewer" activeTab={activeTab} setActiveTab={setActiveTab} label="Viewer" />
           <TabButton id="agents" activeTab={activeTab} setActiveTab={setActiveTab} label="Agents" />
         </View>
@@ -317,6 +493,23 @@ function AppContent() {
             </ScrollView>
           ) : null}
 
+          {activeTab === "sessions" ? (
+            <SessionsPanel
+              projects={projects}
+              selectedSession={selectedSession}
+              transcript={transcript}
+              prompt={sessionPrompt}
+              reply={sessionReply}
+              busy={busy || loadingSessions}
+              updateStatus={updateStatus}
+              onRefresh={loadSessions}
+              onOpenSession={openSession}
+              onPromptChange={setSessionPrompt}
+              onSendPrompt={sendSessionPrompt}
+              onCheckUpdates={checkForUpdates}
+            />
+          ) : null}
+
           {activeTab === "viewer" ? (
             <ViewerPanel webViewRef={webViewRef} onBridgeMessage={onBridgeMessage} />
           ) : null}
@@ -324,6 +517,17 @@ function AppContent() {
           {activeTab === "agents" ? <AgentCatalog /> : null}
         </View>
       </View>
+      {canUseEmbeddedAuth() ? (
+        <View pointerEvents="none" style={styles.hiddenBridge}>
+          <NativeWebView
+            ref={webViewRef}
+            source={{ uri: ASV_BASE_URL }}
+            sharedCookiesEnabled
+            thirdPartyCookiesEnabled
+            onMessage={onBridgeMessage}
+          />
+        </View>
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -398,6 +602,8 @@ function ViewerPanel({
   webViewRef: React.RefObject<any>;
   onBridgeMessage: (event: { nativeEvent: { data: string } }) => void;
 }) {
+  void webViewRef;
+  void onBridgeMessage;
   if (Platform.OS === "web") {
     return (
       <View style={styles.viewerFallback}>
@@ -410,15 +616,117 @@ function ViewerPanel({
       </View>
     );
   }
+  return <NativeWebView source={{ uri: ASV_BASE_URL }} sharedCookiesEnabled thirdPartyCookiesEnabled style={styles.webView} />;
+}
+
+function SessionsPanel({
+  projects,
+  selectedSession,
+  transcript,
+  prompt,
+  reply,
+  busy,
+  updateStatus,
+  onRefresh,
+  onOpenSession,
+  onPromptChange,
+  onSendPrompt,
+  onCheckUpdates
+}: {
+  projects: ProjectSummary[];
+  selectedSession: SessionMeta | null;
+  transcript: TranscriptMessage[];
+  prompt: string;
+  reply: string;
+  busy: boolean;
+  updateStatus: string;
+  onRefresh: () => void;
+  onOpenSession: (project: ProjectSummary, session: SessionMeta) => void;
+  onPromptChange: (value: string) => void;
+  onSendPrompt: () => void;
+  onCheckUpdates: () => void;
+}) {
   return (
-    <NativeWebView
-      ref={webViewRef}
-      source={{ uri: ASV_BASE_URL }}
-      sharedCookiesEnabled
-      thirdPartyCookiesEnabled
-      onMessage={onBridgeMessage}
-      style={styles.webView}
-    />
+    <ScrollView contentContainerStyle={styles.scrollContent}>
+      <View style={styles.actionRow}>
+        <Pressable style={styles.secondaryButton} onPress={onRefresh} disabled={busy}>
+          <RefreshCw size={18} color={colors.text} />
+          <Text style={styles.secondaryButtonText}>{busy ? "Loading" : "Refresh"}</Text>
+        </Pressable>
+        <Pressable style={styles.secondaryButton} onPress={onCheckUpdates}>
+          <ExternalLink size={18} color={colors.text} />
+          <Text style={styles.secondaryButtonText}>Update</Text>
+        </Pressable>
+      </View>
+      {updateStatus ? <Text style={styles.statusText}>{updateStatus}</Text> : null}
+
+      <Section title="Cloud Sessions">
+        {projects.length === 0 ? (
+          <Text style={styles.mutedText}>Sign in on Viewer, then refresh synced sessions.</Text>
+        ) : (
+          projects.slice(0, 12).map((project) => (
+            <View key={project.path} style={styles.projectGroup}>
+              <View style={styles.projectTitleRow}>
+                <ListTree size={16} color={colors.muted} />
+                <Text style={styles.projectTitle} numberOfLines={1}>{projectLabel(project.path)}</Text>
+              </View>
+              {(project.sessions ?? []).slice(0, 8).map((session) => (
+                <Pressable
+                  key={`${project.path}:${session.id}`}
+                  style={[styles.sessionRow, selectedSession?.id === session.id && styles.sessionRowActive]}
+                  onPress={() => onOpenSession(project, session)}
+                >
+                  <MessageSquare size={16} color={selectedSession?.id === session.id ? colors.accentText : colors.muted} />
+                  <View style={styles.sessionTextWrap}>
+                    <Text style={[styles.sessionTitle, selectedSession?.id === session.id && styles.sessionTitleActive]} numberOfLines={1}>
+                      {sessionTitle(session)}
+                    </Text>
+                    <Text style={[styles.sessionMeta, selectedSession?.id === session.id && styles.sessionMetaActive]} numberOfLines={1}>
+                      {(session.source || "session")} · {session.messageCount ?? 0} messages
+                    </Text>
+                  </View>
+                </Pressable>
+              ))}
+            </View>
+          ))
+        )}
+      </Section>
+
+      {selectedSession ? (
+        <Section title={`Transcript: ${sessionTitle(selectedSession)}`}>
+          {transcript.length === 0 ? (
+            <Text style={styles.mutedText}>No messages loaded.</Text>
+          ) : (
+            transcript.slice(-24).map((message, index) => (
+              <View key={`${message.timestamp ?? index}-${index}`} style={styles.messageRow}>
+                <Text style={styles.messageRole}>{messageRole(message)}</Text>
+                <Text style={styles.messageText}>{messageText(message) || "[empty]"}</Text>
+              </View>
+            ))
+          )}
+          <TextInput
+            style={styles.prompt}
+            multiline
+            value={prompt}
+            onChangeText={onPromptChange}
+            placeholder="Send a follow-up using cloud Claude Code"
+            placeholderTextColor={colors.muted}
+          />
+          <Pressable style={[styles.primaryButton, busy && styles.disabled]} onPress={onSendPrompt} disabled={busy || !prompt.trim()}>
+            {busy ? <ActivityIndicator color={colors.accentText} /> : <Send size={18} color={colors.accentText} />}
+            <Text style={styles.primaryButtonText}>
+              {sessionCanResumeWithClaude(selectedSession) ? "Resume Claude" : "Ask Cloud Claude"}
+            </Text>
+          </Pressable>
+        </Section>
+      ) : null}
+
+      {reply ? (
+        <Section title="Cloud Claude Reply">
+          <Text style={styles.reply}>{reply}</Text>
+        </Section>
+      ) : null}
+    </ScrollView>
   );
 }
 
@@ -537,6 +845,14 @@ const styles = StyleSheet.create({
   content: {
     flex: 1
   },
+  hiddenBridge: {
+    height: 1,
+    left: -10000,
+    opacity: 0,
+    position: "absolute",
+    top: -10000,
+    width: 1
+  },
   scrollContent: {
     gap: spacing.md,
     padding: spacing.md,
@@ -644,6 +960,15 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "700"
   },
+  actionRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: spacing.sm
+  },
+  statusText: {
+    color: colors.muted,
+    fontSize: 12
+  },
   disabled: {
     opacity: 0.65
   },
@@ -656,6 +981,71 @@ const styles = StyleSheet.create({
     fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
     fontSize: 13,
     lineHeight: 20
+  },
+  projectGroup: {
+    gap: spacing.sm
+  },
+  projectTitleRow: {
+    alignItems: "center",
+    flexDirection: "row",
+    gap: spacing.sm
+  },
+  projectTitle: {
+    color: colors.muted,
+    flex: 1,
+    fontSize: 12,
+    fontWeight: "700",
+    textTransform: "uppercase"
+  },
+  sessionRow: {
+    alignItems: "center",
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: spacing.sm,
+    padding: spacing.md
+  },
+  sessionRowActive: {
+    backgroundColor: colors.accent,
+    borderColor: colors.accent
+  },
+  sessionTextWrap: {
+    flex: 1,
+    gap: 2
+  },
+  sessionTitle: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: "700"
+  },
+  sessionTitleActive: {
+    color: colors.accentText
+  },
+  sessionMeta: {
+    color: colors.muted,
+    fontSize: 12
+  },
+  sessionMetaActive: {
+    color: colors.accentText
+  },
+  messageRow: {
+    borderLeftColor: colors.border,
+    borderLeftWidth: 2,
+    gap: spacing.xs,
+    paddingLeft: spacing.md
+  },
+  messageRole: {
+    color: colors.muted,
+    fontSize: 11,
+    fontWeight: "700",
+    textTransform: "uppercase"
+  },
+  messageText: {
+    color: colors.text,
+    fontSize: 13,
+    lineHeight: 19
   },
   webView: {
     flex: 1
