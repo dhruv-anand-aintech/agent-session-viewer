@@ -6,29 +6,33 @@ compatibility_date = "2026-07-08"
 directory = "./dist"
 binding = "ASSETS"
 
-# Optional production routing:
-# [[routes]]
-# pattern = "agent-session-viewer.ainorthstar.tech"
-# custom_domain = true
-#
-# Move this machine's direct tunnel to a separate hostname, for example:
+[[routes]]
+pattern = "agent-session-viewer.ainorthstar.tech/*"
+zone_name = "ainorthstar.tech"
+
+# Move this machine's direct tunnel to:
 #   asv-dhruv.ainorthstar.tech -> http://127.0.0.1:3001
 
-# Optional Worker variables:
-# LOCAL_AGENT_BASE_URL = "https://your-local-runner.trycloudflare.com"
+[vars]
+GCS_BUCKET = "agent-session-viewer-sessions-onboarding-host-1d21888935424f"
+LOCAL_AGENT_BASE_URL = "https://asv-dhruv.ainorthstar.tech"
 # AGENT_PROVIDER_CONFIG = '{"providers":[{"id":"modal","label":"Modal","kind":"cloud-http","endpoint":"https://example.com/api/agent/chat","agents":["codex"]}]}'
 # GOOGLE_CLIENT_ID = "..."
+
+[[d1_databases]]
+binding = "AUTH_DB"
+database_name = "agent-session-viewer-auth"
+database_id = "4a11792f-beb5-4573-ac08-5b0f0a5f0dd9"
+
+# Required secrets:
+#   GOOGLE_CLIENT_ID
+#   GOOGLE_CLIENT_SECRET
+#   SESSION_SECRET
+#   GCP_SERVICE_ACCOUNT_EMAIL
+#   GCP_PRIVATE_KEY
+#   BUILD_COMMIT
 #
-# Required bindings for the cloud multi-user mode:
-# [[d1_databases]]
-# binding = "AUTH_DB"
-# database_name = "agent-session-viewer-auth"
-# database_id = "..."
-#
+# Optional R2 fallback instead of GCS:
 # [[r2_buckets]]
 # binding = "SESSION_BUCKET"
 # bucket_name = "agent-session-viewer-sessions"
-#
-# Required secrets:
-#   GOOGLE_CLIENT_SECRET
-#   SESSION_SECRET

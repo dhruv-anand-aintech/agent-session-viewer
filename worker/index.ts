@@ -20,15 +20,20 @@ type Env = {
   ASSETS?: { fetch: (request: Request) => Promise<Response> }
   AUTH_DB?: any
   SESSION_BUCKET?: any
+  GCS_BUCKET?: string
+  GCP_SERVICE_ACCOUNT_EMAIL?: string
+  GCP_PRIVATE_KEY?: string
   LOCAL_AGENT_BASE_URL?: string
   AGENT_PROVIDER_CONFIG?: string
   GOOGLE_CLIENT_ID?: string
   GOOGLE_CLIENT_SECRET?: string
   SESSION_SECRET?: string
+  BUILD_COMMIT?: string
 }
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
+let gcsTokenCache: { token: string; exp: number } | null = null
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -44,6 +49,12 @@ function json(data: unknown, status = 200): Response {
 
 function redirect(location: string, headers: Record<string, string> = {}): Response {
   return new Response(null, { status: 302, headers: { Location: location, ...headers } })
+}
+
+function redirectWithCookies(location: string, cookies: string[]): Response {
+  const headers = new Headers({ Location: location })
+  for (const value of cookies) headers.append("Set-Cookie", value)
+  return new Response(null, { status: 302, headers })
 }
 
 function configuredForGoogle(env: Env): boolean {
@@ -67,6 +78,55 @@ async function hmac(value: string, secret: string): Promise<string> {
   const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"])
   const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(value))
   return b64url(new Uint8Array(sig))
+}
+
+function pemToBytes(pem: string): Uint8Array {
+  const clean = pem
+    .replace(/\\n/g, "\n")
+    .replace(/-----BEGIN PRIVATE KEY-----/g, "")
+    .replace(/-----END PRIVATE KEY-----/g, "")
+    .replace(/\s+/g, "")
+  return unb64url(clean.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, ""))
+}
+
+async function rsaSign(value: string, privateKeyPem: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "pkcs8",
+    pemToBytes(privateKeyPem),
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"],
+  )
+  const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, encoder.encode(value))
+  return b64url(new Uint8Array(signature))
+}
+
+async function gcsAccessToken(env: Env): Promise<string> {
+  if (!env.GCP_SERVICE_ACCOUNT_EMAIL || !env.GCP_PRIVATE_KEY) throw new Error("GCP service account secrets are not configured")
+  const now = Math.floor(Date.now() / 1000)
+  if (gcsTokenCache && gcsTokenCache.exp - 60 > now) return gcsTokenCache.token
+  const header = b64url(encoder.encode(JSON.stringify({ alg: "RS256", typ: "JWT" })))
+  const claim = b64url(encoder.encode(JSON.stringify({
+    iss: env.GCP_SERVICE_ACCOUNT_EMAIL,
+    scope: "https://www.googleapis.com/auth/devstorage.read_write",
+    aud: "https://oauth2.googleapis.com/token",
+    iat: now,
+    exp: now + 3600,
+  })))
+  const unsigned = `${header}.${claim}`
+  const assertion = `${unsigned}.${await rsaSign(unsigned, env.GCP_PRIVATE_KEY)}`
+  const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion,
+    }),
+  })
+  if (!tokenRes.ok) throw new Error(`GCS token exchange failed: ${tokenRes.status}`)
+  const token = await tokenRes.json() as { access_token: string; expires_in?: number }
+  gcsTokenCache = { token: token.access_token, exp: now + (token.expires_in ?? 3600) }
+  return gcsTokenCache.token
 }
 
 async function sha256Hex(value: string): Promise<string> {
@@ -181,12 +241,10 @@ async function authCallback(request: Request, env: Env): Promise<Response> {
   await env.AUTH_DB?.prepare(
     "insert into users (id, email, name, picture, updated_at) values (?, ?, ?, ?, datetime('now')) on conflict(id) do update set email = excluded.email, name = excluded.name, picture = excluded.picture, updated_at = datetime('now')",
   ).bind(user.sub, user.email, user.name ?? null, user.picture ?? null).run()
-  return redirect("/sessions", {
-    "Set-Cookie": [
-      cookie("asv_session", await signUser(user, env.SESSION_SECRET!), 60 * 60 * 24 * 14),
-      cookie("asv_oauth_state", "", 0),
-    ].join(", "),
-  })
+  return redirectWithCookies("/sessions", [
+    cookie("asv_session", await signUser(user, env.SESSION_SECRET!), 60 * 60 * 24 * 14),
+    cookie("asv_oauth_state", "", 0),
+  ])
 }
 
 function parseProviderConfig(raw?: string): Provider[] {
@@ -279,6 +337,47 @@ function manifestKey(userId: string, machineId: string): string {
   return `users/${userId}/machines/${machineId}/manifest.json`
 }
 
+async function putObjectJson(env: Env, key: string, value: unknown): Promise<void> {
+  const text = JSON.stringify(value)
+  if (env.GCS_BUCKET) {
+    const token = await gcsAccessToken(env)
+    const params = new URLSearchParams({ uploadType: "media", name: key })
+    const res = await fetch(`https://storage.googleapis.com/upload/storage/v1/b/${encodeURIComponent(env.GCS_BUCKET)}/o?${params}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: text,
+    })
+    if (!res.ok) throw new Error(`GCS put failed: ${res.status} ${await res.text()}`)
+    return
+  }
+  if (env.SESSION_BUCKET) {
+    await env.SESSION_BUCKET.put(key, text, { httpMetadata: { contentType: "application/json" } })
+    return
+  }
+  throw new Error("No transcript object store configured")
+}
+
+async function getObjectJson<T>(env: Env, key: string): Promise<T | null> {
+  if (env.GCS_BUCKET) {
+    const token = await gcsAccessToken(env)
+    const res = await fetch(`https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(env.GCS_BUCKET)}/o/${encodeURIComponent(key)}?alt=media`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (res.status === 404) return null
+    if (!res.ok) throw new Error(`GCS get failed: ${res.status} ${await res.text()}`)
+    return await res.json() as T
+  }
+  if (env.SESSION_BUCKET) {
+    const object = await env.SESSION_BUCKET.get(key)
+    if (!object) return null
+    return await object.json().catch(() => null) as T | null
+  }
+  return null
+}
+
 async function machineFromToken(request: Request, env: Env): Promise<{ userId: string; machineId: string } | Response> {
   const header = request.headers.get("Authorization") ?? ""
   const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : ""
@@ -299,13 +398,10 @@ async function listMachines(user: User, env: Env): Promise<Array<{ id: string; l
 }
 
 async function loadProjects(user: User, env: Env): Promise<unknown[]> {
-  if (!env.SESSION_BUCKET) return []
   const machines = await listMachines(user, env)
   const byPath = new Map<string, any>()
   for (const machine of machines) {
-    const object = await env.SESSION_BUCKET.get(manifestKey(user.sub, machine.id))
-    if (!object) continue
-    const manifest = await object.json().catch(() => null) as { projects?: any[] } | null
+    const manifest = await getObjectJson<{ projects?: any[] }>(env, manifestKey(user.sub, machine.id)).catch(() => null)
     for (const project of manifest?.projects ?? []) {
       const existing = byPath.get(project.path)
       byPath.set(project.path, existing
@@ -328,11 +424,8 @@ async function streamProjects(user: User, env: Env): Promise<Response> {
 }
 
 async function readSession(user: User, env: Env, projectPath: string, sessionId: string): Promise<Response> {
-  if (!env.SESSION_BUCKET) return json({ error: "SESSION_BUCKET is not configured" }, 503)
   for (const machine of await listMachines(user, env)) {
-    const object = await env.SESSION_BUCKET.get(sessionKey(user.sub, machine.id, projectPath, sessionId))
-    if (!object) continue
-    const data = await object.json().catch(() => null) as { messages?: unknown[]; total?: number } | null
+    const data = await getObjectJson<{ messages?: unknown[]; total?: number }>(env, sessionKey(user.sub, machine.id, projectPath, sessionId)).catch(() => null)
     if (!data) continue
     return new Response(JSON.stringify(data.messages ?? []), {
       headers: { "Content-Type": "application/json", "X-Message-Total": String(data.total ?? data.messages?.length ?? 0) },
@@ -353,21 +446,19 @@ async function registerMachine(request: Request, env: Env, user: User): Promise<
 }
 
 async function ingest(request: Request, env: Env): Promise<Response> {
-  if (!env.SESSION_BUCKET || !env.AUTH_DB) return json({ error: "SESSION_BUCKET and AUTH_DB are required" }, 503)
+  if (!env.AUTH_DB) return json({ error: "AUTH_DB is required" }, 503)
   const machine = await machineFromToken(request, env)
   if (machine instanceof Response) return machine
   const body = await request.json().catch(() => ({})) as { projects?: unknown[]; sessions?: Array<{ projectPath: string; sessionId: string; messages: unknown[]; total?: number }> }
   const projects = Array.isArray(body.projects) ? body.projects : []
   const sessions = Array.isArray(body.sessions) ? body.sessions : []
-  await env.SESSION_BUCKET.put(manifestKey(machine.userId, machine.machineId), JSON.stringify({ projects, updatedAt: new Date().toISOString() }), {
-    httpMetadata: { contentType: "application/json" },
-  })
+  await putObjectJson(env, manifestKey(machine.userId, machine.machineId), { projects, updatedAt: new Date().toISOString() })
   for (const session of sessions) {
     if (!session.projectPath || !session.sessionId || !Array.isArray(session.messages)) continue
-    await env.SESSION_BUCKET.put(
+    await putObjectJson(
+      env,
       sessionKey(machine.userId, machine.machineId, session.projectPath, session.sessionId),
-      JSON.stringify({ messages: session.messages, total: session.total ?? session.messages.length, updatedAt: new Date().toISOString() }),
-      { httpMetadata: { contentType: "application/json" } },
+      { messages: session.messages, total: session.total ?? session.messages.length, updatedAt: new Date().toISOString() },
     )
   }
   await env.AUTH_DB.prepare("update machines set last_seen_at = datetime('now') where id = ?").bind(machine.machineId).run()
@@ -470,7 +561,12 @@ export default {
     }
 
     if (url.pathname === "/api/health") {
-      return json({ ok: true, runtime: "cloudflare-worker", auth: configuredForGoogle(env) ? "google" : "none" })
+      return json({
+        ok: true,
+        runtime: "cloudflare-worker",
+        auth: configuredForGoogle(env) ? "google" : "none",
+        commit: env.BUILD_COMMIT ?? "unknown",
+      })
     }
 
     if (env.ASSETS) return env.ASSETS.fetch(request)

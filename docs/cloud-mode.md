@@ -1,10 +1,10 @@
 # Agent Session Viewer Cloud Mode
 
-Cloud mode makes `agent-session-viewer.ainorthstar.tech` a Google-login site backed by Cloudflare Worker, D1, and R2. Local machines or cloud runners push transcript snapshots with a machine token.
+Cloud mode makes `agent-session-viewer.ainorthstar.tech` a Google-login site backed by Cloudflare Worker, D1, and Google Cloud Storage. Local machines or cloud runners push transcript snapshots with a machine token.
 
 ## Free-tier choices
 
-- Cloudflare R2 stores transcript JSON. R2's Standard free tier includes 10 GB-month storage, 1 million Class A operations, 10 million Class B operations, and free egress.
+- Google Cloud Storage stores transcript JSON. The free tier includes 5 GB-month regional storage in `us-east1`, `us-west1`, or `us-central1`, 5,000 Class A operations/month, 50,000 Class B operations/month, and 100 GB/month outbound transfer from North America excluding China and Australia.
 - Cloudflare D1 stores users, machine tokens, and a small command queue.
 - Google Cloud Compute Engine runner uses one non-preemptible `e2-micro` in `us-west1`, `us-central1`, or `us-east1`, with up to 30 GB-months standard persistent disk and 1 GB/month outbound data transfer.
 
@@ -12,13 +12,26 @@ Cloud mode makes `agent-session-viewer.ainorthstar.tech` a Google-login site bac
 
 ```bash
 npx wrangler d1 create agent-session-viewer-auth
-npx wrangler r2 bucket create agent-session-viewer-sessions
 npx wrangler d1 execute agent-session-viewer-auth --file worker/schema.sql
 npx wrangler secret put GOOGLE_CLIENT_SECRET
 npx wrangler secret put SESSION_SECRET
+npx wrangler secret put GCP_SERVICE_ACCOUNT_EMAIL
+npx wrangler secret put GCP_PRIVATE_KEY
 ```
 
-Set `GOOGLE_CLIENT_ID` and the D1/R2 bindings in `wrangler.toml`, then deploy:
+Create a regional GCS bucket and service account:
+
+```bash
+gcloud storage buckets create gs://agent-session-viewer-sessions-<project> --location=us-central1 --uniform-bucket-level-access
+gcloud iam service-accounts create asv-storage-writer --display-name="ASV storage writer"
+gcloud storage buckets add-iam-policy-binding gs://agent-session-viewer-sessions-<project> \
+  --member=serviceAccount:asv-storage-writer@<project>.iam.gserviceaccount.com \
+  --role=roles/storage.objectAdmin
+gcloud iam service-accounts keys create /tmp/asv-storage-writer.json \
+  --iam-account=asv-storage-writer@<project>.iam.gserviceaccount.com
+```
+
+Set `GOOGLE_CLIENT_ID`, `GCS_BUCKET`, and the D1 binding in `wrangler.toml`, then deploy:
 
 ```bash
 npm run build
