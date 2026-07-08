@@ -69,6 +69,7 @@
     "tunnel:warm-install": "bash scripts/install-tunnel-warm.sh",
     "tunnel:warm": "bash scripts/tunnel-warm.sh",
     "cloud:broadcast": "node scripts/asv-broadcaster.mjs",
+    "agent:runner": "node scripts/asv-agent-runner.mjs",
     "gcp:create-agent-vm": "bash scripts/gcp-free-agent-vm.sh",
     "test:prepush": "npm test && npm run test:tunnel-regression"
   },

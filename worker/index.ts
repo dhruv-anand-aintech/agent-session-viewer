@@ -6,6 +6,7 @@ type Provider = {
   agents: string[]
   detail?: string
   endpoint?: string
+  authToken?: string
 }
 
 type User = {
@@ -262,6 +263,7 @@ function parseProviderConfig(raw?: string): Provider[] {
         agents: Array.isArray(provider.agents) ? provider.agents.map(String) : ["random"],
         detail: provider.detail ? String(provider.detail) : undefined,
         endpoint: provider.endpoint ? String(provider.endpoint) : undefined,
+        authToken: provider.authToken ? String(provider.authToken) : undefined,
       }))
       .filter(provider => provider.id.length > 0 && provider.label.length > 0)
   } catch {
@@ -293,10 +295,20 @@ function providers(env: Env): Provider[] {
   ]
 }
 
-async function proxyChat(endpoint: string, request: Request): Promise<Response> {
-  const upstream = await fetch(endpoint, {
+function publicProvider(provider: Provider): Provider {
+  const { endpoint, authToken, ...safe } = provider
+  void endpoint
+  void authToken
+  return safe
+}
+
+async function proxyChat(provider: Provider, request: Request): Promise<Response> {
+  if (!provider.endpoint) return json({ ok: false, error: `Provider is not configured: ${provider.id}` }, 400)
+  const headers: Record<string, string> = { "Content-Type": "application/json" }
+  if (provider.authToken) headers.Authorization = `Bearer ${provider.authToken}`
+  const upstream = await fetch(provider.endpoint, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: await request.text(),
   })
   return new Response(upstream.body, {
@@ -543,7 +555,7 @@ export default {
     if (url.pathname === "/api/agent/providers" && request.method === "GET") {
       const list = providers(env)
       return json({
-        providers: list,
+        providers: list.map(publicProvider),
         defaults: {
           provider: list.find(provider => provider.id === "local" && provider.status === "available") ? "local" : "worker-js",
           agent: "random",
@@ -562,7 +574,7 @@ export default {
       if (!provider?.endpoint) return json({ ok: false, error: `Provider is not configured: ${providerId}` }, 400)
 
       try {
-        return await proxyChat(provider.endpoint, request)
+        return await proxyChat(provider, request)
       } catch (err) {
         return json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 502)
       }

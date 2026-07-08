@@ -13,6 +13,18 @@ if [[ -n "${AGL_INSTALL_URL:-}" ]]; then
   METADATA_ARGS=(--metadata "AGL_INSTALL_URL=${AGL_INSTALL_URL}")
 fi
 
+if [[ -n "${ASV_REPO_URL:-}" ]]; then
+  METADATA_ARGS+=(--metadata "ASV_REPO_URL=${ASV_REPO_URL}")
+fi
+
+if [[ -n "${ASV_RUNNER_TOKEN:-}" ]]; then
+  METADATA_ARGS+=(--metadata "ASV_RUNNER_TOKEN=${ASV_RUNNER_TOKEN}")
+fi
+
+if [[ -n "${CLOUDFLARED_TOKEN:-}" ]]; then
+  METADATA_ARGS+=(--metadata "CLOUDFLARED_TOKEN=${CLOUDFLARED_TOKEN}")
+fi
+
 if [[ -z "$PROJECT" ]]; then
   echo "Set GCP_PROJECT before running this script." >&2
   exit 2
