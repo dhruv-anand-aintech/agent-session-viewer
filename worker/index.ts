@@ -492,6 +492,14 @@ async function enqueueCommand(request: Request, env: Env, user: User, machineId:
   return json({ id })
 }
 
+async function serveAssets(request: Request, env: Env): Promise<Response> {
+  if (!env.ASSETS) return new Response("Agent Session Viewer Worker is running.", { headers: { "Content-Type": "text/plain" } })
+  const response = await env.ASSETS.fetch(request)
+  const url = new URL(request.url)
+  if (response.status !== 404 || request.method !== "GET" || url.pathname.startsWith("/api/")) return response
+  return env.ASSETS.fetch(new Request(`${url.origin}/`, request))
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === "OPTIONS") return json({}, 204)
@@ -569,7 +577,6 @@ export default {
       })
     }
 
-    if (env.ASSETS) return env.ASSETS.fetch(request)
-    return new Response("Agent Session Viewer Worker is running.", { headers: { "Content-Type": "text/plain" } })
+    return serveAssets(request, env)
   },
 }
