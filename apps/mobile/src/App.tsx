@@ -249,6 +249,10 @@ function AppContent() {
 
   const bridgeFetch = useCallback(
     async <T,>(request: AsvBridgeRequest): Promise<T> => {
+      const requestAuthToken = request.authToken ?? authToken;
+      if (requestAuthToken) {
+        return asvFetch<T>({ ...request, authToken: requestAuthToken });
+      }
       if (!canUseEmbeddedAuth()) {
         return asvFetch<T>(request);
       }
@@ -259,7 +263,6 @@ function AppContent() {
       const promise = new Promise<T>((resolve, reject) => {
         pendingRequests.current.set(requestId, { resolve: resolve as (value: unknown) => void, reject });
       });
-      const requestAuthToken = request.authToken ?? authToken;
       const script = `
         (async function() {
           try {
@@ -630,6 +633,7 @@ function AppContent() {
               prompt={sessionPrompt}
               reply={sessionReply}
               busy={busy || loadingSessions}
+              signedIn={!!authToken}
               updateStatus={updateStatus}
               onRefresh={loadSessions}
               onOpenSession={openSession}
@@ -859,6 +863,7 @@ function SessionsPanel({
   prompt,
   reply,
   busy,
+  signedIn,
   updateStatus,
   onRefresh,
   onOpenSession,
@@ -872,6 +877,7 @@ function SessionsPanel({
   prompt: string;
   reply: string;
   busy: boolean;
+  signedIn: boolean;
   updateStatus: string;
   onRefresh: () => void;
   onOpenSession: (project: ProjectSummary, session: SessionMeta) => void;
@@ -895,7 +901,7 @@ function SessionsPanel({
 
       <Section title="Cloud Sessions">
         {projects.length === 0 ? (
-          <Text style={styles.mutedText}>Sign in with Google, then refresh synced sessions.</Text>
+          <Text style={styles.mutedText}>{signedIn ? "No synced sessions found for this account." : "Sign in with Google, then refresh synced sessions."}</Text>
         ) : (
           projects.slice(0, 12).map((project) => (
             <View key={project.path} style={styles.projectGroup}>
