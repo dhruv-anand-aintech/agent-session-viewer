@@ -178,6 +178,8 @@ npx wrangler dev
 
 For a deployed Worker URL on a Cloudflare-managed hostname, use a Wrangler `[[routes]]` entry with `custom_domain = true`, so Cloudflare manages DNS and SSL for the active zone. The zone must already be active on Cloudflare nameservers.
 
+For Google-login cloud mode, per-user machine tokens, R2 transcript storage, command polling, and GCP `e2-micro` runner setup, see [`docs/cloud-mode.md`](docs/cloud-mode.md).
+
 ## Other commands
 
 ```bash

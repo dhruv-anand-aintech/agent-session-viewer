@@ -40,6 +40,60 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
 .main  { display: flex; flex: 1; overflow: hidden; }
 .content { flex: 1; overflow: hidden; display: flex; flex-direction: column; background: var(--bg-100); }
 
+.google-gate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+  padding: 24px;
+  background: var(--bg-200);
+  color: var(--text-100);
+}
+.google-gate-panel {
+  width: min(100%, 380px);
+  border: 1px solid var(--border-100);
+  border-radius: 8px;
+  background: var(--bg-100);
+  padding: 24px;
+}
+.google-gate-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  margin-bottom: 18px;
+  border-radius: 8px;
+  background: var(--accent-faint);
+  color: var(--accent);
+  font: 700 12px var(--font-mono);
+  letter-spacing: 0.08em;
+}
+.google-gate h1 {
+  font-size: 19px;
+  line-height: 1.2;
+  margin-bottom: 8px;
+}
+.google-gate p {
+  color: var(--text-300);
+  font-size: 13px;
+  line-height: 1.5;
+  margin-bottom: 20px;
+}
+.google-gate-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 42px;
+  border-radius: 7px;
+  background: var(--text-100);
+  color: var(--bg-300);
+  font-size: 13px;
+  font-weight: 650;
+  text-decoration: none;
+}
+
 /* ── Topbar ───────────────────────────────────────────────────────────────── */
 .topbar {
   display: flex; align-items: center; justify-content: space-between;

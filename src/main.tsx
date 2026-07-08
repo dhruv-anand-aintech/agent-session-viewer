@@ -2,6 +2,7 @@ import { StrictMode, useState, useEffect } from "react"
 import { createRoot } from "react-dom/client"
 import { Router, Redirect } from "wouter"
 import PinGate from "./PinGate"
+import GoogleGate from "./GoogleGate"
 import App from "./App"
 import { initDebugTrace } from "./debug-trace"
 import { installSsePagehideCleanup } from "./sse-lifecycle"
@@ -19,13 +20,15 @@ function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit & { timeo
 
 function Root() {
   const [authed, setAuthed] = useState<boolean | null>(null) // null = checking
+  const [authProvider, setAuthProvider] = useState<"pin" | "google" | "none">("pin")
 
   useEffect(() => {
     fetchWithTimeout("/api/capabilities", { credentials: "include", timeout: 4000 })
       .then(async r => {
         if (!r.ok) { setAuthed(false); return }
         try {
-          const caps = (await r.json()) as { pinRequired?: boolean; authed?: boolean }
+          const caps = (await r.json()) as { pinRequired?: boolean; authed?: boolean; authProvider?: "pin" | "google" | "none" }
+          setAuthProvider(caps.authProvider ?? "pin")
           if (caps.pinRequired === false) { setAuthed(true); return }
           if (typeof caps.authed === "boolean") { setAuthed(caps.authed); return }
           setAuthed(false)
@@ -51,7 +54,7 @@ function Root() {
       </div>
     )
   }
-  if (!authed) return <PinGate onAuth={() => setAuthed(true)} />
+  if (!authed) return authProvider === "google" ? <GoogleGate /> : <PinGate onAuth={() => setAuthed(true)} />
   return (
     <Router>
       {/* Redirect bare / to /sessions */}

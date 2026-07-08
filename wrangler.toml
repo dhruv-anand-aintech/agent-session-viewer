@@ -10,7 +10,25 @@ binding = "ASSETS"
 # [[routes]]
 # pattern = "agent-session-viewer.ainorthstar.tech"
 # custom_domain = true
+#
+# Move this machine's direct tunnel to a separate hostname, for example:
+#   asv-dhruv.ainorthstar.tech -> http://127.0.0.1:3001
 
 # Optional Worker variables:
 # LOCAL_AGENT_BASE_URL = "https://your-local-runner.trycloudflare.com"
 # AGENT_PROVIDER_CONFIG = '{"providers":[{"id":"modal","label":"Modal","kind":"cloud-http","endpoint":"https://example.com/api/agent/chat","agents":["codex"]}]}'
+# GOOGLE_CLIENT_ID = "..."
+#
+# Required bindings for the cloud multi-user mode:
+# [[d1_databases]]
+# binding = "AUTH_DB"
+# database_name = "agent-session-viewer-auth"
+# database_id = "..."
+#
+# [[r2_buckets]]
+# binding = "SESSION_BUCKET"
+# bucket_name = "agent-session-viewer-sessions"
+#
+# Required secrets:
+#   GOOGLE_CLIENT_SECRET
+#   SESSION_SECRET
