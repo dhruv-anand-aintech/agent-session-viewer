@@ -1,6 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Updates from "expo-updates";
-import { ExternalLink, ListTree, MessageSquare, Play, RefreshCw, Send, Smartphone, TerminalSquare } from "lucide-react-native";
+import { Check, ChevronDown, ExternalLink, ListTree, MessageSquare, Play, RefreshCw, Send, Smartphone, TerminalSquare } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -50,6 +50,13 @@ type BridgeResult = {
 type PendingBridgeRequest = {
   resolve: (value: unknown) => void;
   reject: (reason?: unknown) => void;
+};
+
+type SelectOption = {
+  value: string;
+  label: string;
+  detail?: string;
+  disabled?: boolean;
 };
 
 const STORAGE_KEY = "asv.mobile.state.v1";
@@ -136,6 +143,7 @@ function AppContent() {
   const [sessionReply, setSessionReply] = useState("");
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [updateStatus, setUpdateStatus] = useState("");
+  const [openSelect, setOpenSelect] = useState<"provider" | "agent" | "model" | null>(null);
 
   const selectedAgent = useMemo(() => MOBILE_AGENTS.find((agent) => agent.id === agentId) ?? getMobileAgent(agentId), [agentId]);
   const selectedProvider = useMemo(
@@ -167,6 +175,23 @@ function AppContent() {
     [projects, selectedProjectPath]
   );
   const projectSessions = selectedProject?.sessions ?? [];
+  const providerOptions = useMemo<SelectOption[]>(
+    () => providers.map((provider) => ({
+      value: provider.id,
+      label: provider.label || provider.id,
+      detail: provider.status === "missing" ? "Missing" : provider.detail,
+      disabled: provider.status === "missing"
+    })),
+    [providers]
+  );
+  const agentSelectOptions = useMemo<SelectOption[]>(
+    () => agentOptions.map((agent) => ({ value: agent, label: agentLabel(agent) })),
+    [agentOptions]
+  );
+  const modelSelectOptions = useMemo<SelectOption[]>(
+    () => modelOptions.map((option) => ({ value: option.value, label: option.label || option.value })),
+    [modelOptions]
+  );
 
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEY)
@@ -516,36 +541,42 @@ function AppContent() {
           {activeTab === "chat" ? (
             <ScrollView contentContainerStyle={styles.scrollContent}>
               <Section title="Session">
-                <SelectRow label="Provider">
-                  {providers.length ? (
-                    providers.map((provider) => (
-                      <ChoiceButton
-                        key={provider.id}
-                        label={provider.label || provider.id}
-                        active={provider.id === providerId}
-                        disabled={provider.status === "missing"}
-                        onPress={() => setProviderId(provider.id)}
-                      />
-                    ))
-                  ) : (
-                    <Text style={styles.mutedText}>Sign in with Google, then refresh.</Text>
-                  )}
-                </SelectRow>
-                <SelectRow label="Agent">
-                  {agentOptions.map((agent) => (
-                    <ChoiceButton
-                      key={agent}
-                      label={agentLabel(agent)}
-                      active={agent === agentId}
-                      onPress={() => setAgentId(agent)}
-                    />
-                  ))}
-                </SelectRow>
-                <SelectRow label="Model">
+                <DropdownRow
+                  label="Provider"
+                  value={providerId}
+                  options={providerOptions}
+                  emptyText="Sign in with Google, then refresh."
+                  open={openSelect === "provider"}
+                  onToggle={() => setOpenSelect(openSelect === "provider" ? null : "provider")}
+                  onChange={(value) => {
+                    setProviderId(value);
+                    setOpenSelect(null);
+                  }}
+                />
+                <DropdownRow
+                  label="Agent"
+                  value={agentId}
+                  options={agentSelectOptions}
+                  open={openSelect === "agent"}
+                  onToggle={() => setOpenSelect(openSelect === "agent" ? null : "agent")}
+                  onChange={(value) => {
+                    setAgentId(value);
+                    setOpenSelect(null);
+                  }}
+                />
+                <View style={styles.selectRow}>
+                  <Text style={styles.fieldLabel}>Model</Text>
                   {modelOptions.length ? (
-                    modelOptions.map((option) => (
-                      <ChoiceButton key={option.value} label={option.label || option.value} active={option.value === model} onPress={() => setModel(option.value)} />
-                    ))
+                    <DropdownControl
+                      value={model}
+                      options={modelSelectOptions}
+                      open={openSelect === "model"}
+                      onToggle={() => setOpenSelect(openSelect === "model" ? null : "model")}
+                      onChange={(value) => {
+                        setModel(value);
+                        setOpenSelect(null);
+                      }}
+                    />
                   ) : (
                     <TextInput
                       style={styles.input}
@@ -555,7 +586,7 @@ function AppContent() {
                       placeholderTextColor={colors.muted}
                     />
                   )}
-                </SelectRow>
+                </View>
                 <SelectRow label="Thinking">
                   {THINKING_LEVELS.map((level) => (
                     <ChoiceButton
@@ -682,6 +713,85 @@ function SelectRow({ label, children }: { label: string; children: React.ReactNo
     <View style={styles.selectRow}>
       <Text style={styles.fieldLabel}>{label}</Text>
       <View style={styles.choiceWrap}>{children}</View>
+    </View>
+  );
+}
+
+function DropdownRow({
+  label,
+  value,
+  options,
+  emptyText,
+  open,
+  onToggle,
+  onChange
+}: {
+  label: string;
+  value: string;
+  options: SelectOption[];
+  emptyText?: string;
+  open: boolean;
+  onToggle: () => void;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <View style={styles.selectRow}>
+      <Text style={styles.fieldLabel}>{label}</Text>
+      {options.length ? (
+        <DropdownControl value={value} options={options} open={open} onToggle={onToggle} onChange={onChange} />
+      ) : (
+        <Text style={styles.mutedText}>{emptyText ?? "No options available"}</Text>
+      )}
+    </View>
+  );
+}
+
+function DropdownControl({
+  value,
+  options,
+  open,
+  onToggle,
+  onChange
+}: {
+  value: string;
+  options: SelectOption[];
+  open: boolean;
+  onToggle: () => void;
+  onChange: (value: string) => void;
+}) {
+  const selected = options.find((option) => option.value === value) ?? options[0];
+  return (
+    <View style={styles.dropdown}>
+      <Pressable style={[styles.dropdownButton, open && styles.dropdownButtonOpen]} onPress={onToggle}>
+        <View style={styles.dropdownButtonTextWrap}>
+          <Text style={styles.dropdownValue} numberOfLines={1}>{selected?.label ?? "Select"}</Text>
+          {selected?.detail ? <Text style={styles.dropdownDetail} numberOfLines={1}>{selected.detail}</Text> : null}
+        </View>
+        <ChevronDown size={18} color={colors.muted} />
+      </Pressable>
+      {open ? (
+        <ScrollView style={styles.dropdownMenu} nestedScrollEnabled keyboardShouldPersistTaps="handled">
+          {options.map((option) => {
+            const active = option.value === value;
+            return (
+              <Pressable
+                key={option.value}
+                style={[styles.dropdownOption, active && styles.dropdownOptionActive, option.disabled && styles.disabledChoice]}
+                disabled={option.disabled}
+                onPress={() => onChange(option.value)}
+              >
+                <View style={styles.dropdownOptionTextWrap}>
+                  <Text style={[styles.dropdownOptionText, active && styles.dropdownOptionTextActive]} numberOfLines={1}>
+                    {option.label}
+                  </Text>
+                  {option.detail ? <Text style={styles.dropdownOptionDetail} numberOfLines={1}>{option.detail}</Text> : null}
+                </View>
+                {active ? <Check size={17} color={colors.accent} /> : null}
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+      ) : null}
     </View>
   );
 }
@@ -1038,6 +1148,77 @@ const styles = StyleSheet.create({
   },
   choiceTextActive: {
     color: colors.accentText
+  },
+  dropdown: {
+    gap: spacing.xs,
+    width: "100%"
+  },
+  dropdownButton: {
+    alignItems: "center",
+    backgroundColor: colors.surfaceMuted,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    flexDirection: "row",
+    gap: spacing.sm,
+    minHeight: 46,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm
+  },
+  dropdownButtonOpen: {
+    borderColor: colors.accent
+  },
+  dropdownButtonTextWrap: {
+    flex: 1,
+    minWidth: 0
+  },
+  dropdownValue: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: "700"
+  },
+  dropdownDetail: {
+    color: colors.muted,
+    fontSize: 12,
+    marginTop: 2
+  },
+  dropdownMenu: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderRadius: 8,
+    borderWidth: 1,
+    maxHeight: 260,
+    overflow: "hidden"
+  },
+  dropdownOption: {
+    alignItems: "center",
+    borderBottomColor: colors.border,
+    borderBottomWidth: 1,
+    flexDirection: "row",
+    gap: spacing.sm,
+    minHeight: 44,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm
+  },
+  dropdownOptionActive: {
+    backgroundColor: colors.surfaceMuted
+  },
+  dropdownOptionTextWrap: {
+    flex: 1,
+    minWidth: 0
+  },
+  dropdownOptionText: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "600"
+  },
+  dropdownOptionTextActive: {
+    color: colors.accent
+  },
+  dropdownOptionDetail: {
+    color: colors.muted,
+    fontSize: 12,
+    marginTop: 2
   },
   input: {
     borderColor: colors.border,

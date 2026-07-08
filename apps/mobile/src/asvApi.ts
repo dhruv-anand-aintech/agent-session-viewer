@@ -12,6 +12,7 @@ export type AgentProvider = {
   label: string;
   status?: "available" | "missing" | string;
   agents?: string[];
+  detail?: string;
 };
 
 export type ModelOption = {
