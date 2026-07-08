@@ -542,8 +542,8 @@ function AppContent() {
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.root}>
         <View style={styles.header}>
-          <View>
-            <Text style={styles.title}>Agent Session Viewer</Text>
+          <View style={styles.headerCopy}>
+            <Text style={styles.title}>Code</Text>
             <Text style={styles.subtitle}>{status}</Text>
           </View>
           <View style={styles.headerActions}>
@@ -714,7 +714,14 @@ function TabButton({
       style={[styles.tabButton, activeTab === id && styles.tabButtonActive]}
       onPress={() => setActiveTab(id)}
     >
-      <Text style={[styles.tabText, activeTab === id && styles.tabTextActive]}>{label}</Text>
+      <Text
+        style={[styles.tabText, activeTab === id && styles.tabTextActive]}
+        numberOfLines={1}
+        adjustsFontSizeToFit
+        minimumFontScale={0.78}
+      >
+        {label}
+      </Text>
     </Pressable>
   );
 }
@@ -946,7 +953,10 @@ function SessionsPanel({
                   style={[styles.sessionRow, selectedSession?.id === session.id && styles.sessionRowActive]}
                   onPress={() => onOpenSession(project, session)}
                 >
-                  <MessageSquare size={16} color={selectedSession?.id === session.id ? colors.accentText : colors.muted} />
+                  <View style={styles.sessionAvatar}>
+                    <MessageSquare size={17} color={colors.muted} />
+                    {selectedSession?.id === session.id ? <View style={styles.sessionDot} /> : null}
+                  </View>
                   <View style={styles.sessionTextWrap}>
                     <Text style={[styles.sessionTitle, selectedSession?.id === session.id && styles.sessionTitleActive]} numberOfLines={1}>
                       {sessionTitle(session)}
@@ -1048,6 +1058,9 @@ export default function App() {
   );
 }
 
+const serifFont = Platform.select({ ios: "Georgia", android: "serif", default: "serif" });
+const monoFont = Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" });
+
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
@@ -1058,65 +1071,81 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background
   },
   header: {
-    alignItems: "center",
-    borderBottomColor: colors.border,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    alignItems: "flex-start",
     flexDirection: "row",
     justifyContent: "space-between",
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md
+    paddingBottom: 12,
+    paddingHorizontal: 24,
+    paddingTop: 24
+  },
+  headerCopy: {
+    flex: 1,
+    minWidth: 0,
+    paddingRight: 12
   },
   headerActions: {
     alignItems: "center",
     flexDirection: "row",
     flexShrink: 0,
-    gap: spacing.sm
+    gap: 8,
+    paddingTop: 2
   },
   title: {
     color: colors.text,
-    fontSize: 20,
-    fontWeight: "700"
+    fontFamily: serifFont,
+    fontSize: 34,
+    fontWeight: "400",
+    letterSpacing: 0,
+    lineHeight: 42
   },
   subtitle: {
     color: colors.muted,
-    fontSize: 12,
-    marginTop: 2
+    fontSize: 13,
+    lineHeight: 18,
+    marginTop: 4
   },
   iconButton: {
     alignItems: "center",
-    backgroundColor: colors.surface,
-    borderColor: colors.border,
-    borderRadius: 8,
+    backgroundColor: colors.surfaceMuted,
+    borderColor: "rgba(244,240,232,0.12)",
+    borderRadius: 22,
     borderWidth: 1,
-    height: 38,
+    height: 42,
     justifyContent: "center",
-    width: 38
+    width: 42
   },
   tabs: {
     flexDirection: "row",
-    gap: spacing.sm,
-    padding: spacing.md
+    gap: 8,
+    paddingBottom: 10,
+    paddingHorizontal: 24,
+    paddingTop: 4
   },
   tabButton: {
     alignItems: "center",
-    backgroundColor: colors.surface,
-    borderColor: colors.border,
-    borderRadius: 8,
+    backgroundColor: colors.surfaceMuted,
+    borderColor: "transparent",
+    borderRadius: 999,
     borderWidth: 1,
     flex: 1,
-    paddingVertical: spacing.sm
+    minHeight: 42,
+    justifyContent: "center",
+    paddingHorizontal: 10
   },
   tabButtonActive: {
-    backgroundColor: colors.text,
-    borderColor: colors.text
+    backgroundColor: colors.deep,
+    borderColor: colors.deep
   },
   tabText: {
     color: colors.text,
-    fontSize: 13,
-    fontWeight: "600"
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 0,
+    lineHeight: 16,
+    textAlign: "center"
   },
   tabTextActive: {
-    color: "#ffffff"
+    color: colors.text
   },
   content: {
     flex: 1
@@ -1130,77 +1159,81 @@ const styles = StyleSheet.create({
     width: 1
   },
   scrollContent: {
-    gap: spacing.md,
-    padding: spacing.md,
-    paddingBottom: spacing.xl
+    gap: 18,
+    padding: 24,
+    paddingBottom: 36
   },
   section: {
     backgroundColor: colors.surface,
-    borderColor: colors.border,
-    borderRadius: 8,
+    borderColor: "rgba(244,240,232,0.08)",
+    borderRadius: 28,
     borderWidth: 1,
-    gap: spacing.md,
-    padding: spacing.md
+    gap: 16,
+    padding: 20
   },
   sectionTitle: {
     color: colors.text,
-    fontSize: 14,
-    fontWeight: "700"
+    fontFamily: serifFont,
+    fontSize: 22,
+    fontWeight: "400",
+    lineHeight: 28
   },
   selectRow: {
-    gap: spacing.sm
+    gap: 8
   },
   fieldLabel: {
     color: colors.muted,
     fontSize: 12,
     fontWeight: "700",
+    letterSpacing: 0,
     textTransform: "uppercase"
   },
   choiceWrap: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: spacing.sm
+    gap: 8
   },
   choice: {
     backgroundColor: colors.surfaceMuted,
-    borderColor: colors.border,
-    borderRadius: 8,
+    borderColor: "rgba(244,240,232,0.1)",
+    borderRadius: 999,
     borderWidth: 1,
     maxWidth: "100%",
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm
+    minHeight: 40,
+    justifyContent: "center",
+    paddingHorizontal: 16
   },
   choiceActive: {
-    backgroundColor: colors.accent,
-    borderColor: colors.accent
+    backgroundColor: colors.deep,
+    borderColor: colors.deep
   },
   disabledChoice: {
     opacity: 0.5
   },
   choiceText: {
     color: colors.text,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "600",
     maxWidth: 260
   },
   choiceTextActive: {
-    color: colors.accentText
+    color: colors.text
   },
   dropdown: {
-    gap: spacing.xs,
+    gap: 8,
     width: "100%"
   },
   dropdownButton: {
     alignItems: "center",
     backgroundColor: colors.surfaceMuted,
-    borderColor: colors.border,
-    borderRadius: 8,
+    borderColor: "rgba(244,240,232,0.12)",
+    borderRadius: 22,
     borderWidth: 1,
     flexDirection: "row",
-    gap: spacing.sm,
-    minHeight: 46,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm
+    gap: 10,
+    minHeight: 58,
+    paddingHorizontal: 18,
+    paddingVertical: 10
   },
   dropdownButtonOpen: {
     borderColor: colors.accent
@@ -1211,34 +1244,34 @@ const styles = StyleSheet.create({
   },
   dropdownValue: {
     color: colors.text,
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: "700"
   },
   dropdownDetail: {
     color: colors.muted,
-    fontSize: 12,
+    fontSize: 13,
     marginTop: 2
   },
   dropdownMenu: {
     backgroundColor: colors.surface,
-    borderColor: colors.border,
-    borderRadius: 8,
+    borderColor: "rgba(244,240,232,0.12)",
+    borderRadius: 22,
     borderWidth: 1,
     maxHeight: 260,
     overflow: "hidden"
   },
   dropdownOption: {
     alignItems: "center",
-    borderBottomColor: colors.border,
+    borderBottomColor: "rgba(244,240,232,0.08)",
     borderBottomWidth: 1,
     flexDirection: "row",
-    gap: spacing.sm,
-    minHeight: 44,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm
+    gap: 10,
+    minHeight: 48,
+    paddingHorizontal: 16,
+    paddingVertical: 10
   },
   dropdownOptionActive: {
-    backgroundColor: colors.surfaceMuted
+    backgroundColor: colors.deep
   },
   dropdownOptionTextWrap: {
     flex: 1,
@@ -1246,7 +1279,7 @@ const styles = StyleSheet.create({
   },
   dropdownOptionText: {
     color: colors.text,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "600"
   },
   dropdownOptionTextActive: {
@@ -1258,49 +1291,55 @@ const styles = StyleSheet.create({
     marginTop: 2
   },
   input: {
-    borderColor: colors.border,
-    borderRadius: 8,
+    backgroundColor: colors.surfaceMuted,
+    borderColor: "rgba(244,240,232,0.12)",
+    borderRadius: 22,
     borderWidth: 1,
     color: colors.text,
     flex: 1,
-    minHeight: 42,
+    fontSize: 16,
+    minHeight: 58,
     minWidth: 180,
-    paddingHorizontal: spacing.md
+    paddingHorizontal: 18
   },
   prompt: {
-    borderColor: colors.border,
-    borderRadius: 8,
+    backgroundColor: colors.composer,
+    borderColor: "rgba(244,240,232,0.16)",
+    borderRadius: 28,
     borderWidth: 1,
     color: colors.text,
-    minHeight: 140,
-    padding: spacing.md,
+    fontFamily: serifFont,
+    fontSize: 19,
+    lineHeight: 27,
+    minHeight: 152,
+    padding: 20,
     textAlignVertical: "top"
   },
   primaryButton: {
     alignItems: "center",
     alignSelf: "flex-start",
     backgroundColor: colors.accent,
-    borderRadius: 8,
+    borderRadius: 999,
     flexDirection: "row",
-    gap: spacing.sm,
-    minHeight: 42,
-    paddingHorizontal: spacing.lg
+    gap: 10,
+    minHeight: 52,
+    paddingHorizontal: 22
   },
   primaryButtonText: {
     color: colors.accentText,
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: "700"
   },
   secondaryButton: {
     alignItems: "center",
-    backgroundColor: colors.surface,
-    borderColor: colors.border,
-    borderRadius: 8,
+    backgroundColor: colors.surfaceMuted,
+    borderColor: "rgba(244,240,232,0.12)",
+    borderRadius: 999,
     borderWidth: 1,
     flexDirection: "row",
-    gap: spacing.sm,
+    gap: 8,
     minHeight: 42,
-    paddingHorizontal: spacing.lg
+    paddingHorizontal: 16
   },
   secondaryButtonText: {
     color: colors.text,
@@ -1310,89 +1349,116 @@ const styles = StyleSheet.create({
   actionRow: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: spacing.sm
+    gap: 10
   },
   statusText: {
     color: colors.muted,
-    fontSize: 12
+    fontSize: 13,
+    lineHeight: 18
   },
   disabled: {
     opacity: 0.65
   },
   mutedText: {
     color: colors.muted,
-    fontSize: 13
+    fontSize: 15,
+    lineHeight: 22
   },
   reply: {
     color: colors.text,
-    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
-    fontSize: 13,
-    lineHeight: 20
+    fontFamily: serifFont,
+    fontSize: 18,
+    lineHeight: 27
   },
   projectGroup: {
-    gap: spacing.sm
+    gap: 12
   },
   projectTitleRow: {
     alignItems: "center",
     flexDirection: "row",
-    gap: spacing.sm
+    gap: 8,
+    marginTop: 4
   },
   projectTitle: {
     color: colors.muted,
     flex: 1,
-    fontSize: 12,
+    fontSize: 13,
     fontWeight: "700",
     textTransform: "uppercase"
   },
   sessionRow: {
     alignItems: "center",
     backgroundColor: colors.surfaceMuted,
-    borderColor: colors.border,
-    borderRadius: 8,
+    borderColor: "rgba(244,240,232,0.08)",
+    borderRadius: 28,
     borderWidth: 1,
     flexDirection: "row",
-    gap: spacing.sm,
-    padding: spacing.md
+    gap: 14,
+    minHeight: 84,
+    paddingHorizontal: 14,
+    paddingVertical: 12
   },
   sessionRowActive: {
-    backgroundColor: colors.accent,
+    backgroundColor: colors.surface,
     borderColor: colors.accent
+  },
+  sessionAvatar: {
+    alignItems: "center",
+    backgroundColor: colors.deep,
+    borderRadius: 12,
+    height: 50,
+    justifyContent: "center",
+    position: "relative",
+    width: 50
+  },
+  sessionDot: {
+    backgroundColor: "#5aa8ff",
+    borderRadius: 6,
+    height: 12,
+    position: "absolute",
+    right: -2,
+    top: -2,
+    width: 12
   },
   sessionTextWrap: {
     flex: 1,
-    gap: 2
+    gap: 4,
+    minWidth: 0
   },
   sessionTitle: {
     color: colors.text,
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: "700"
   },
   sessionTitleActive: {
-    color: colors.accentText
+    color: colors.text
   },
   sessionMeta: {
     color: colors.muted,
-    fontSize: 12
+    fontSize: 13
   },
   sessionMetaActive: {
-    color: colors.accentText
+    color: colors.muted
   },
   messageRow: {
-    borderLeftColor: colors.border,
-    borderLeftWidth: 2,
-    gap: spacing.xs,
-    paddingLeft: spacing.md
+    backgroundColor: "rgba(11,12,10,0.22)",
+    borderColor: "rgba(244,240,232,0.08)",
+    borderRadius: 20,
+    borderWidth: 1,
+    gap: 8,
+    padding: 16
   },
   messageRole: {
     color: colors.muted,
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: "700",
     textTransform: "uppercase"
   },
   messageText: {
     color: colors.text,
-    fontSize: 13,
-    lineHeight: 19
+    fontFamily: serifFont,
+    fontSize: 17,
+    lineHeight: 25
   },
   webView: {
     flex: 1
@@ -1400,52 +1466,53 @@ const styles = StyleSheet.create({
   viewerFallback: {
     alignItems: "center",
     flex: 1,
-    gap: spacing.md,
+    gap: 16,
     justifyContent: "center",
-    padding: spacing.lg
+    padding: 24
   },
   viewerTitle: {
     color: colors.text,
-    fontSize: 20,
-    fontWeight: "700"
+    fontFamily: serifFont,
+    fontSize: 26,
+    fontWeight: "400"
   },
   pathRow: {
     alignItems: "center",
     flexDirection: "row",
-    gap: spacing.sm
+    gap: 10
   },
   pathText: {
     color: colors.text,
     flex: 1,
-    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
+    fontFamily: monoFont,
     fontSize: 12
   },
   agentCard: {
     backgroundColor: colors.surface,
-    borderColor: colors.border,
-    borderRadius: 8,
+    borderColor: "rgba(244,240,232,0.08)",
+    borderRadius: 28,
     borderWidth: 1,
-    gap: spacing.md,
-    padding: spacing.md
+    gap: 16,
+    padding: 20
   },
   agentHeader: {
     alignItems: "center",
     flexDirection: "row",
-    gap: spacing.sm
+    gap: 10
   },
   agentTitle: {
     color: colors.text,
-    fontSize: 16,
+    fontSize: 18,
     fontWeight: "700"
   },
   commandLine: {
     alignItems: "center",
     backgroundColor: colors.surfaceMuted,
-    borderRadius: 8,
+    borderRadius: 18,
     flexDirection: "row",
-    gap: spacing.sm,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 12
   },
   commandLabel: {
     color: colors.muted,
@@ -1456,7 +1523,7 @@ const styles = StyleSheet.create({
   commandText: {
     color: colors.code,
     flex: 1,
-    fontFamily: Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" }),
+    fontFamily: monoFont,
     fontSize: 12
   }
 });
