@@ -105,9 +105,10 @@ function sessionCanResumeWithClaude(session?: SessionMeta | null): boolean {
 }
 
 function mobileAuthTokenFromUrl(url: string): string {
-  const fragment = url.split("#")[1] ?? "";
-  const params = new URLSearchParams(fragment);
-  return params.get("token") ?? "";
+  const [withoutFragment, fragment = ""] = url.split("#");
+  const query = withoutFragment.split("?")[1] ?? "";
+  const fragmentParams = new URLSearchParams(fragment);
+  return fragmentParams.get("token") ?? new URLSearchParams(query).get("token") ?? "";
 }
 
 function AppContent() {

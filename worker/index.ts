@@ -371,8 +371,7 @@ async function authCallback(request: Request, env: Env): Promise<Response> {
   if (mobileReturn) {
     const decodedReturn = decodeURIComponent(mobileReturn)
     if (decodedReturn.startsWith("asv://auth")) {
-      const separator = decodedReturn.includes("#") ? "&" : "#"
-      return redirectWithCookies(`${decodedReturn}${separator}token=${encodeURIComponent(signedUser)}&email=${encodeURIComponent(user.email)}`, [
+      return redirectWithCookies(`/mobile-auth#token=${encodeURIComponent(signedUser)}&email=${encodeURIComponent(user.email)}`, [
         cookie("asv_session", signedUser, 60 * 60 * 24 * 14),
         cookie("asv_oauth_state", "", 0),
         cookie("asv_mobile_return", "", 0),
@@ -394,6 +393,53 @@ async function mobileAuthFinish(request: Request, env: Env): Promise<Response> {
   return redirectWithCookies("/sessions", [
     cookie("asv_session", token, 60 * 60 * 24 * 14),
   ])
+}
+
+function mobileAuthHandoff(): Response {
+  return new Response(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Open Agent Session Viewer</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;background:#f7f7f4;color:#1f2426}
+    main{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+    section{max-width:420px;background:#fff;border:1px solid #deded8;border-radius:8px;padding:24px}
+    h1{font-size:24px;margin:0 0 8px}
+    p{color:#687174;line-height:1.45}
+    a{display:inline-flex;align-items:center;justify-content:center;border-radius:8px;background:#207a62;color:white;text-decoration:none;font-weight:700;padding:14px 18px;margin-top:12px}
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <h1>Open Agent Session Viewer</h1>
+      <p>Authentication is complete. Return to the app to load your cloud sessions.</p>
+      <a id="open-app" href="asv://auth">Open app</a>
+    </section>
+  </main>
+  <script>
+    const params = new URLSearchParams(location.hash.slice(1) || location.search.slice(1));
+    const token = params.get("token") || "";
+    const email = params.get("email") || "";
+    const appUrl = "asv://auth#token=" + encodeURIComponent(token) + (email ? "&email=" + encodeURIComponent(email) : "");
+    const link = document.getElementById("open-app");
+    if (token) {
+      link.href = appUrl;
+      setTimeout(() => { location.href = appUrl; }, 250);
+    } else {
+      link.textContent = "Start again";
+      link.href = "/api/auth/google/start?mobile=1&return=asv%3A%2F%2Fauth";
+    }
+  </script>
+</body>
+</html>`, {
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  })
 }
 
 function parseProviderConfig(raw?: string): Provider[] {
@@ -734,6 +780,7 @@ export default {
     if (url.pathname === "/api/auth/google/start") return authStart(request, env)
     if (url.pathname === "/api/auth/google/callback") return authCallback(request, env)
     if (url.pathname === "/api/auth/mobile/finish") return mobileAuthFinish(request, env)
+    if (url.pathname === "/mobile-auth") return mobileAuthHandoff()
     if (url.pathname === "/api/auth/logout") return redirect("/", { "Set-Cookie": cookie("asv_session", "", 0) })
     if (url.pathname === "/api/auth/me") return json({ user: await readUser(request, env) })
     if (url.pathname === "/mobile-updates/manifest" && request.method === "GET") return serveMobileUpdateManifest(request, env)
