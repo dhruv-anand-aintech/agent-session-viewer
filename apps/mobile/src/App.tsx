@@ -1,6 +1,6 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Updates from "expo-updates";
-import { Check, ChevronDown, ExternalLink, ListTree, MessageSquare, Play, RefreshCw, Send, Smartphone, TerminalSquare } from "lucide-react-native";
+import { Check, ChevronDown, ExternalLink, ListTree, LogOut, MessageSquare, Play, RefreshCw, Send, Smartphone, TerminalSquare } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -312,6 +312,17 @@ function AppContent() {
     });
   }, []);
 
+  const signOut = useCallback(() => {
+    setAuthToken("");
+    setProjects([]);
+    setSelectedProjectPath("");
+    setSelectedSession(null);
+    setTranscript([]);
+    setSessionReply("");
+    setSessionsLoadedOnce(false);
+    setStatus("Signed out");
+  }, []);
+
   const loadProviders = useCallback(async () => {
     if (canUseEmbeddedAuth() && !bridgeReady) {
       setStatus("Preparing browser bridge");
@@ -541,7 +552,12 @@ function AppContent() {
                 <ExternalLink size={18} color={colors.text} />
                 <Text style={styles.secondaryButtonText}>Sign in</Text>
               </Pressable>
-            ) : null}
+            ) : (
+              <Pressable style={styles.secondaryButton} onPress={signOut}>
+                <LogOut size={18} color={colors.text} />
+                <Text style={styles.secondaryButtonText}>Sign out</Text>
+              </Pressable>
+            )}
             <Pressable style={styles.iconButton} onPress={loadProviders} accessibilityLabel="Refresh providers">
               <RefreshCw size={18} color={colors.text} />
             </Pressable>
