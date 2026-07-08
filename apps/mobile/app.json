@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "Agent Session Viewer",
+    "slug": "agent-session-viewer-mobile",
+    "scheme": "asv",
+    "version": "0.1.0",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "tech.ainorthstar.agentSessionViewer"
+    },
+    "android": {
+      "package": "tech.ainorthstar.agent_session_viewer"
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    },
+    "extra": {
+      "asvBaseUrl": "https://agent-session-viewer.ainorthstar.tech"
+    }
+  }
+}
