@@ -85,6 +85,8 @@ const FALLBACK_MODEL_OPTIONS: ModelOption[] = [
   { value: "fast", label: "Fast", modelClass: "fast" },
 ]
 
+const THINKING_LEVELS = ["auto", "low", "medium", "high"]
+
 const SESSION_SOURCE_TO_AGL_AGENT: Record<string, string> = {
   claude: "claude",
   codex: "codex",
@@ -153,6 +155,7 @@ export function AgentConsole({
   const [mode, setMode] = useState("ask")
   const [modelClass, setModelClass] = useState("pro")
   const [modelChoice, setModelChoice] = useState("pro")
+  const [thinkingLevel, setThinkingLevel] = useState("auto")
   const [modelOptionsByAgent, setModelOptionsByAgent] = useState(DEFAULT_MODEL_OPTIONS_BY_AGENT)
   const [selectedCwd, setSelectedCwd] = useState(cwd ?? "")
   const [turns, setTurns] = useState<ChatTurn[]>([])
@@ -256,6 +259,7 @@ export function AgentConsole({
           mode,
           modelClass: selectedModelOption.modelClass ?? modelClass,
           model: selectedModelOption.model,
+          thinkingLevel,
           noModel: selectedModelOption.noModel,
           useExtraModelArg: selectedModelOption.useExtraModelArg,
           cwd: activeCwd,
@@ -342,6 +346,9 @@ export function AgentConsole({
             aria-label="Model"
           >
             {modelOptions.map(entry => <option key={entry.value} value={entry.value}>{entry.label}</option>)}
+          </select>
+          <select value={thinkingLevel} onChange={event => setThinkingLevel(event.target.value)} aria-label="Thinking level">
+            {THINKING_LEVELS.map(entry => <option key={entry} value={entry}>Thinking {entry}</option>)}
           </select>
           <button type="button" className="agent-icon-btn" onClick={() => void loadProviders()} disabled={loadingProviders} title="Refresh providers" aria-label="Refresh providers">
             <RefreshCw size={15} className={loadingProviders ? "spin-icon" : undefined} aria-hidden="true" />

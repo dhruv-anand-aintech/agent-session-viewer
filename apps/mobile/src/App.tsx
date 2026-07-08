@@ -20,8 +20,7 @@ import {
   MOBILE_AGENT_HOME,
   MOBILE_AGENT_PREFIX,
   MOBILE_AGENTS,
-  getMobileAgent,
-  type MobileAgentId
+  getMobileAgent
 } from "./agentCatalog";
 import {
   ASV_BASE_URL,
@@ -30,6 +29,7 @@ import {
   type AgentProvider,
   type AsvBridgeRequest,
   type ChatResponse,
+  type ModelOption,
   type ProjectSummary,
   type ProvidersResponse,
   type SessionMeta,
@@ -53,6 +53,7 @@ type PendingBridgeRequest = {
 };
 
 const STORAGE_KEY = "asv.mobile.state.v1";
+const THINKING_LEVELS = ["auto", "low", "medium", "high"];
 const NativeWebView = WebView as React.ComponentType<any>;
 
 function escapeScriptValue(value: unknown): string {
@@ -95,8 +96,18 @@ function projectLabel(path: string): string {
   return parts.slice(-2).join("/") || path;
 }
 
+function agentLabel(id: string): string {
+  return MOBILE_AGENTS.find((agent) => agent.id === id)?.label ?? id;
+}
+
 function sessionCanResumeWithClaude(session?: SessionMeta | null): boolean {
   return String(session?.source ?? "").toLowerCase() === "claude";
+}
+
+function mobileAuthTokenFromUrl(url: string): string {
+  const fragment = url.split("#")[1] ?? "";
+  const params = new URLSearchParams(fragment);
+  return params.get("token") ?? "";
 }
 
 function AppContent() {
@@ -104,12 +115,15 @@ function AppContent() {
   const pendingRequests = useRef(new Map<string, PendingBridgeRequest>());
   const [activeTab, setActiveTab] = useState<TabId>("chat");
   const [providerId, setProviderId] = useState("local");
-  const [agentId, setAgentId] = useState<MobileAgentId>("codex");
+  const [agentId, setAgentId] = useState("codex");
   const [model, setModel] = useState("");
+  const [thinkingLevel, setThinkingLevel] = useState("auto");
+  const [authToken, setAuthToken] = useState("");
   const [prompt, setPrompt] = useState("");
   const [status, setStatus] = useState("Ready");
   const [busy, setBusy] = useState(false);
   const [providers, setProviders] = useState<AgentProvider[]>([]);
+  const [modelOptionsByAgent, setModelOptionsByAgent] = useState<Record<string, ModelOption[]>>({});
   const [reply, setReply] = useState("");
   const [sessionId, setSessionId] = useState("");
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -121,16 +135,31 @@ function AppContent() {
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [updateStatus, setUpdateStatus] = useState("");
 
-  const selectedAgent = useMemo(() => getMobileAgent(agentId), [agentId]);
+  const selectedAgent = useMemo(() => MOBILE_AGENTS.find((agent) => agent.id === agentId) ?? getMobileAgent(agentId), [agentId]);
   const selectedProvider = useMemo(
     () => providers.find((provider) => provider.id === providerId),
     [providerId, providers]
   );
+  const agentOptions = useMemo(() => {
+    const ids = selectedProvider?.agents?.length ? selectedProvider.agents : MOBILE_AGENTS.map((agent) => agent.id);
+    return Array.from(new Set(ids));
+  }, [selectedProvider]);
   const modelOptions = useMemo(() => {
-    const fromProvider = selectedProvider?.modelOptionsByAgent?.[agentId] ?? [];
-    const defaults = selectedAgent.defaultModel ? [selectedAgent.defaultModel] : [];
-    return Array.from(new Set([...fromProvider, ...defaults])).filter(Boolean);
-  }, [agentId, selectedAgent.defaultModel, selectedProvider]);
+    const fromApi = modelOptionsByAgent[agentId] ?? [];
+    const defaults: ModelOption[] = selectedAgent.defaultModel
+      ? [{ value: selectedAgent.defaultModel, label: selectedAgent.defaultModel, model: selectedAgent.defaultModel }]
+      : [];
+    const seen = new Set<string>();
+    return [...fromApi, ...defaults].filter((option) => {
+      if (!option?.value || seen.has(option.value)) return false;
+      seen.add(option.value);
+      return true;
+    });
+  }, [agentId, modelOptionsByAgent, selectedAgent.defaultModel]);
+  const selectedModelOption = useMemo(
+    () => modelOptions.find((option) => option.value === model) ?? modelOptions[0] ?? null,
+    [model, modelOptions]
+  );
   const selectedProject = useMemo(
     () => projects.find((project) => project.path === selectedProjectPath) ?? projects[0] ?? null,
     [projects, selectedProjectPath]
@@ -143,13 +172,17 @@ function AppContent() {
         if (!raw) return;
         const saved = JSON.parse(raw) as Partial<{
           providerId: string;
-          agentId: MobileAgentId;
+          agentId: string;
           model: string;
+          thinkingLevel: string;
+          authToken: string;
           sessionId: string;
         }>;
         if (saved.providerId) setProviderId(saved.providerId);
         if (saved.agentId) setAgentId(saved.agentId);
         if (saved.model) setModel(saved.model);
+        if (saved.thinkingLevel) setThinkingLevel(saved.thinkingLevel);
+        if (saved.authToken) setAuthToken(saved.authToken);
         if (saved.sessionId) setSessionId(saved.sessionId);
       })
       .catch(() => {});
@@ -158,16 +191,38 @@ function AppContent() {
   useEffect(() => {
     AsyncStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ providerId, agentId, model, sessionId })
+      JSON.stringify({ providerId, agentId, model, thinkingLevel, authToken, sessionId })
     ).catch(() => {});
-  }, [agentId, model, providerId, sessionId]);
+  }, [agentId, authToken, model, providerId, sessionId, thinkingLevel]);
+
+  const handleAuthUrl = useCallback((url: string) => {
+    const token = mobileAuthTokenFromUrl(url);
+    if (!token) return;
+    setAuthToken(token);
+    setStatus("Signed in to ASV");
+    setActiveTab("sessions");
+  }, []);
 
   useEffect(() => {
-    if (!model && modelOptions[0]) setModel(modelOptions[0]);
+    Linking.getInitialURL().then((url) => {
+      if (url) handleAuthUrl(url);
+    }).catch(() => {});
+    const subscription = Linking.addEventListener("url", ({ url }) => handleAuthUrl(url));
+    return () => subscription.remove();
+  }, [handleAuthUrl]);
+
+  useEffect(() => {
+    if (!modelOptions.length) return;
+    if (!modelOptions.some((option) => option.value === model)) setModel(modelOptions[0].value);
   }, [model, modelOptions]);
+
+  useEffect(() => {
+    if (!agentOptions.includes(agentId)) setAgentId(agentOptions[0] ?? "codex");
+  }, [agentId, agentOptions]);
 
   const bridgeFetch = useCallback(
     async <T,>(request: AsvBridgeRequest): Promise<T> => {
+      if (authToken) return asvFetch<T>({ ...request, authToken });
       if (!canUseEmbeddedAuth() || !webViewRef.current) {
         return asvFetch<T>(request);
       }
@@ -178,7 +233,7 @@ function AppContent() {
       const script = `
         (async function() {
           try {
-            var response = await fetch(${escapeScriptValue(request.path)}, {
+            var response = await fetch(${escapeScriptValue(`${ASV_BASE_URL}${request.path}`)}, {
               method: ${escapeScriptValue(request.method ?? (request.body ? "POST" : "GET"))},
               credentials: "include",
               headers: { "content-type": "application/json" },
@@ -206,14 +261,22 @@ function AppContent() {
       webViewRef.current.injectJavaScript(script);
       return promise;
     },
-    []
+    [authToken]
   );
+
+  const startMobileSignIn = useCallback(() => {
+    const params = new URLSearchParams({ mobile: "1", return: "asv://auth" });
+    Linking.openURL(`${ASV_BASE_URL}/api/auth/google/start?${params}`).catch(() => {
+      setStatus("Could not open browser sign-in");
+    });
+  }, []);
 
   const loadProviders = useCallback(async () => {
     setStatus("Loading providers");
     try {
       const data = await bridgeFetch<ProvidersResponse>({ path: "/api/agent/providers" });
       setProviders(data.providers ?? []);
+      setModelOptionsByAgent(data.modelOptionsByAgent ?? {});
       const current = data.providers?.find((provider) => provider.id === providerId);
       const cloudClaude = data.providers?.find((provider) => provider.id === "gcp-claude");
       if (!current && cloudClaude) setProviderId(cloudClaude.id);
@@ -329,8 +392,12 @@ function AppContent() {
       const body = {
         provider: providerId,
         agent: agentId,
-        mode: "chat",
-        model: model || undefined,
+        mode: "ask",
+        modelClass: selectedModelOption?.modelClass,
+        model: selectedModelOption?.model ?? (model || undefined),
+        thinkingLevel,
+        noModel: selectedModelOption?.noModel,
+        useExtraModelArg: selectedModelOption?.useExtraModelArg,
         cwd: MOBILE_AGENT_HOME,
         sessionId: sessionId || undefined,
         prompt: trimmed,
@@ -358,7 +425,7 @@ function AppContent() {
     } finally {
       setBusy(false);
     }
-  }, [agentId, bridgeFetch, busy, model, prompt, providerId, selectedAgent, sessionId]);
+  }, [agentId, bridgeFetch, busy, model, prompt, providerId, selectedAgent, selectedModelOption, sessionId, thinkingLevel]);
 
   const sendSessionPrompt = useCallback(async () => {
     const trimmed = sessionPrompt.trim();
@@ -376,6 +443,7 @@ function AppContent() {
           agent: "claude",
           mode: "ask",
           model: "sonnet",
+          thinkingLevel,
           cwd: "/opt/asv-agent/work",
           prompt: trimmed,
           conversation: [{ role: "user", content: trimmed }],
@@ -402,7 +470,7 @@ function AppContent() {
     } finally {
       setBusy(false);
     }
-  }, [bridgeFetch, busy, openSession, selectedProject?.path, selectedProjectPath, selectedSession, sessionPrompt, transcript]);
+  }, [bridgeFetch, busy, openSession, selectedProject?.path, selectedProjectPath, selectedSession, sessionPrompt, thinkingLevel, transcript]);
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -412,9 +480,17 @@ function AppContent() {
             <Text style={styles.title}>Agent Session Viewer</Text>
             <Text style={styles.subtitle}>{status}</Text>
           </View>
-          <Pressable style={styles.iconButton} onPress={loadProviders} accessibilityLabel="Refresh providers">
-            <RefreshCw size={18} color={colors.text} />
-          </Pressable>
+          <View style={styles.headerActions}>
+            {!authToken ? (
+              <Pressable style={styles.secondaryButton} onPress={startMobileSignIn}>
+                <ExternalLink size={18} color={colors.text} />
+                <Text style={styles.secondaryButtonText}>Sign in</Text>
+              </Pressable>
+            ) : null}
+            <Pressable style={styles.iconButton} onPress={loadProviders} accessibilityLabel="Refresh providers">
+              <RefreshCw size={18} color={colors.text} />
+            </Pressable>
+          </View>
         </View>
 
         <View style={styles.tabs}>
@@ -435,28 +511,28 @@ function AppContent() {
                         key={provider.id}
                         label={provider.label || provider.id}
                         active={provider.id === providerId}
-                        disabled={provider.available === false}
+                        disabled={provider.status === "missing"}
                         onPress={() => setProviderId(provider.id)}
                       />
                     ))
                   ) : (
-                    <Text style={styles.mutedText}>Sign in on the Viewer tab, then refresh.</Text>
+                    <Text style={styles.mutedText}>Sign in with Google, then refresh.</Text>
                   )}
                 </SelectRow>
                 <SelectRow label="Agent">
-                  {MOBILE_AGENTS.map((agent) => (
+                  {agentOptions.map((agent) => (
                     <ChoiceButton
-                      key={agent.id}
-                      label={agent.label}
-                      active={agent.id === agentId}
-                      onPress={() => setAgentId(agent.id)}
+                      key={agent}
+                      label={agentLabel(agent)}
+                      active={agent === agentId}
+                      onPress={() => setAgentId(agent)}
                     />
                   ))}
                 </SelectRow>
                 <SelectRow label="Model">
                   {modelOptions.length ? (
-                    modelOptions.slice(0, 12).map((option) => (
-                      <ChoiceButton key={option} label={option} active={option === model} onPress={() => setModel(option)} />
+                    modelOptions.map((option) => (
+                      <ChoiceButton key={option.value} label={option.label || option.value} active={option.value === model} onPress={() => setModel(option.value)} />
                     ))
                   ) : (
                     <TextInput
@@ -467,6 +543,16 @@ function AppContent() {
                       placeholderTextColor={colors.muted}
                     />
                   )}
+                </SelectRow>
+                <SelectRow label="Thinking">
+                  {THINKING_LEVELS.map((level) => (
+                    <ChoiceButton
+                      key={level}
+                      label={level}
+                      active={level === thinkingLevel}
+                      onPress={() => setThinkingLevel(level)}
+                    />
+                  ))}
                 </SelectRow>
               </Section>
 
@@ -511,7 +597,7 @@ function AppContent() {
           ) : null}
 
           {activeTab === "viewer" ? (
-            <ViewerPanel webViewRef={webViewRef} onBridgeMessage={onBridgeMessage} />
+            <ViewerPanel webViewRef={webViewRef} onBridgeMessage={onBridgeMessage} authToken={authToken} onSignIn={startMobileSignIn} />
           ) : null}
 
           {activeTab === "agents" ? <AgentCatalog /> : null}
@@ -521,7 +607,7 @@ function AppContent() {
         <View pointerEvents="none" style={styles.hiddenBridge}>
           <NativeWebView
             ref={webViewRef}
-            source={{ uri: ASV_BASE_URL }}
+            source={{ uri: authToken ? `${ASV_BASE_URL}/api/auth/mobile/finish?token=${encodeURIComponent(authToken)}` : ASV_BASE_URL }}
             sharedCookiesEnabled
             thirdPartyCookiesEnabled
             onMessage={onBridgeMessage}
@@ -597,10 +683,14 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 function ViewerPanel({
   webViewRef,
-  onBridgeMessage
+  onBridgeMessage,
+  authToken,
+  onSignIn
 }: {
   webViewRef: React.RefObject<any>;
   onBridgeMessage: (event: { nativeEvent: { data: string } }) => void;
+  authToken: string;
+  onSignIn: () => void;
 }) {
   void webViewRef;
   void onBridgeMessage;
@@ -616,7 +706,26 @@ function ViewerPanel({
       </View>
     );
   }
-  return <NativeWebView source={{ uri: ASV_BASE_URL }} sharedCookiesEnabled thirdPartyCookiesEnabled style={styles.webView} />;
+  if (!authToken) {
+    return (
+      <View style={styles.viewerFallback}>
+        <TerminalSquare size={28} color={colors.text} />
+        <Text style={styles.viewerTitle}>Sign in to ASV</Text>
+        <Pressable style={styles.secondaryButton} onPress={onSignIn}>
+          <ExternalLink size={18} color={colors.text} />
+          <Text style={styles.secondaryButtonText}>Sign in with Google</Text>
+        </Pressable>
+      </View>
+    );
+  }
+  return (
+    <NativeWebView
+      source={{ uri: `${ASV_BASE_URL}/api/auth/mobile/finish?token=${encodeURIComponent(authToken)}` }}
+      sharedCookiesEnabled
+      thirdPartyCookiesEnabled
+      style={styles.webView}
+    />
+  );
 }
 
 function SessionsPanel({
@@ -662,7 +771,7 @@ function SessionsPanel({
 
       <Section title="Cloud Sessions">
         {projects.length === 0 ? (
-          <Text style={styles.mutedText}>Sign in on Viewer, then refresh synced sessions.</Text>
+          <Text style={styles.mutedText}>Sign in with Google, then refresh synced sessions.</Text>
         ) : (
           projects.slice(0, 12).map((project) => (
             <View key={project.path} style={styles.projectGroup}>
@@ -795,6 +904,12 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md
+  },
+  headerActions: {
+    alignItems: "center",
+    flexDirection: "row",
+    flexShrink: 0,
+    gap: spacing.sm
   },
   title: {
     color: colors.text,

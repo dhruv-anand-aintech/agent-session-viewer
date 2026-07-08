@@ -276,13 +276,11 @@ async function signUser(user: User, secret: string): Promise<string> {
   return `${payload}.${await hmac(payload, secret)}`
 }
 
-async function readUser(request: Request, env: Env): Promise<User | null> {
-  if (!configuredForGoogle(env)) return null
-  const signed = cookieValue(request, "asv_session")
-  if (!signed) return null
+async function readSignedUser(signed: string | null, env: Env): Promise<User | null> {
+  if (!signed || !env.SESSION_SECRET) return null
   const [payload, sig] = signed.split(".")
   if (!payload || !sig) return null
-  if (await hmac(payload, env.SESSION_SECRET!) !== sig) return null
+  if (await hmac(payload, env.SESSION_SECRET) !== sig) return null
   try {
     const user = JSON.parse(decoder.decode(unb64url(payload))) as User
     if (user.exp && user.exp < Math.floor(Date.now() / 1000)) return null
@@ -290,6 +288,13 @@ async function readUser(request: Request, env: Env): Promise<User | null> {
   } catch {
     return null
   }
+}
+
+async function readUser(request: Request, env: Env): Promise<User | null> {
+  if (!configuredForGoogle(env)) return null
+  const auth = request.headers.get("Authorization") ?? ""
+  const bearer = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length).trim() : null
+  return await readSignedUser(bearer, env) ?? await readSignedUser(cookieValue(request, "asv_session"), env)
 }
 
 async function requireUser(request: Request, env: Env): Promise<User | Response> {
@@ -304,6 +309,7 @@ function originFrom(request: Request): string {
 
 async function authStart(request: Request, env: Env): Promise<Response> {
   if (!configuredForGoogle(env)) return json({ error: "Google auth is not configured" }, 503)
+  const url = new URL(request.url)
   const state = randomId("st_")
   const redirectUri = `${originFrom(request)}/api/auth/google/callback`
   const params = new URLSearchParams({
@@ -314,9 +320,10 @@ async function authStart(request: Request, env: Env): Promise<Response> {
     state,
     prompt: "select_account",
   })
-  return redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`, {
-    "Set-Cookie": cookie("asv_oauth_state", state, 600),
-  })
+  const cookies = [cookie("asv_oauth_state", state, 600)]
+  const mobileReturn = url.searchParams.get("mobile") === "1" ? url.searchParams.get("return") : null
+  if (mobileReturn?.startsWith("asv://auth")) cookies.push(cookie("asv_mobile_return", encodeURIComponent(mobileReturn), 600))
+  return redirectWithCookies(`https://accounts.google.com/o/oauth2/v2/auth?${params}`, cookies)
 }
 
 async function authCallback(request: Request, env: Env): Promise<Response> {
@@ -359,9 +366,33 @@ async function authCallback(request: Request, env: Env): Promise<Response> {
   await env.AUTH_DB?.prepare(
     "insert into users (id, email, name, picture, updated_at) values (?, ?, ?, ?, datetime('now')) on conflict(id) do update set email = excluded.email, name = excluded.name, picture = excluded.picture, updated_at = datetime('now')",
   ).bind(user.sub, user.email, user.name ?? null, user.picture ?? null).run()
+  const signedUser = await signUser(user, env.SESSION_SECRET!)
+  const mobileReturn = cookieValue(request, "asv_mobile_return")
+  if (mobileReturn) {
+    const decodedReturn = decodeURIComponent(mobileReturn)
+    if (decodedReturn.startsWith("asv://auth")) {
+      const separator = decodedReturn.includes("#") ? "&" : "#"
+      return redirectWithCookies(`${decodedReturn}${separator}token=${encodeURIComponent(signedUser)}&email=${encodeURIComponent(user.email)}`, [
+        cookie("asv_session", signedUser, 60 * 60 * 24 * 14),
+        cookie("asv_oauth_state", "", 0),
+        cookie("asv_mobile_return", "", 0),
+      ])
+    }
+  }
   return redirectWithCookies("/sessions", [
-    cookie("asv_session", await signUser(user, env.SESSION_SECRET!), 60 * 60 * 24 * 14),
+    cookie("asv_session", signedUser, 60 * 60 * 24 * 14),
     cookie("asv_oauth_state", "", 0),
+    cookie("asv_mobile_return", "", 0),
+  ])
+}
+
+async function mobileAuthFinish(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url)
+  const token = url.searchParams.get("token")
+  const user = await readSignedUser(token, env)
+  if (!user || !token) return json({ error: "Invalid mobile auth token" }, 401)
+  return redirectWithCookies("/sessions", [
+    cookie("asv_session", token, 60 * 60 * 24 * 14),
   ])
 }
 
@@ -702,6 +733,7 @@ export default {
     }
     if (url.pathname === "/api/auth/google/start") return authStart(request, env)
     if (url.pathname === "/api/auth/google/callback") return authCallback(request, env)
+    if (url.pathname === "/api/auth/mobile/finish") return mobileAuthFinish(request, env)
     if (url.pathname === "/api/auth/logout") return redirect("/", { "Set-Cookie": cookie("asv_session", "", 0) })
     if (url.pathname === "/api/auth/me") return json({ user: await readUser(request, env) })
     if (url.pathname === "/mobile-updates/manifest" && request.method === "GET") return serveMobileUpdateManifest(request, env)

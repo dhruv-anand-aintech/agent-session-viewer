@@ -17,9 +17,11 @@ const modelIdx = args.indexOf("--model")
 const model = modelIdx >= 0 ? args[modelIdx + 1] : null
 const modelClassIdx = args.indexOf("--model-class")
 const modelClass = modelClassIdx >= 0 ? args[modelClassIdx + 1] : null
+const thinkingIdx = args.indexOf("--thinking-level")
+const thinkingLevel = thinkingIdx >= 0 ? args[thinkingIdx + 1] : null
 const noModel = args.includes("--no-model")
 const prompt = fs.readFileSync(promptFile, "utf8")
-console.log(JSON.stringify({ agent, cwd, resume, model, modelClass, noModel, hasSession: prompt.includes("Session ID: session-123"), hasUser: prompt.includes("USER MESSAGE\\nWhat changed?") }))
+console.log(JSON.stringify({ agent, cwd, resume, model, modelClass, thinkingLevel, noModel, hasSession: prompt.includes("Session ID: session-123"), hasUser: prompt.includes("USER MESSAGE\\nWhat changed?") }))
 `, "utf8")
 chmodSync(mockAgl, 0o755)
 process.env.AGENT_SESSION_AGL_PATH = mockAgl
@@ -77,6 +79,7 @@ try {
     mode: "ask",
     modelClass: "pro",
     model: "gpt-5.5",
+    thinkingLevel: "high",
     resume: "session-123",
     cwd: root,
     prompt: "What changed?",
@@ -90,7 +93,7 @@ try {
   })
   assert.equal(result.ok, true)
   const payload = JSON.parse(result.text)
-  assert.deepEqual(payload, { agent: "codex", cwd: root, resume: "session-123", model: "gpt-5.5", modelClass: null, noModel: false, hasSession: true, hasUser: true })
+  assert.deepEqual(payload, { agent: "codex", cwd: root, resume: "session-123", model: "gpt-5.5", modelClass: null, thinkingLevel: "high", noModel: false, hasSession: true, hasUser: true })
 
   const resumedResult = await runLocalAglChat({
     provider: "local",

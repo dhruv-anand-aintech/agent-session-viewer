@@ -10,13 +10,29 @@ declare const process:
 export type AgentProvider = {
   id: string;
   label: string;
-  available?: boolean;
+  status?: "available" | "missing" | string;
   agents?: string[];
-  modelOptionsByAgent?: Record<string, string[]>;
+};
+
+export type ModelOption = {
+  value: string;
+  label: string;
+  model?: string;
+  modelClass?: "fast" | "pro";
+  noModel?: boolean;
+  useExtraModelArg?: boolean;
 };
 
 export type ProvidersResponse = {
   providers: AgentProvider[];
+  defaults?: {
+    provider?: string;
+    agent?: string;
+    mode?: string;
+    modelClass?: string;
+    model?: string;
+  };
+  modelOptionsByAgent?: Record<string, ModelOption[]>;
 };
 
 export type ChatResponse = {
@@ -61,6 +77,7 @@ export type AsvBridgeRequest = {
   method?: string;
   path: string;
   body?: unknown;
+  authToken?: string;
 };
 
 const configuredBase =
@@ -71,12 +88,14 @@ const configuredBase =
 export const ASV_BASE_URL = String(configuredBase).replace(/\/$/, "");
 
 export async function asvFetch<T>(request: AsvBridgeRequest): Promise<T> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json"
+  };
+  if (request.authToken) headers.Authorization = `Bearer ${request.authToken}`;
   const response = await fetch(`${ASV_BASE_URL}${request.path}`, {
     method: request.method ?? (request.body ? "POST" : "GET"),
     credentials: "include",
-    headers: {
-      "content-type": "application/json"
-    },
+    headers,
     body: request.body ? JSON.stringify(request.body) : undefined
   });
   const text = await response.text();
