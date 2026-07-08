@@ -164,7 +164,7 @@ function AppContent() {
   }, [selectedProvider]);
   const modelOptions = useMemo(() => {
     const fromApi = modelOptionsByAgent[agentId] ?? [];
-    const defaults: ModelOption[] = selectedAgent.defaultModel
+    const defaults: ModelOption[] = !fromApi.length && selectedAgent.defaultModel
       ? [{ value: selectedAgent.defaultModel, label: selectedAgent.defaultModel, model: selectedAgent.defaultModel }]
       : [];
     const seen = new Set<string>();
