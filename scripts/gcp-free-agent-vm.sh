@@ -7,22 +7,27 @@ ZONE="${GCP_ASV_ZONE:-us-central1-a}"
 MACHINE_TYPE="${GCP_ASV_MACHINE_TYPE:-e2-micro}"
 DISK_SIZE="${GCP_ASV_DISK_SIZE:-30GB}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-METADATA_ARGS=()
+METADATA_PAIRS=()
 
 if [[ -n "${AGL_INSTALL_URL:-}" ]]; then
-  METADATA_ARGS=(--metadata "AGL_INSTALL_URL=${AGL_INSTALL_URL}")
+  METADATA_PAIRS+=("AGL_INSTALL_URL=${AGL_INSTALL_URL}")
 fi
 
 if [[ -n "${ASV_REPO_URL:-}" ]]; then
-  METADATA_ARGS+=(--metadata "ASV_REPO_URL=${ASV_REPO_URL}")
+  METADATA_PAIRS+=("ASV_REPO_URL=${ASV_REPO_URL}")
 fi
 
 if [[ -n "${ASV_RUNNER_TOKEN:-}" ]]; then
-  METADATA_ARGS+=(--metadata "ASV_RUNNER_TOKEN=${ASV_RUNNER_TOKEN}")
+  METADATA_PAIRS+=("ASV_RUNNER_TOKEN=${ASV_RUNNER_TOKEN}")
 fi
 
 if [[ -n "${CLOUDFLARED_TOKEN:-}" ]]; then
-  METADATA_ARGS+=(--metadata "CLOUDFLARED_TOKEN=${CLOUDFLARED_TOKEN}")
+  METADATA_PAIRS+=("CLOUDFLARED_TOKEN=${CLOUDFLARED_TOKEN}")
+fi
+
+METADATA_ARGS=()
+if (( ${#METADATA_PAIRS[@]} > 0 )); then
+  METADATA_ARGS=(--metadata "$(IFS=,; echo "${METADATA_PAIRS[*]}")")
 fi
 
 if [[ -z "$PROJECT" ]]; then
