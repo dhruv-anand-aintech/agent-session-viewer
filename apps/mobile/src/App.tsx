@@ -142,6 +142,7 @@ function AppContent() {
   const [sessionPrompt, setSessionPrompt] = useState("");
   const [sessionReply, setSessionReply] = useState("");
   const [loadingSessions, setLoadingSessions] = useState(false);
+  const [sessionsLoadedOnce, setSessionsLoadedOnce] = useState(false);
   const [updateStatus, setUpdateStatus] = useState("");
   const [openSelect, setOpenSelect] = useState<"provider" | "agent" | "model" | null>(null);
 
@@ -221,6 +222,10 @@ function AppContent() {
       JSON.stringify({ providerId, agentId, model, thinkingLevel, authToken, sessionId })
     ).catch(() => {});
   }, [agentId, authToken, model, providerId, sessionId, thinkingLevel]);
+
+  useEffect(() => {
+    setSessionsLoadedOnce(false);
+  }, [authToken]);
 
   const handleAuthUrl = useCallback((url: string) => {
     const token = mobileAuthTokenFromUrl(url);
@@ -393,6 +398,7 @@ function AppContent() {
     } catch (error) {
       setStatus(Platform.OS === "web" ? "Open ASV to authenticate" : error instanceof Error ? error.message : "Session load failed");
     } finally {
+      setSessionsLoadedOnce(true);
       setLoadingSessions(false);
     }
   }, [bridgeFetch, selectedProjectPath, selectedSession?.id]);
@@ -417,10 +423,10 @@ function AppContent() {
   }, [bridgeFetch]);
 
   useEffect(() => {
-    if (activeTab === "sessions" && projects.length === 0 && !loadingSessions) {
+    if (activeTab === "sessions" && projects.length === 0 && !loadingSessions && !sessionsLoadedOnce) {
       void loadSessions();
     }
-  }, [activeTab, loadSessions, loadingSessions, projects.length]);
+  }, [activeTab, loadSessions, loadingSessions, projects.length, sessionsLoadedOnce]);
 
   const sendPrompt = useCallback(async () => {
     const trimmed = prompt.trim();
