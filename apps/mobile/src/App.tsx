@@ -379,7 +379,15 @@ function AppContent() {
     setLoadingSessions(true);
     setStatus("Loading cloud sessions");
     try {
-      const data = await bridgeFetch<ProjectSummary[]>({ path: "/api/projects?maxSessions=40" });
+      if (!authToken && Platform.OS !== "web") {
+        setProjects([]);
+        setSelectedProjectPath("");
+        setSelectedSession(null);
+        setTranscript([]);
+        setStatus("Sign in to sync sessions");
+        return;
+      }
+      const data = await bridgeFetch<ProjectSummary[]>({ path: "/api/projects?maxSessions=40", timeoutMs: 15000 });
       setProjects(data);
       const nextProject = data.find((project) => project.path === selectedProjectPath) ?? data[0] ?? null;
       setSelectedProjectPath(nextProject?.path ?? "");
@@ -389,7 +397,8 @@ function AppContent() {
       if (nextSession) {
         const projectPath = nextSession.projectPath || nextProject?.path || "";
         const messages = await bridgeFetch<TranscriptMessage[]>({
-          path: `/api/session/${encodeURIComponent(projectPath)}/${encodeURIComponent(nextSession.id)}?tail=120`
+          path: `/api/session/${encodeURIComponent(projectPath)}/${encodeURIComponent(nextSession.id)}?tail=120`,
+          timeoutMs: 15000
         });
         setTranscript(messages);
       } else {
@@ -401,7 +410,7 @@ function AppContent() {
       setSessionsLoadedOnce(true);
       setLoadingSessions(false);
     }
-  }, [bridgeFetch, selectedProjectPath, selectedSession?.id]);
+  }, [authToken, bridgeFetch, selectedProjectPath, selectedSession?.id]);
 
   const openSession = useCallback(async (project: ProjectSummary, session: SessionMeta) => {
     setSelectedProjectPath(project.path);
@@ -423,10 +432,10 @@ function AppContent() {
   }, [bridgeFetch]);
 
   useEffect(() => {
-    if (activeTab === "sessions" && projects.length === 0 && !loadingSessions && !sessionsLoadedOnce) {
+    if (activeTab === "sessions" && (!!authToken || Platform.OS === "web") && projects.length === 0 && !loadingSessions && !sessionsLoadedOnce) {
       void loadSessions();
     }
-  }, [activeTab, loadSessions, loadingSessions, projects.length, sessionsLoadedOnce]);
+  }, [activeTab, authToken, loadSessions, loadingSessions, projects.length, sessionsLoadedOnce]);
 
   const sendPrompt = useCallback(async () => {
     const trimmed = prompt.trim();

@@ -79,6 +79,7 @@ export type AsvBridgeRequest = {
   path: string;
   body?: unknown;
   authToken?: string;
+  timeoutMs?: number;
 };
 
 const configuredBase =
@@ -89,22 +90,36 @@ const configuredBase =
 export const ASV_BASE_URL = String(configuredBase).replace(/\/$/, "");
 
 export async function asvFetch<T>(request: AsvBridgeRequest): Promise<T> {
+  const controller = new AbortController();
+  const timeout = request.timeoutMs
+    ? setTimeout(() => controller.abort(), request.timeoutMs)
+    : null;
   const headers: Record<string, string> = {
     "content-type": "application/json"
   };
   if (request.authToken) headers.Authorization = `Bearer ${request.authToken}`;
-  const response = await fetch(`${ASV_BASE_URL}${request.path}`, {
-    method: request.method ?? (request.body ? "POST" : "GET"),
-    credentials: "include",
-    headers,
-    body: request.body ? JSON.stringify(request.body) : undefined
-  });
-  const text = await response.text();
-  const json = text ? JSON.parse(text) : {};
-  if (!response.ok) {
-    throw new Error(json.error || `ASV request failed: ${response.status}`);
+  try {
+    const response = await fetch(`${ASV_BASE_URL}${request.path}`, {
+      method: request.method ?? (request.body ? "POST" : "GET"),
+      credentials: request.authToken ? "omit" : "include",
+      headers,
+      signal: controller.signal,
+      body: request.body ? JSON.stringify(request.body) : undefined
+    });
+    const text = await response.text();
+    const json = text ? JSON.parse(text) : {};
+    if (!response.ok) {
+      throw new Error(json.error || `ASV request failed: ${response.status}`);
+    }
+    return json as T;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("ASV request timed out");
+    }
+    throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
-  return json as T;
 }
 
 export function canUseEmbeddedAuth(): boolean {
