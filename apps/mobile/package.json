@@ -19,9 +19,11 @@
     "expo": "57.0.4",
     "expo-updates": "~57.0.6",
     "lucide-react-native": "1.23.0",
+    "nativewind": "^4.2.6",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.0",
+    "react-native-reanimated": "4.5.0",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-svg": "15.15.4",
     "react-native-web": "0.21.2",
@@ -29,6 +31,7 @@
   },
   "devDependencies": {
     "@types/react": "19.2.14",
+    "tailwindcss": "^3.4.19",
     "typescript": "~6.0.3"
   }
 }

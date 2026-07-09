@@ -21,3 +21,12 @@ export const spacing = {
   lg: 16,
   xl: 24
 };
+
+export const classes = {
+  screen: "flex-1 bg-canvas",
+  scroll: "gap-[18px] p-6 pb-9",
+  card: "gap-4 rounded-[28px] border border-white/10 bg-surface p-5",
+  field: "min-h-[58px] rounded-[22px] border border-white/10 bg-surface-muted px-[18px] text-base text-ink",
+  primaryButton: "min-h-[52px] flex-row items-center gap-2.5 self-start rounded-full bg-accent px-[22px]",
+  secondaryButton: "min-h-[42px] flex-row items-center gap-2 rounded-full border border-white/10 bg-surface-muted px-4"
+} as const;

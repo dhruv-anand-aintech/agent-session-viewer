@@ -1,3 +1,4 @@
+import "../global.css";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Updates from "expo-updates";
 import { Check, ChevronDown, ExternalLink, ListTree, LogOut, MessageSquare, Play, RefreshCw, Send, Smartphone, TerminalSquare } from "lucide-react-native";
@@ -8,7 +9,6 @@ import {
   Platform,
   Pressable,
   ScrollView,
-  StyleSheet,
   Text,
   TextInput,
   View
@@ -35,7 +35,18 @@ import {
   type SessionMeta,
   type TranscriptMessage
 } from "./asvApi";
-import { colors, spacing } from "./theme";
+import {
+  AgentCatalog,
+  ChoiceButton,
+  DropdownControl,
+  DropdownRow,
+  Section,
+  SelectRow,
+  SessionsPanel,
+  TabButton,
+  ViewerPanel
+} from "./components";
+import { classes, colors } from "./theme";
 
 type TabId = "chat" | "sessions" | "viewer" | "agents";
 
@@ -548,41 +559,41 @@ function AppContent() {
   }, [bridgeFetch, busy, openSession, selectedProject?.path, selectedProjectPath, selectedSession, sessionPrompt, thinkingLevel, transcript]);
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.root}>
-        <View style={styles.header}>
-          <View style={styles.headerCopy}>
-            <Text style={styles.title}>Code</Text>
-            <Text style={styles.subtitle}>{status}</Text>
+    <SafeAreaView className={classes.screen}>
+      <View className={classes.screen}>
+        <View className="flex-row items-start justify-between px-6 pb-3 pt-6">
+          <View className="min-w-0 flex-1 pr-3">
+            <Text className="font-serif text-[34px] leading-[42px] text-ink">Code</Text>
+            <Text className="mt-1 text-[13px] leading-[18px] text-muted">{status}</Text>
           </View>
-          <View style={styles.headerActions}>
+          <View className="flex-row items-center gap-2 pt-0.5">
             {!authToken ? (
-              <Pressable style={styles.secondaryButton} onPress={startMobileSignIn}>
+              <Pressable className={classes.secondaryButton} onPress={startMobileSignIn}>
                 <ExternalLink size={18} color={colors.text} />
-                <Text style={styles.secondaryButtonText}>Sign in</Text>
+                <Text className="text-sm font-bold text-ink">Sign in</Text>
               </Pressable>
             ) : (
-              <Pressable style={styles.secondaryButton} onPress={signOut}>
+              <Pressable className={classes.secondaryButton} onPress={signOut}>
                 <LogOut size={18} color={colors.text} />
-                <Text style={styles.secondaryButtonText}>Sign out</Text>
+                <Text className="text-sm font-bold text-ink">Sign out</Text>
               </Pressable>
             )}
-            <Pressable style={styles.iconButton} onPress={loadProviders} accessibilityLabel="Refresh providers">
+            <Pressable className="h-[42px] w-[42px] items-center justify-center rounded-full border border-white/10 bg-surface-muted" onPress={loadProviders} accessibilityLabel="Refresh providers">
               <RefreshCw size={18} color={colors.text} />
             </Pressable>
           </View>
         </View>
 
-        <View style={styles.tabs}>
+        <View className="flex-row gap-2 px-6 pb-2.5 pt-1">
           <TabButton id="chat" activeTab={activeTab} setActiveTab={setActiveTab} label="Chat" />
           <TabButton id="sessions" activeTab={activeTab} setActiveTab={setActiveTab} label="Sessions" />
           <TabButton id="viewer" activeTab={activeTab} setActiveTab={setActiveTab} label="Viewer" />
           <TabButton id="agents" activeTab={activeTab} setActiveTab={setActiveTab} label="Agents" />
         </View>
 
-        <View style={styles.content}>
+        <View className="flex-1">
           {activeTab === "chat" ? (
-            <ScrollView contentContainerStyle={styles.scrollContent}>
+            <ScrollView contentContainerClassName={classes.scroll}>
               <Section title="Session">
                 <DropdownRow
                   label="Provider"
@@ -609,8 +620,8 @@ function AppContent() {
                     setOpenSelect(null);
                   }}
                 />
-                <View style={styles.selectRow}>
-                  <Text style={styles.fieldLabel}>Model</Text>
+                <View className="gap-2">
+                  <Text className="text-xs font-bold uppercase text-muted">Model</Text>
                   {modelOptions.length ? (
                     <DropdownControl
                       value={model}
@@ -624,7 +635,7 @@ function AppContent() {
                     />
                   ) : (
                     <TextInput
-                      style={styles.input}
+                      className={classes.field}
                       value={model}
                       onChangeText={setModel}
                       placeholder="Model"
@@ -646,22 +657,22 @@ function AppContent() {
 
               <Section title="Prompt">
                 <TextInput
-                  style={styles.prompt}
+                  className="min-h-[152px] rounded-[28px] border border-white/15 bg-composer p-5 font-serif text-[19px] leading-[27px] text-ink"
                   multiline
                   value={prompt}
                   onChangeText={setPrompt}
                   placeholder="Ask the selected agent"
                   placeholderTextColor={colors.muted}
                 />
-                <Pressable style={[styles.primaryButton, busy && styles.disabled]} onPress={sendPrompt} disabled={busy}>
+                <Pressable className={`${classes.primaryButton} ${busy ? "opacity-60" : ""}`} onPress={sendPrompt} disabled={busy}>
                   {busy ? <ActivityIndicator color={colors.accentText} /> : <Send size={18} color={colors.accentText} />}
-                  <Text style={styles.primaryButtonText}>Send</Text>
+                  <Text className="text-base font-bold text-white">Send</Text>
                 </Pressable>
               </Section>
 
               {reply ? (
                 <Section title="Reply">
-                  <Text style={styles.reply}>{reply}</Text>
+                  <Text className="font-serif text-lg leading-[27px] text-ink">{reply}</Text>
                 </Section>
               ) : null}
             </ScrollView>
@@ -693,7 +704,7 @@ function AppContent() {
         </View>
       </View>
       {canUseEmbeddedAuth() ? (
-        <View pointerEvents="none" style={styles.hiddenBridge}>
+        <View pointerEvents="none" className="absolute -left-[10000px] -top-[10000px] h-px w-px opacity-0">
           <NativeWebView
             ref={webViewRef}
             source={{ uri: authToken ? `${ASV_BASE_URL}/api/auth/mobile/finish?token=${encodeURIComponent(authToken)}` : ASV_BASE_URL }}
@@ -709,358 +720,6 @@ function AppContent() {
   );
 }
 
-function TabButton({
-  id,
-  activeTab,
-  setActiveTab,
-  label
-}: {
-  id: TabId;
-  activeTab: TabId;
-  setActiveTab: (id: TabId) => void;
-  label: string;
-}) {
-  return (
-    <Pressable
-      style={[styles.tabButton, activeTab === id && styles.tabButtonActive]}
-      onPress={() => setActiveTab(id)}
-    >
-      <Text
-        style={[styles.tabText, activeTab === id && styles.tabTextActive]}
-        numberOfLines={1}
-        adjustsFontSizeToFit
-        minimumFontScale={0.78}
-      >
-        {label}
-      </Text>
-    </Pressable>
-  );
-}
-
-function ChoiceButton({
-  label,
-  active,
-  disabled,
-  onPress
-}: {
-  label: string;
-  active?: boolean;
-  disabled?: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      style={[styles.choice, active && styles.choiceActive, disabled && styles.disabledChoice]}
-      disabled={disabled}
-      onPress={onPress}
-    >
-      <Text style={[styles.choiceText, active && styles.choiceTextActive]} numberOfLines={1}>
-        {label}
-      </Text>
-    </Pressable>
-  );
-}
-
-function SelectRow({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <View style={styles.selectRow}>
-      <Text style={styles.fieldLabel}>{label}</Text>
-      <View style={styles.choiceWrap}>{children}</View>
-    </View>
-  );
-}
-
-function DropdownRow({
-  label,
-  value,
-  options,
-  emptyText,
-  open,
-  onToggle,
-  onChange
-}: {
-  label: string;
-  value: string;
-  options: SelectOption[];
-  emptyText?: string;
-  open: boolean;
-  onToggle: () => void;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <View style={styles.selectRow}>
-      <Text style={styles.fieldLabel}>{label}</Text>
-      {options.length ? (
-        <DropdownControl value={value} options={options} open={open} onToggle={onToggle} onChange={onChange} />
-      ) : (
-        <Text style={styles.mutedText}>{emptyText ?? "No options available"}</Text>
-      )}
-    </View>
-  );
-}
-
-function DropdownControl({
-  value,
-  options,
-  open,
-  onToggle,
-  onChange
-}: {
-  value: string;
-  options: SelectOption[];
-  open: boolean;
-  onToggle: () => void;
-  onChange: (value: string) => void;
-}) {
-  const selected = options.find((option) => option.value === value) ?? options[0];
-  return (
-    <View style={styles.dropdown}>
-      <Pressable style={[styles.dropdownButton, open && styles.dropdownButtonOpen]} onPress={onToggle}>
-        <View style={styles.dropdownButtonTextWrap}>
-          <Text style={styles.dropdownValue} numberOfLines={1}>{selected?.label ?? "Select"}</Text>
-          {selected?.detail ? <Text style={styles.dropdownDetail} numberOfLines={1}>{selected.detail}</Text> : null}
-        </View>
-        <ChevronDown size={18} color={colors.muted} />
-      </Pressable>
-      {open ? (
-        <ScrollView style={styles.dropdownMenu} nestedScrollEnabled keyboardShouldPersistTaps="handled">
-          {options.map((option) => {
-            const active = option.value === value;
-            return (
-              <Pressable
-                key={option.value}
-                style={[styles.dropdownOption, active && styles.dropdownOptionActive, option.disabled && styles.disabledChoice]}
-                disabled={option.disabled}
-                onPress={() => onChange(option.value)}
-              >
-                <View style={styles.dropdownOptionTextWrap}>
-                  <Text style={[styles.dropdownOptionText, active && styles.dropdownOptionTextActive]} numberOfLines={1}>
-                    {option.label}
-                  </Text>
-                  {option.detail ? <Text style={styles.dropdownOptionDetail} numberOfLines={1}>{option.detail}</Text> : null}
-                </View>
-                {active ? <Check size={17} color={colors.accent} /> : null}
-              </Pressable>
-            );
-          })}
-        </ScrollView>
-      ) : null}
-    </View>
-  );
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
-      {children}
-    </View>
-  );
-}
-
-function ViewerPanel({
-  webViewRef,
-  onBridgeMessage,
-  authToken,
-  onSignIn
-}: {
-  webViewRef: React.RefObject<any>;
-  onBridgeMessage: (event: { nativeEvent: { data: string } }) => void;
-  authToken: string;
-  onSignIn: () => void;
-}) {
-  void webViewRef;
-  void onBridgeMessage;
-  if (Platform.OS === "web") {
-    return (
-      <View style={styles.viewerFallback}>
-        <TerminalSquare size={28} color={colors.text} />
-        <Text style={styles.viewerTitle}>ASV Web</Text>
-        <Pressable style={styles.secondaryButton} onPress={() => Linking.openURL(ASV_BASE_URL)}>
-          <ExternalLink size={18} color={colors.text} />
-          <Text style={styles.secondaryButtonText}>Open Viewer</Text>
-        </Pressable>
-      </View>
-    );
-  }
-  if (!authToken) {
-    return (
-      <View style={styles.viewerFallback}>
-        <TerminalSquare size={28} color={colors.text} />
-        <Text style={styles.viewerTitle}>Sign in to ASV</Text>
-        <Pressable style={styles.secondaryButton} onPress={onSignIn}>
-          <ExternalLink size={18} color={colors.text} />
-          <Text style={styles.secondaryButtonText}>Sign in with Google</Text>
-        </Pressable>
-      </View>
-    );
-  }
-  return (
-    <NativeWebView
-      source={{ uri: `${ASV_BASE_URL}/api/auth/mobile/finish?token=${encodeURIComponent(authToken)}` }}
-      sharedCookiesEnabled
-      thirdPartyCookiesEnabled
-      style={styles.webView}
-    />
-  );
-}
-
-function SessionsPanel({
-  projects,
-  selectedSession,
-  transcript,
-  prompt,
-  reply,
-  busy,
-  signedIn,
-  updateStatus,
-  onRefresh,
-  onOpenSession,
-  onPromptChange,
-  onSendPrompt,
-  onCheckUpdates
-}: {
-  projects: ProjectSummary[];
-  selectedSession: SessionMeta | null;
-  transcript: TranscriptMessage[];
-  prompt: string;
-  reply: string;
-  busy: boolean;
-  signedIn: boolean;
-  updateStatus: string;
-  onRefresh: () => void;
-  onOpenSession: (project: ProjectSummary, session: SessionMeta) => void;
-  onPromptChange: (value: string) => void;
-  onSendPrompt: () => void;
-  onCheckUpdates: () => void;
-}) {
-  return (
-    <ScrollView contentContainerStyle={styles.scrollContent}>
-      <View style={styles.actionRow}>
-        <Pressable style={styles.secondaryButton} onPress={onRefresh} disabled={busy}>
-          <RefreshCw size={18} color={colors.text} />
-          <Text style={styles.secondaryButtonText}>{busy ? "Loading" : "Refresh"}</Text>
-        </Pressable>
-        <Pressable style={styles.secondaryButton} onPress={onCheckUpdates}>
-          <ExternalLink size={18} color={colors.text} />
-          <Text style={styles.secondaryButtonText}>Update</Text>
-        </Pressable>
-      </View>
-      {updateStatus ? <Text style={styles.statusText}>{updateStatus}</Text> : null}
-
-      <Section title="Cloud Sessions">
-        {projects.length === 0 ? (
-          <Text style={styles.mutedText}>{signedIn ? "No synced sessions found for this account." : "Sign in with Google, then refresh synced sessions."}</Text>
-        ) : (
-          projects.slice(0, 12).map((project) => (
-            <View key={project.path} style={styles.projectGroup}>
-              <View style={styles.projectTitleRow}>
-                <ListTree size={16} color={colors.muted} />
-                <Text style={styles.projectTitle} numberOfLines={1}>{projectLabel(project.path)}</Text>
-              </View>
-              {(project.sessions ?? []).slice(0, 8).map((session) => (
-                <Pressable
-                  key={`${project.path}:${session.id}`}
-                  style={[styles.sessionRow, selectedSession?.id === session.id && styles.sessionRowActive]}
-                  onPress={() => onOpenSession(project, session)}
-                >
-                  <View style={styles.sessionAvatar}>
-                    <MessageSquare size={17} color={colors.muted} />
-                    {selectedSession?.id === session.id ? <View style={styles.sessionDot} /> : null}
-                  </View>
-                  <View style={styles.sessionTextWrap}>
-                    <Text style={[styles.sessionTitle, selectedSession?.id === session.id && styles.sessionTitleActive]} numberOfLines={1}>
-                      {sessionTitle(session)}
-                    </Text>
-                    <Text style={[styles.sessionMeta, selectedSession?.id === session.id && styles.sessionMetaActive]} numberOfLines={1}>
-                      {(session.source || "session")} · {session.messageCount ?? 0} messages
-                    </Text>
-                  </View>
-                </Pressable>
-              ))}
-            </View>
-          ))
-        )}
-      </Section>
-
-      {selectedSession ? (
-        <Section title={`Transcript: ${sessionTitle(selectedSession)}`}>
-          {transcript.length === 0 ? (
-            <Text style={styles.mutedText}>No messages loaded.</Text>
-          ) : (
-            transcript.slice(-24).map((message, index) => (
-              <View key={`${message.timestamp ?? index}-${index}`} style={styles.messageRow}>
-                <Text style={styles.messageRole}>{messageRole(message)}</Text>
-                <Text style={styles.messageText}>{messageText(message) || "[empty]"}</Text>
-              </View>
-            ))
-          )}
-          <TextInput
-            style={styles.prompt}
-            multiline
-            value={prompt}
-            onChangeText={onPromptChange}
-            placeholder="Send a follow-up using cloud Claude Code"
-            placeholderTextColor={colors.muted}
-          />
-          <Pressable style={[styles.primaryButton, busy && styles.disabled]} onPress={onSendPrompt} disabled={busy || !prompt.trim()}>
-            {busy ? <ActivityIndicator color={colors.accentText} /> : <Send size={18} color={colors.accentText} />}
-            <Text style={styles.primaryButtonText}>
-              {sessionCanResumeWithClaude(selectedSession) ? "Resume Claude" : "Ask Cloud Claude"}
-            </Text>
-          </Pressable>
-        </Section>
-      ) : null}
-
-      {reply ? (
-        <Section title="Cloud Claude Reply">
-          <Text style={styles.reply}>{reply}</Text>
-        </Section>
-      ) : null}
-    </ScrollView>
-  );
-}
-
-function AgentCatalog() {
-  return (
-    <ScrollView contentContainerStyle={styles.scrollContent}>
-      <Section title="Mobile Runtime">
-        <View style={styles.pathRow}>
-          <Smartphone size={18} color={colors.muted} />
-          <Text style={styles.pathText}>{MOBILE_AGENT_HOME}</Text>
-        </View>
-        <View style={styles.pathRow}>
-          <TerminalSquare size={18} color={colors.muted} />
-          <Text style={styles.pathText}>{MOBILE_AGENT_PREFIX}</Text>
-        </View>
-      </Section>
-      {MOBILE_AGENTS.map((agent) => {
-        const Icon = agent.icon;
-        return (
-          <View key={agent.id} style={styles.agentCard}>
-            <View style={styles.agentHeader}>
-              <Icon size={20} color={colors.text} />
-              <Text style={styles.agentTitle}>{agent.label}</Text>
-            </View>
-            <CommandLine label="Install" value={agent.installCommand} />
-            <CommandLine label="Login" value={agent.loginCommand} />
-          </View>
-        );
-      })}
-    </ScrollView>
-  );
-}
-
-function CommandLine({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.commandLine}>
-      <Text style={styles.commandLabel}>{label}</Text>
-      <Text style={styles.commandText}>{value}</Text>
-      <Play size={15} color={colors.muted} />
-    </View>
-  );
-}
-
 export default function App() {
   return (
     <SafeAreaProvider>
@@ -1068,473 +727,3 @@ export default function App() {
     </SafeAreaProvider>
   );
 }
-
-const serifFont = Platform.select({ ios: "Georgia", android: "serif", default: "serif" });
-const monoFont = Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" });
-
-const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: colors.background
-  },
-  root: {
-    flex: 1,
-    backgroundColor: colors.background
-  },
-  header: {
-    alignItems: "flex-start",
-    flexDirection: "row",
-    justifyContent: "space-between",
-    paddingBottom: 12,
-    paddingHorizontal: 24,
-    paddingTop: 24
-  },
-  headerCopy: {
-    flex: 1,
-    minWidth: 0,
-    paddingRight: 12
-  },
-  headerActions: {
-    alignItems: "center",
-    flexDirection: "row",
-    flexShrink: 0,
-    gap: 8,
-    paddingTop: 2
-  },
-  title: {
-    color: colors.text,
-    fontFamily: serifFont,
-    fontSize: 34,
-    fontWeight: "400",
-    letterSpacing: 0,
-    lineHeight: 42
-  },
-  subtitle: {
-    color: colors.muted,
-    fontSize: 13,
-    lineHeight: 18,
-    marginTop: 4
-  },
-  iconButton: {
-    alignItems: "center",
-    backgroundColor: colors.surfaceMuted,
-    borderColor: "rgba(244,240,232,0.12)",
-    borderRadius: 22,
-    borderWidth: 1,
-    height: 42,
-    justifyContent: "center",
-    width: 42
-  },
-  tabs: {
-    flexDirection: "row",
-    gap: 8,
-    paddingBottom: 10,
-    paddingHorizontal: 24,
-    paddingTop: 4
-  },
-  tabButton: {
-    alignItems: "center",
-    backgroundColor: colors.surfaceMuted,
-    borderColor: "transparent",
-    borderRadius: 999,
-    borderWidth: 1,
-    flex: 1,
-    minHeight: 42,
-    justifyContent: "center",
-    paddingHorizontal: 10
-  },
-  tabButtonActive: {
-    backgroundColor: colors.deep,
-    borderColor: colors.deep
-  },
-  tabText: {
-    color: colors.text,
-    fontSize: 12,
-    fontWeight: "700",
-    letterSpacing: 0,
-    lineHeight: 16,
-    textAlign: "center"
-  },
-  tabTextActive: {
-    color: colors.text
-  },
-  content: {
-    flex: 1
-  },
-  hiddenBridge: {
-    height: 1,
-    left: -10000,
-    opacity: 0,
-    position: "absolute",
-    top: -10000,
-    width: 1
-  },
-  scrollContent: {
-    gap: 18,
-    padding: 24,
-    paddingBottom: 36
-  },
-  section: {
-    backgroundColor: colors.surface,
-    borderColor: "rgba(244,240,232,0.08)",
-    borderRadius: 28,
-    borderWidth: 1,
-    gap: 16,
-    padding: 20
-  },
-  sectionTitle: {
-    color: colors.text,
-    fontFamily: serifFont,
-    fontSize: 22,
-    fontWeight: "400",
-    lineHeight: 28
-  },
-  selectRow: {
-    gap: 8
-  },
-  fieldLabel: {
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: "700",
-    letterSpacing: 0,
-    textTransform: "uppercase"
-  },
-  choiceWrap: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8
-  },
-  choice: {
-    backgroundColor: colors.surfaceMuted,
-    borderColor: "rgba(244,240,232,0.1)",
-    borderRadius: 999,
-    borderWidth: 1,
-    maxWidth: "100%",
-    minHeight: 40,
-    justifyContent: "center",
-    paddingHorizontal: 16
-  },
-  choiceActive: {
-    backgroundColor: colors.deep,
-    borderColor: colors.deep
-  },
-  disabledChoice: {
-    opacity: 0.5
-  },
-  choiceText: {
-    color: colors.text,
-    fontSize: 14,
-    fontWeight: "600",
-    maxWidth: 260
-  },
-  choiceTextActive: {
-    color: colors.text
-  },
-  dropdown: {
-    gap: 8,
-    width: "100%"
-  },
-  dropdownButton: {
-    alignItems: "center",
-    backgroundColor: colors.surfaceMuted,
-    borderColor: "rgba(244,240,232,0.12)",
-    borderRadius: 22,
-    borderWidth: 1,
-    flexDirection: "row",
-    gap: 10,
-    minHeight: 58,
-    paddingHorizontal: 18,
-    paddingVertical: 10
-  },
-  dropdownButtonOpen: {
-    borderColor: colors.accent
-  },
-  dropdownButtonTextWrap: {
-    flex: 1,
-    minWidth: 0
-  },
-  dropdownValue: {
-    color: colors.text,
-    fontSize: 16,
-    fontWeight: "700"
-  },
-  dropdownDetail: {
-    color: colors.muted,
-    fontSize: 13,
-    marginTop: 2
-  },
-  dropdownMenu: {
-    backgroundColor: colors.surface,
-    borderColor: "rgba(244,240,232,0.12)",
-    borderRadius: 22,
-    borderWidth: 1,
-    maxHeight: 260,
-    overflow: "hidden"
-  },
-  dropdownOption: {
-    alignItems: "center",
-    borderBottomColor: "rgba(244,240,232,0.08)",
-    borderBottomWidth: 1,
-    flexDirection: "row",
-    gap: 10,
-    minHeight: 48,
-    paddingHorizontal: 16,
-    paddingVertical: 10
-  },
-  dropdownOptionActive: {
-    backgroundColor: colors.deep
-  },
-  dropdownOptionTextWrap: {
-    flex: 1,
-    minWidth: 0
-  },
-  dropdownOptionText: {
-    color: colors.text,
-    fontSize: 14,
-    fontWeight: "600"
-  },
-  dropdownOptionTextActive: {
-    color: colors.accent
-  },
-  dropdownOptionDetail: {
-    color: colors.muted,
-    fontSize: 12,
-    marginTop: 2
-  },
-  input: {
-    backgroundColor: colors.surfaceMuted,
-    borderColor: "rgba(244,240,232,0.12)",
-    borderRadius: 22,
-    borderWidth: 1,
-    color: colors.text,
-    flex: 1,
-    fontSize: 16,
-    minHeight: 58,
-    minWidth: 180,
-    paddingHorizontal: 18
-  },
-  prompt: {
-    backgroundColor: colors.composer,
-    borderColor: "rgba(244,240,232,0.16)",
-    borderRadius: 28,
-    borderWidth: 1,
-    color: colors.text,
-    fontFamily: serifFont,
-    fontSize: 19,
-    lineHeight: 27,
-    minHeight: 152,
-    padding: 20,
-    textAlignVertical: "top"
-  },
-  primaryButton: {
-    alignItems: "center",
-    alignSelf: "flex-start",
-    backgroundColor: colors.accent,
-    borderRadius: 999,
-    flexDirection: "row",
-    gap: 10,
-    minHeight: 52,
-    paddingHorizontal: 22
-  },
-  primaryButtonText: {
-    color: colors.accentText,
-    fontSize: 16,
-    fontWeight: "700"
-  },
-  secondaryButton: {
-    alignItems: "center",
-    backgroundColor: colors.surfaceMuted,
-    borderColor: "rgba(244,240,232,0.12)",
-    borderRadius: 999,
-    borderWidth: 1,
-    flexDirection: "row",
-    gap: 8,
-    minHeight: 42,
-    paddingHorizontal: 16
-  },
-  secondaryButtonText: {
-    color: colors.text,
-    fontSize: 14,
-    fontWeight: "700"
-  },
-  actionRow: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 10
-  },
-  statusText: {
-    color: colors.muted,
-    fontSize: 13,
-    lineHeight: 18
-  },
-  disabled: {
-    opacity: 0.65
-  },
-  mutedText: {
-    color: colors.muted,
-    fontSize: 15,
-    lineHeight: 22
-  },
-  reply: {
-    color: colors.text,
-    fontFamily: serifFont,
-    fontSize: 18,
-    lineHeight: 27
-  },
-  projectGroup: {
-    gap: 12
-  },
-  projectTitleRow: {
-    alignItems: "center",
-    flexDirection: "row",
-    gap: 8,
-    marginTop: 4
-  },
-  projectTitle: {
-    color: colors.muted,
-    flex: 1,
-    fontSize: 13,
-    fontWeight: "700",
-    textTransform: "uppercase"
-  },
-  sessionRow: {
-    alignItems: "center",
-    backgroundColor: colors.surfaceMuted,
-    borderColor: "rgba(244,240,232,0.08)",
-    borderRadius: 28,
-    borderWidth: 1,
-    flexDirection: "row",
-    gap: 14,
-    minHeight: 84,
-    paddingHorizontal: 14,
-    paddingVertical: 12
-  },
-  sessionRowActive: {
-    backgroundColor: colors.surface,
-    borderColor: colors.accent
-  },
-  sessionAvatar: {
-    alignItems: "center",
-    backgroundColor: colors.deep,
-    borderRadius: 12,
-    height: 50,
-    justifyContent: "center",
-    position: "relative",
-    width: 50
-  },
-  sessionDot: {
-    backgroundColor: "#5aa8ff",
-    borderRadius: 6,
-    height: 12,
-    position: "absolute",
-    right: -2,
-    top: -2,
-    width: 12
-  },
-  sessionTextWrap: {
-    flex: 1,
-    gap: 4,
-    minWidth: 0
-  },
-  sessionTitle: {
-    color: colors.text,
-    fontSize: 16,
-    fontWeight: "700"
-  },
-  sessionTitleActive: {
-    color: colors.text
-  },
-  sessionMeta: {
-    color: colors.muted,
-    fontSize: 13
-  },
-  sessionMetaActive: {
-    color: colors.muted
-  },
-  messageRow: {
-    backgroundColor: "rgba(11,12,10,0.22)",
-    borderColor: "rgba(244,240,232,0.08)",
-    borderRadius: 20,
-    borderWidth: 1,
-    gap: 8,
-    padding: 16
-  },
-  messageRole: {
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: "700",
-    textTransform: "uppercase"
-  },
-  messageText: {
-    color: colors.text,
-    fontFamily: serifFont,
-    fontSize: 17,
-    lineHeight: 25
-  },
-  webView: {
-    flex: 1
-  },
-  viewerFallback: {
-    alignItems: "center",
-    flex: 1,
-    gap: 16,
-    justifyContent: "center",
-    padding: 24
-  },
-  viewerTitle: {
-    color: colors.text,
-    fontFamily: serifFont,
-    fontSize: 26,
-    fontWeight: "400"
-  },
-  pathRow: {
-    alignItems: "center",
-    flexDirection: "row",
-    gap: 10
-  },
-  pathText: {
-    color: colors.text,
-    flex: 1,
-    fontFamily: monoFont,
-    fontSize: 12
-  },
-  agentCard: {
-    backgroundColor: colors.surface,
-    borderColor: "rgba(244,240,232,0.08)",
-    borderRadius: 28,
-    borderWidth: 1,
-    gap: 16,
-    padding: 20
-  },
-  agentHeader: {
-    alignItems: "center",
-    flexDirection: "row",
-    gap: 10
-  },
-  agentTitle: {
-    color: colors.text,
-    fontSize: 18,
-    fontWeight: "700"
-  },
-  commandLine: {
-    alignItems: "center",
-    backgroundColor: colors.surfaceMuted,
-    borderRadius: 18,
-    flexDirection: "row",
-    gap: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 12
-  },
-  commandLabel: {
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: "700",
-    width: 48
-  },
-  commandText: {
-    color: colors.code,
-    flex: 1,
-    fontFamily: monoFont,
-    fontSize: 12
-  }
-});
