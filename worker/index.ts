@@ -787,8 +787,8 @@ async function ingest(request: Request, env: Env): Promise<Response> {
     sessionKey(machine.userId, machine.machineId, session.projectPath, session.sessionId),
     { messages: session.messages, total: session.total ?? session.messages.length, updatedAt },
   )
-  for (let offset = 0; offset < sessions.length; offset += 10) {
-    await Promise.all(sessions.slice(offset, offset + 10).map(writeSession))
+  for (let offset = 0; offset < sessions.length; offset += 20) {
+    await Promise.all(sessions.slice(offset, offset + 20).map(writeSession))
   }
   await putObjectJson(env, manifestKey(machine.userId, machine.machineId), { projects: visibleProjects, updatedAt })
   await env.AUTH_DB.prepare("update machines set last_seen_at = datetime('now') where id = ?").bind(machine.machineId).run()

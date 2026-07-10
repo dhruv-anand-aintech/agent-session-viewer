@@ -30,9 +30,9 @@ public struct SyncEngine: Sendable {
         do {
             let snapshot: SnapshotPayload
             do {
-                snapshot = try await localClient.snapshot(baseURL: configuration.localURL)
+                snapshot = try await localClient.snapshot(baseURL: configuration.localURL, maxSessions: 24, tail: 80)
             } catch {
-                snapshot = try fallbackScanner.snapshot()
+                snapshot = try fallbackScanner.snapshot(maxSessions: 24, tail: 80)
             }
             let counts = try await cloudClient.ingest(snapshot, configuration: configuration)
             let status = SyncStatus(
