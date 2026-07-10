@@ -566,6 +566,78 @@ function manifestKey(userId: string, machineId: string): string {
   return `users/${userId}/machines/${machineId}/manifest.json`
 }
 
+const CLOUD_SESSION_PAGE_SIZE = 30
+
+type CloudSession = {
+  projectPath: string
+  sessionId: string
+  messages: unknown[]
+  total?: number
+}
+
+type CloudPage = {
+  offset: number
+  limit: number
+  key: string
+  hash: string
+  updatedAt: string
+  projects: any[]
+}
+
+type CloudManifest = {
+  version?: number
+  projects?: any[]
+  pages?: CloudPage[]
+  sessionIndex?: Record<string, string>
+  updatedAt?: string
+}
+
+function pageKey(userId: string, machineId: string, offset: number): string {
+  return `users/${userId}/machines/${machineId}/pages/${offset}.json`
+}
+
+function sessionIndexKey(projectPath: string, sessionId: string): string {
+  return JSON.stringify([projectPath, sessionId])
+}
+
+function normalizedPage(raw: unknown): { offset: number; limit: number } {
+  const page = raw && typeof raw === "object" ? raw as { offset?: unknown; limit?: unknown } : {}
+  const parsedOffset = Number(page.offset)
+  const parsedLimit = Number(page.limit)
+  const offset = Number.isSafeInteger(parsedOffset) && parsedOffset >= 0 ? parsedOffset : 0
+  const limit = Number.isSafeInteger(parsedLimit) && parsedLimit > 0
+    ? Math.min(parsedLimit, CLOUD_SESSION_PAGE_SIZE)
+    : CLOUD_SESSION_PAGE_SIZE
+  return { offset, limit }
+}
+
+function mergePageProjects(pages: CloudPage[]): { projects: any[]; sessionIndex: Record<string, string> } {
+  const byPath = new Map<string, any>()
+  const seen = new Set<string>()
+  const sessionIndex: Record<string, string> = {}
+  for (const page of [...pages].sort((a, b) => a.offset - b.offset)) {
+    for (const project of page.projects ?? []) {
+      const path = typeof project?.path === "string" ? project.path : ""
+      if (!path) continue
+      const sessions = (Array.isArray(project.sessions) ? project.sessions : []).filter((session: any) => {
+        const id = String(session?.id ?? "")
+        const projectPath = String(session?.projectPath ?? path)
+        const indexKey = sessionIndexKey(projectPath, id)
+        if (!id || seen.has(indexKey)) return false
+        seen.add(indexKey)
+        sessionIndex[indexKey] = page.key
+        return true
+      })
+      if (!sessions.length) continue
+      const existing = byPath.get(path)
+      byPath.set(path, existing
+        ? { ...existing, sessions: [...(existing.sessions ?? []), ...sessions] }
+        : { ...project, sessions })
+    }
+  }
+  return { projects: [...byPath.values()], sessionIndex }
+}
+
 async function putObjectJson(env: Env, key: string, value: unknown): Promise<void> {
   const text = JSON.stringify(value)
   if (env.GCS_BUCKET) {
@@ -739,6 +811,18 @@ async function streamProjects(user: User, env: Env): Promise<Response> {
 
 async function readSession(user: User, env: Env, projectPath: string, sessionId: string): Promise<Response> {
   for (const machine of await listMachines(user, env)) {
+    const manifest = await getObjectJson<CloudManifest>(env, manifestKey(user.sub, machine.id)).catch(() => null)
+    const packedKey = manifest?.sessionIndex?.[sessionIndexKey(projectPath, sessionId)]
+    if (packedKey) {
+      const page = await getObjectJson<{ sessions?: CloudSession[] }>(env, packedKey).catch(() => null)
+      const packed = page?.sessions?.find(session => session.projectPath === projectPath && session.sessionId === sessionId)
+      if (packed) {
+        return new Response(JSON.stringify(packed.messages ?? []), {
+          headers: { "Content-Type": "application/json", "X-Message-Total": String(packed.total ?? packed.messages?.length ?? 0) },
+        })
+      }
+    }
+    // Keep reading pre-page-layout objects during the migration window.
     const data = await getObjectJson<{ messages?: unknown[]; total?: number }>(env, sessionKey(user.sub, machine.id, projectPath, sessionId)).catch(() => null)
     if (!data) continue
     return new Response(JSON.stringify(data.messages ?? []), {
@@ -763,7 +847,8 @@ async function ingest(request: Request, env: Env): Promise<Response> {
   if (!env.AUTH_DB) return json({ error: "AUTH_DB is required" }, 503)
   const machine = await machineFromToken(request, env)
   if (machine instanceof Response) return machine
-  const body = await request.json().catch(() => ({})) as { projects?: unknown[]; sessions?: Array<{ projectPath: string; sessionId: string; messages: unknown[]; total?: number }> }
+  const body = await request.json().catch(() => ({})) as { projects?: unknown[]; sessions?: CloudSession[]; page?: unknown }
+  const requestedPage = normalizedPage(body.page)
   const projects = Array.isArray(body.projects) ? body.projects : []
   const sessions = (Array.isArray(body.sessions) ? body.sessions : []).filter(session =>
     !!session.projectPath && !!session.sessionId && Array.isArray(session.messages) && session.messages.length > 0,
@@ -782,17 +867,54 @@ async function ingest(request: Request, env: Env): Promise<Response> {
     return projectSessions.length ? [{ ...entry, sessions: projectSessions }] : []
   })
   const updatedAt = new Date().toISOString()
-  const writeSession = (session: (typeof sessions)[number]) => putObjectJson(
-    env,
-    sessionKey(machine.userId, machine.machineId, session.projectPath, session.sessionId),
-    { messages: session.messages, total: session.total ?? session.messages.length, updatedAt },
-  )
-  for (let offset = 0; offset < sessions.length; offset += 20) {
-    await Promise.all(sessions.slice(offset, offset + 20).map(writeSession))
+  const key = pageKey(machine.userId, machine.machineId, requestedPage.offset)
+  const packedPage = {
+    version: 1,
+    offset: requestedPage.offset,
+    limit: requestedPage.limit,
+    projects: visibleProjects,
+    sessions,
   }
-  await putObjectJson(env, manifestKey(machine.userId, machine.machineId), { projects: visibleProjects, updatedAt })
+  const hash = await sha256Hex(JSON.stringify(packedPage))
+  const previous = await getObjectJson<CloudManifest>(env, manifestKey(machine.userId, machine.machineId)).catch(() => null)
+  const previousPage = previous?.pages?.find(page => page.offset === requestedPage.offset)
+  const changed = previousPage?.hash !== hash
+  if (changed) {
+    await putObjectJson(env, key, { ...packedPage, updatedAt })
+    const pages = [
+      ...(previous?.pages ?? []).filter(page => page.offset !== requestedPage.offset),
+      { ...requestedPage, key, hash, updatedAt, projects: visibleProjects },
+    ]
+    const merged = mergePageProjects(pages)
+    await putObjectJson(env, manifestKey(machine.userId, machine.machineId), {
+      version: 2,
+      pages: pages.sort((a, b) => a.offset - b.offset),
+      projects: merged.projects,
+      sessionIndex: merged.sessionIndex,
+      updatedAt,
+    } satisfies CloudManifest)
+  }
   await env.AUTH_DB.prepare("update machines set last_seen_at = datetime('now') where id = ?").bind(machine.machineId).run()
-  return json({ ok: true, projects: visibleProjects.length, sessions: sessions.length })
+  return json({ ok: true, projects: visibleProjects.length, sessions: sessions.length, page: requestedPage, changed, objectWrites: changed ? 2 : 0 })
+}
+
+async function enqueueLoadMore(request: Request, env: Env, user: User): Promise<Response> {
+  if (!env.AUTH_DB) return json({ error: "AUTH_DB is not configured" }, 503)
+  const body = await request.json().catch(() => ({})) as { offset?: unknown; limit?: unknown; machineId?: unknown }
+  const page = normalizedPage(body)
+  if (page.offset === 0) return json({ error: "Load-more offset must be greater than zero" }, 400)
+  const requestedMachineId = typeof body.machineId === "string" ? body.machineId : null
+  const machines = (await listMachines(user, env)).filter(machine => !requestedMachineId || machine.id === requestedMachineId)
+  if (!machines.length) return json({ error: requestedMachineId ? "Machine not found" : "No connected machines" }, 404)
+  const commands = []
+  for (const machine of machines) {
+    const id = randomId("cmd_")
+    await env.AUTH_DB.prepare(
+      "insert into command_queue (id, user_id, machine_id, type, payload, created_at) values (?, ?, ?, ?, ?, datetime('now'))",
+    ).bind(id, user.sub, machine.id, "sessions.load_more", JSON.stringify(page)).run()
+    commands.push({ id, machineId: machine.id })
+  }
+  return json({ queued: commands.length, commands, page }, 202)
 }
 
 async function pollCommands(request: Request, env: Env): Promise<Response> {
@@ -914,7 +1036,7 @@ export default {
     if (url.pathname === "/api/cloud/ingest" && request.method === "POST") return ingest(request, env)
     if (url.pathname === "/api/cloud/poll" && request.method === "GET") return pollCommands(request, env)
 
-    const protectedPaths = ["/api/projects", "/api/stream", "/api/machines", "/api/onboarding"]
+    const protectedPaths = ["/api/projects", "/api/stream", "/api/machines", "/api/onboarding", "/api/sessions"]
     const needsUser = protectedPaths.some(path => url.pathname === path || url.pathname.startsWith(`${path}/`)) || url.pathname.startsWith("/api/session/")
     const userOrResponse = needsUser ? await requireUser(request, env) : null
     if (userOrResponse instanceof Response) return userOrResponse
@@ -926,6 +1048,7 @@ export default {
     if (url.pathname === "/api/machines" && request.method === "POST") return registerMachine(request, env, user!)
     if (url.pathname === "/api/onboarding/status" && request.method === "GET") return onboardingStatus(user!, env)
     if (url.pathname === "/api/onboarding/pair" && request.method === "POST") return createMachinePairing(request, env, user!)
+    if (url.pathname === "/api/sessions/load-more" && request.method === "POST") return enqueueLoadMore(request, env, user!)
 
     const commandMatch = url.pathname.match(/^\/api\/machines\/([^/]+)\/commands$/)
     if (commandMatch && request.method === "POST") return enqueueCommand(request, env, user!, decodeURIComponent(commandMatch[1]))

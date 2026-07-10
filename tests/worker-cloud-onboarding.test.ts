@@ -3,13 +3,16 @@ import worker from "../worker"
 
 type Pairing = { id: string; userId: string; label: string; codeHash: string; expiresAt: string; claimed: boolean }
 type Machine = { id: string; userId: string; label: string; tokenHash: string; created_at: string; last_seen_at: string | null }
+type Command = { id: string; userId: string; machineId: string; type: string; payload: string }
 
 function dbMock() {
   const pairings: Pairing[] = []
   const machines: Machine[] = []
+  const commands: Command[] = []
   return {
     pairings,
     machines,
+    commands,
     prepare(sql: string) {
       return {
         bind(...args: unknown[]) {
@@ -33,6 +36,10 @@ function dbMock() {
                 const machine = machines.find(row => row.id === args[0])
                 if (machine) machine.last_seen_at = new Date().toISOString()
                 return { meta: { changes: machine ? 1 : 0 } }
+              }
+              if (sql.startsWith("insert into command_queue")) {
+                commands.push({ id: String(args[0]), userId: String(args[1]), machineId: String(args[2]), type: String(args[3]), payload: String(args[4]) })
+                return { meta: { changes: 1 } }
               }
               throw new Error(`Unhandled run: ${sql}`)
             },
@@ -173,13 +180,17 @@ describe("worker cloud onboarding", () => {
   it("authenticates the daemon and omits message-less transcripts from cloud storage", async () => {
     const db = dbMock()
     const bucketObjects = new Map<string, unknown>()
+    let objectWrites = 0
     const token = "asv_machine-token"
     db.machines.push({ id: "m_1", userId: "user-1", label: "Mac", tokenHash: await sha256(token), created_at: new Date().toISOString(), last_seen_at: null })
     const env = {
       AUTH_DB: db,
       SESSION_BUCKET: {
-        async put(key: string, value: string) { bucketObjects.set(key, JSON.parse(value)) },
-        async get() { return null },
+        async put(key: string, value: string) { objectWrites += 1; bucketObjects.set(key, JSON.parse(value)) },
+        async get(key: string) {
+          const value = bucketObjects.get(key)
+          return value ? { async json() { return value } } : null
+        },
       },
     }
     const status = await worker.fetch(new Request("https://asv.test/api/cloud/status", { headers: { Authorization: `Bearer ${token}` } }), env)
@@ -198,10 +209,74 @@ describe("worker cloud onboarding", () => {
       }),
     }), env)
     expect(ingest.status).toBe(200)
-    await expect(ingest.json()).resolves.toMatchObject({ projects: 1, sessions: 1 })
-    expect([...bucketObjects.keys()].filter(key => key.includes("/sessions/"))).toHaveLength(1)
+    await expect(ingest.json()).resolves.toMatchObject({ projects: 1, sessions: 1, page: { offset: 0, limit: 30 }, changed: true, objectWrites: 2 })
+    expect([...bucketObjects.keys()].filter(key => key.includes("/sessions/"))).toHaveLength(0)
+    expect([...bucketObjects.keys()].filter(key => key.includes("/pages/"))).toEqual(["users/user-1/machines/m_1/pages/0.json"])
     expect(bucketObjects.get("users/user-1/machines/m_1/manifest.json")).toMatchObject({
       projects: [{ path: "/repo", sessions: [{ id: "real" }] }],
+      pages: [{ offset: 0, limit: 30, key: "users/user-1/machines/m_1/pages/0.json" }],
     })
+
+    const unchanged = await worker.fetch(new Request("https://asv.test/api/cloud/ingest", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projects: [{ path: "/repo", sessions: [{ id: "real" }] }],
+        sessions: [{ projectPath: "/repo", sessionId: "real", messages: [{ role: "user", content: "hello" }] }],
+      }),
+    }), env)
+    await expect(unchanged.json()).resolves.toMatchObject({ changed: false, objectWrites: 0 })
+    expect(objectWrites).toBe(2)
+  })
+
+  it("preserves older packed pages, reads sessions from them, and enqueues explicit load-more", async () => {
+    const db = dbMock()
+    const bucketObjects = new Map<string, unknown>()
+    const token = "asv_machine-token"
+    const secret = "test-session-secret"
+    db.machines.push({ id: "m_1", userId: "user-1", label: "Mac", tokenHash: await sha256(token), created_at: new Date().toISOString(), last_seen_at: null })
+    const env = {
+      AUTH_DB: db,
+      GOOGLE_CLIENT_ID: "client",
+      GOOGLE_CLIENT_SECRET: "secret",
+      SESSION_SECRET: secret,
+      SESSION_BUCKET: {
+        async put(key: string, value: string) { bucketObjects.set(key, JSON.parse(value)) },
+        async get(key: string) {
+          const value = bucketObjects.get(key)
+          return value ? { async json() { return value } } : null
+        },
+      },
+    }
+    const ingestPage = (offset: number, id: string) => worker.fetch(new Request("https://asv.test/api/cloud/ingest", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        page: { offset, limit: 30 },
+        projects: [{ path: "/repo", sessions: [{ id, lastActivityAt: `2026-07-${offset ? "01" : "10"}` }] }],
+        sessions: [{ projectPath: "/repo", sessionId: id, messages: [{ role: "user", content: id }] }],
+      }),
+    }), env)
+
+    expect((await ingestPage(0, "recent")).status).toBe(200)
+    expect((await ingestPage(30, "older")).status).toBe(200)
+    expect(bucketObjects.get("users/user-1/machines/m_1/manifest.json")).toMatchObject({
+      projects: [{ path: "/repo", sessions: [{ id: "recent" }, { id: "older" }] }],
+      pages: [{ offset: 0 }, { offset: 30 }],
+    })
+
+    const auth = `Bearer ${await signedUser(secret)}`
+    const older = await worker.fetch(new Request("https://asv.test/api/session/%2Frepo/older", { headers: { Authorization: auth } }), env)
+    expect(older.status).toBe(200)
+    await expect(older.json()).resolves.toEqual([{ role: "user", content: "older" }])
+
+    const loadMore = await worker.fetch(new Request("https://asv.test/api/sessions/load-more", {
+      method: "POST",
+      headers: { Authorization: auth, "Content-Type": "application/json" },
+      body: JSON.stringify({ offset: 60, limit: 100 }),
+    }), env)
+    expect(loadMore.status).toBe(202)
+    await expect(loadMore.json()).resolves.toMatchObject({ queued: 1, page: { offset: 60, limit: 30 } })
+    expect(db.commands).toMatchObject([{ userId: "user-1", machineId: "m_1", type: "sessions.load_more", payload: JSON.stringify({ offset: 60, limit: 30 }) }])
   })
 })
