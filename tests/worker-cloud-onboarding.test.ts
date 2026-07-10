@@ -185,7 +185,7 @@ describe("worker cloud onboarding", () => {
     db.machines.push({ id: "m_1", userId: "user-1", label: "Mac", tokenHash: await sha256(token), created_at: new Date().toISOString(), last_seen_at: null })
     const env = {
       AUTH_DB: db,
-      SESSION_BUCKET: {
+      TEST_GCS_BUCKET: {
         async put(key: string, value: string) { objectWrites += 1; bucketObjects.set(key, JSON.parse(value)) },
         async get(key: string) {
           const value = bucketObjects.get(key)
@@ -240,7 +240,7 @@ describe("worker cloud onboarding", () => {
       GOOGLE_CLIENT_ID: "client",
       GOOGLE_CLIENT_SECRET: "secret",
       SESSION_SECRET: secret,
-      SESSION_BUCKET: {
+      TEST_GCS_BUCKET: {
         async put(key: string, value: string) { bucketObjects.set(key, JSON.parse(value)) },
         async get(key: string) {
           const value = bucketObjects.get(key)
@@ -252,7 +252,7 @@ describe("worker cloud onboarding", () => {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        page: { offset, limit: 30 },
+        page: { offset, limit: 30, sourceTotal: 75, hasMore: offset < 60 },
         projects: [{ path: "/repo", sessions: [{ id, lastActivityAt: `2026-07-${offset ? "01" : "10"}` }] }],
         sessions: [{ projectPath: "/repo", sessionId: id, messages: [{ role: "user", content: id }] }],
       }),
@@ -263,6 +263,8 @@ describe("worker cloud onboarding", () => {
     expect(bucketObjects.get("users/user-1/machines/m_1/manifest.json")).toMatchObject({
       projects: [{ path: "/repo", sessions: [{ id: "recent" }, { id: "older" }] }],
       pages: [{ offset: 0 }, { offset: 30 }],
+      sourceTotal: 75,
+      hasMore: true,
     })
 
     const auth = `Bearer ${await signedUser(secret)}`
@@ -278,5 +280,10 @@ describe("worker cloud onboarding", () => {
     expect(loadMore.status).toBe(202)
     await expect(loadMore.json()).resolves.toMatchObject({ queued: 1, page: { offset: 60, limit: 30 } })
     expect(db.commands).toMatchObject([{ userId: "user-1", machineId: "m_1", type: "sessions.load_more", payload: JSON.stringify({ offset: 60, limit: 30 }) }])
+
+    const stream = await worker.fetch(new Request("https://asv.test/api/stream?maxSessions=1", { headers: { Authorization: auth } }), env)
+    const streamText = await stream.text()
+    expect(streamText).toContain('event: projects_meta\ndata: {"total":75,"uploaded":2,"returned":1,"hasMore":true}')
+    expect(streamText).toContain('event: projects\ndata: [{"path":"/repo","sessions":[{"id":"recent"')
   })
 })

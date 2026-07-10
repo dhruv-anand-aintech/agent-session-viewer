@@ -138,7 +138,7 @@ type User = {
 type Env = {
   ASSETS?: { fetch: (request: Request) => Promise<Response> }
   AUTH_DB?: any
-  SESSION_BUCKET?: any
+  TEST_GCS_BUCKET?: any
   GCS_BUCKET?: string
   GCP_SERVICE_ACCOUNT_EMAIL?: string
   GCP_PRIVATE_KEY?: string
@@ -582,6 +582,8 @@ type CloudPage = {
   hash: string
   updatedAt: string
   projects: any[]
+  sourceTotal?: number
+  hasMore?: boolean
 }
 
 type CloudManifest = {
@@ -589,6 +591,9 @@ type CloudManifest = {
   projects?: any[]
   pages?: CloudPage[]
   sessionIndex?: Record<string, string>
+  legacyProjects?: any[]
+  sourceTotal?: number
+  hasMore?: boolean
   updatedAt?: string
 }
 
@@ -600,15 +605,18 @@ function sessionIndexKey(projectPath: string, sessionId: string): string {
   return JSON.stringify([projectPath, sessionId])
 }
 
-function normalizedPage(raw: unknown): { offset: number; limit: number } {
-  const page = raw && typeof raw === "object" ? raw as { offset?: unknown; limit?: unknown } : {}
+function normalizedPage(raw: unknown): { offset: number; limit: number; sourceTotal?: number; hasMore?: boolean } {
+  const page = raw && typeof raw === "object" ? raw as { offset?: unknown; limit?: unknown; sourceTotal?: unknown; hasMore?: unknown } : {}
   const parsedOffset = Number(page.offset)
   const parsedLimit = Number(page.limit)
   const offset = Number.isSafeInteger(parsedOffset) && parsedOffset >= 0 ? parsedOffset : 0
   const limit = Number.isSafeInteger(parsedLimit) && parsedLimit > 0
     ? Math.min(parsedLimit, CLOUD_SESSION_PAGE_SIZE)
     : CLOUD_SESSION_PAGE_SIZE
-  return { offset, limit }
+  const parsedTotal = Number(page.sourceTotal)
+  const sourceTotal = Number.isSafeInteger(parsedTotal) && parsedTotal >= 0 ? parsedTotal : undefined
+  const hasMore = typeof page.hasMore === "boolean" ? page.hasMore : undefined
+  return { offset, limit, sourceTotal, hasMore }
 }
 
 function mergePageProjects(pages: CloudPage[]): { projects: any[]; sessionIndex: Record<string, string> } {
@@ -638,8 +646,32 @@ function mergePageProjects(pages: CloudPage[]): { projects: any[]; sessionIndex:
   return { projects: [...byPath.values()], sessionIndex }
 }
 
+function mergeProjects(primary: any[], secondary: any[]): any[] {
+  const byPath = new Map<string, any>()
+  const seen = new Set<string>()
+  for (const project of [...primary, ...secondary]) {
+    const path = typeof project?.path === "string" ? project.path : ""
+    if (!path) continue
+    const sessions = (Array.isArray(project.sessions) ? project.sessions : []).filter((session: any) => {
+      const id = String(session?.id ?? "")
+      const key = sessionIndexKey(String(session?.projectPath ?? path), id)
+      if (!id || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    if (!sessions.length) continue
+    const existing = byPath.get(path)
+    byPath.set(path, existing ? { ...existing, sessions: [...existing.sessions, ...sessions] } : { ...project, sessions })
+  }
+  return [...byPath.values()]
+}
+
 async function putObjectJson(env: Env, key: string, value: unknown): Promise<void> {
   const text = JSON.stringify(value)
+  if (env.TEST_GCS_BUCKET) {
+    await env.TEST_GCS_BUCKET.put(key, text)
+    return
+  }
   if (env.GCS_BUCKET) {
     const token = await gcsAccessToken(env)
     const params = new URLSearchParams({ uploadType: "media", name: key })
@@ -654,14 +686,15 @@ async function putObjectJson(env: Env, key: string, value: unknown): Promise<voi
     if (!res.ok) throw new Error(`GCS put failed: ${res.status} ${await res.text()}`)
     return
   }
-  if (env.SESSION_BUCKET) {
-    await env.SESSION_BUCKET.put(key, text, { httpMetadata: { contentType: "application/json" } })
-    return
-  }
-  throw new Error("No transcript object store configured")
+  throw new Error("GCS transcript storage is not configured")
 }
 
 async function getObjectJson<T>(env: Env, key: string): Promise<T | null> {
+  if (env.TEST_GCS_BUCKET) {
+    const object = await env.TEST_GCS_BUCKET.get(key)
+    if (!object) return null
+    return await object.json().catch(() => null) as T | null
+  }
   if (env.GCS_BUCKET) {
     const token = await gcsAccessToken(env)
     const res = await fetch(`https://storage.googleapis.com/storage/v1/b/${encodeURIComponent(env.GCS_BUCKET)}/o/${encodeURIComponent(key)}?alt=media`, {
@@ -671,12 +704,11 @@ async function getObjectJson<T>(env: Env, key: string): Promise<T | null> {
     if (!res.ok) throw new Error(`GCS get failed: ${res.status} ${await res.text()}`)
     return await res.json() as T
   }
-  if (env.SESSION_BUCKET) {
-    const object = await env.SESSION_BUCKET.get(key)
-    if (!object) return null
-    return await object.json().catch(() => null) as T | null
-  }
   return null
+}
+
+function transcriptStoreConfigured(env: Env): boolean {
+  return !!(env.GCS_BUCKET || env.TEST_GCS_BUCKET)
 }
 
 async function machineFromToken(request: Request, env: Env): Promise<{ userId: string; machineId: string } | Response> {
@@ -783,26 +815,57 @@ async function machineStatus(request: Request, env: Env): Promise<Response> {
   return json({ ok: true, machine: publicMachine(row as Machine), serverTime: new Date().toISOString() })
 }
 
-async function loadProjects(user: User, env: Env): Promise<unknown[]> {
-  const machines = await listMachines(user, env)
-  const byPath = new Map<string, any>()
-  for (const machine of machines) {
-    const manifest = await getObjectJson<{ projects?: any[] }>(env, manifestKey(user.sub, machine.id)).catch(() => null)
-    for (const project of manifest?.projects ?? []) {
-      const existing = byPath.get(project.path)
-      byPath.set(project.path, existing
-        ? { ...existing, sessions: [...(existing.sessions ?? []), ...(project.sessions ?? [])] }
-        : project)
-    }
-  }
-  return [...byPath.values()]
+function trimProjects(projects: any[], maxSessions?: number): any[] {
+  if (!maxSessions || maxSessions <= 0) return projects
+  const flat = projects.flatMap(project => (project.sessions ?? []).map((session: any) => ({
+    project,
+    session,
+    lastActivity: String(session.lastActivity ?? session.lastActivityAt ?? ""),
+  })))
+  if (flat.length <= maxSessions) return projects
+  const keep = new Set(flat.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity)).slice(0, maxSessions)
+    .map(item => sessionIndexKey(item.project.path, String(item.session.id ?? ""))))
+  return projects.flatMap(project => {
+    const sessions = (project.sessions ?? []).filter((session: any) => keep.has(sessionIndexKey(project.path, String(session.id ?? ""))))
+    return sessions.length ? [{ ...project, sessions }] : []
+  })
 }
 
-async function streamProjects(user: User, env: Env): Promise<Response> {
-  const projects = await loadProjects(user, env)
+async function loadProjectListing(user: User, env: Env, maxSessions?: number): Promise<{ projects: any[]; total: number; uploaded: number; hasMore: boolean }> {
+  const machines = await listMachines(user, env)
+  const byPath = new Map<string, any>()
+  let sourceTotal = 0
+  let manifestHasMore = false
+  for (const machine of machines) {
+    const manifest = await getObjectJson<CloudManifest>(env, manifestKey(user.sub, machine.id)).catch(() => null)
+    const machineUploaded = (manifest?.projects ?? []).reduce((sum, project) => sum + (project.sessions?.length ?? 0), 0)
+    sourceTotal += Math.max(machineUploaded, manifest?.sourceTotal ?? 0)
+    manifestHasMore ||= !!manifest?.hasMore
+    for (const project of manifest?.projects ?? []) {
+      const existing = byPath.get(project.path)
+      if (!existing) {
+        byPath.set(project.path, { ...project, sessions: [...(project.sessions ?? [])] })
+        continue
+      }
+      const ids = new Set((existing.sessions ?? []).map((session: any) => String(session.id ?? "")))
+      existing.sessions.push(...(project.sessions ?? []).filter((session: any) => !ids.has(String(session.id ?? ""))))
+    }
+  }
+  const allProjects = [...byPath.values()]
+  const uploaded = allProjects.reduce((sum, project) => sum + (project.sessions?.length ?? 0), 0)
+  return { projects: trimProjects(allProjects, maxSessions), total: Math.max(sourceTotal, uploaded), uploaded, hasMore: manifestHasMore || sourceTotal > uploaded }
+}
+
+async function loadProjects(user: User, env: Env, maxSessions?: number): Promise<unknown[]> {
+  return (await loadProjectListing(user, env, maxSessions)).projects
+}
+
+async function streamProjects(user: User, env: Env, maxSessions?: number): Promise<Response> {
+  const listing = await loadProjectListing(user, env, maxSessions)
+  const returned = listing.projects.reduce((sum, p: any) => sum + (p.sessions?.length ?? 0), 0)
   const body = [
-    `event: projects_meta\ndata: ${JSON.stringify({ total: projects.reduce((sum, p: any) => sum + (p.sessions?.length ?? 0), 0) })}\n`,
-    `event: projects\ndata: ${JSON.stringify(projects)}\n`,
+    `event: projects_meta\ndata: ${JSON.stringify({ total: listing.total, uploaded: listing.uploaded, returned, hasMore: listing.hasMore })}\n`,
+    `event: projects\ndata: ${JSON.stringify(listing.projects)}\n`,
     "event: done\ndata: {}\n",
     "",
   ].join("\n")
@@ -845,10 +908,11 @@ async function registerMachine(request: Request, env: Env, user: User): Promise<
 
 async function ingest(request: Request, env: Env): Promise<Response> {
   if (!env.AUTH_DB) return json({ error: "AUTH_DB is required" }, 503)
+  if (!transcriptStoreConfigured(env)) return json({ error: "GCS transcript storage is not configured" }, 503)
   const machine = await machineFromToken(request, env)
   if (machine instanceof Response) return machine
-  const body = await request.json().catch(() => ({})) as { projects?: unknown[]; sessions?: CloudSession[]; page?: unknown }
-  const requestedPage = normalizedPage(body.page)
+  const body = await request.json().catch(() => ({})) as { projects?: unknown[]; sessions?: CloudSession[]; page?: unknown; sourceTotal?: unknown; hasMore?: unknown }
+  const requestedPage = normalizedPage({ ...(body.page && typeof body.page === "object" ? body.page : {}), sourceTotal: (body.page as any)?.sourceTotal ?? body.sourceTotal, hasMore: (body.page as any)?.hasMore ?? body.hasMore })
   const projects = Array.isArray(body.projects) ? body.projects : []
   const sessions = (Array.isArray(body.sessions) ? body.sessions : []).filter(session =>
     !!session.projectPath && !!session.sessionId && Array.isArray(session.messages) && session.messages.length > 0,
@@ -881,16 +945,24 @@ async function ingest(request: Request, env: Env): Promise<Response> {
   const changed = previousPage?.hash !== hash
   if (changed) {
     await putObjectJson(env, key, { ...packedPage, updatedAt })
-    const pages = [
+    const pages: CloudPage[] = [
       ...(previous?.pages ?? []).filter(page => page.offset !== requestedPage.offset),
       { ...requestedPage, key, hash, updatedAt, projects: visibleProjects },
     ]
     const merged = mergePageProjects(pages)
+    const legacyProjects = previous?.version === 2 ? previous.legacyProjects ?? [] : previous?.projects ?? []
+    const projects = mergeProjects(merged.projects, legacyProjects)
+    const uploaded = projects.reduce((sum, project) => sum + (project.sessions?.length ?? 0), 0)
+    const sourceTotal = Math.max(uploaded, ...pages.map(page => page.sourceTotal ?? 0))
+    const hasMore = pages.some(page => page.hasMore === true) || sourceTotal > uploaded
     await putObjectJson(env, manifestKey(machine.userId, machine.machineId), {
       version: 2,
       pages: pages.sort((a, b) => a.offset - b.offset),
-      projects: merged.projects,
+      projects,
       sessionIndex: merged.sessionIndex,
+      legacyProjects,
+      sourceTotal,
+      hasMore,
       updatedAt,
     } satisfies CloudManifest)
   }
@@ -1042,8 +1114,13 @@ export default {
     if (userOrResponse instanceof Response) return userOrResponse
     const user = userOrResponse as User | null
 
-    if (url.pathname === "/api/projects" && request.method === "GET") return json(await loadProjects(user!, env))
-    if (url.pathname === "/api/stream" && request.method === "GET") return streamProjects(user!, env)
+    const requestedMaxSessions = Number(url.searchParams.get("maxSessions"))
+    const maxSessions = Number.isSafeInteger(requestedMaxSessions) && requestedMaxSessions > 0 ? requestedMaxSessions : undefined
+    if ((url.pathname === "/api/projects" || url.pathname === "/api/stream" || url.pathname.startsWith("/api/session/")) && !transcriptStoreConfigured(env)) {
+      return json({ error: "GCS transcript storage is not configured" }, 503)
+    }
+    if (url.pathname === "/api/projects" && request.method === "GET") return json(await loadProjects(user!, env, maxSessions))
+    if (url.pathname === "/api/stream" && request.method === "GET") return streamProjects(user!, env, maxSessions)
     if (url.pathname === "/api/machines" && request.method === "GET") return json({ machines: await listMachines(user!, env) })
     if (url.pathname === "/api/machines" && request.method === "POST") return registerMachine(request, env, user!)
     if (url.pathname === "/api/onboarding/status" && request.method === "GET") return onboardingStatus(user!, env)

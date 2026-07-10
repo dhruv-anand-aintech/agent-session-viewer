@@ -9,6 +9,7 @@ import {
 } from "./projects-merge"
 import { trackedEventSource } from "./sse-lifecycle"
 import { parseUrlSession } from "./urlSession"
+import { CLOUD_SESSION_PAGE_SIZE, requestMoreCloudSessions } from "./cloudSessionPaging"
 
 export { RECENT_SIDEBAR_SESSIONS, mergeProjectData, mergeSessionUpsert } from "./projects-merge"
 
@@ -61,8 +62,12 @@ export function useProjects() {
   const [projectsLoading, setProjectsLoading] = useState(true)
   const [projectsUpdating, setProjectsUpdating] = useState(true)
   const [totalSessions, setTotalSessions] = useState<number | null>(null)
-  const [listMode, setListMode] = useState<"recent" | "full">("recent")
+  const [sessionLimit, setSessionLimit] = useState(RECENT_SIDEBAR_SESSIONS)
+  const [loadMoreOffset, setLoadMoreOffset] = useState<number | null>(null)
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null)
   const projectsRef = useRef<ProjectData[]>([])
+  const loadMoreTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const listMode: "recent" | "full" = sessionLimit === RECENT_SIDEBAR_SESSIONS ? "recent" : "full"
 
   useEffect(() => {
     projectsRef.current = projects
@@ -73,7 +78,7 @@ export function useProjects() {
     const pinQs = deepLink?.session
       ? `&pinSession=${encodeURIComponent(deepLink.session)}&pinProject=${encodeURIComponent(deepLink.project)}`
       : ""
-    const qs = listMode === "recent" ? `?maxSessions=${RECENT_SIDEBAR_SESSIONS}${pinQs}` : ""
+    const qs = `?maxSessions=${sessionLimit}${pinQs}`
     const pinSessionIds = deepLink?.session ? new Set([deepLink.session]) : undefined
     queueMicrotask(() => {
       setProjectsLoading(true)
@@ -161,13 +166,42 @@ export function useProjects() {
       setProjectsLoading(false)
       setProjectsUpdating(false)
     }
-  }, [listMode])
+  }, [listMode, sessionLimit])
 
   const visibleCount = projects.reduce((n, p) => n + p.sessions.length, 0)
   const sessionsTruncated =
-    listMode === "recent" && totalSessions != null && totalSessions > visibleCount
+    totalSessions != null && totalSessions > visibleCount
 
-  const loadAllSessions = useCallback(() => setListMode("full"), [])
+  useEffect(() => {
+    if (loadMoreOffset == null || visibleCount <= loadMoreOffset) return
+    setLoadMoreOffset(null)
+    setLoadMoreError(null)
+    if (loadMoreTimeoutRef.current) clearTimeout(loadMoreTimeoutRef.current)
+    loadMoreTimeoutRef.current = null
+  }, [loadMoreOffset, visibleCount])
+
+  useEffect(() => () => {
+    if (loadMoreTimeoutRef.current) clearTimeout(loadMoreTimeoutRef.current)
+  }, [])
+
+  const loadAllSessions = useCallback(async () => {
+    if (loadMoreOffset != null) return
+    const offset = sessionLimit
+    setLoadMoreOffset(offset)
+    setLoadMoreError(null)
+    try {
+      await requestMoreCloudSessions({ offset, limit: CLOUD_SESSION_PAGE_SIZE })
+      setSessionLimit(offset + CLOUD_SESSION_PAGE_SIZE)
+      loadMoreTimeoutRef.current = setTimeout(() => {
+        setLoadMoreOffset(null)
+        setLoadMoreError("Older sessions have not arrived yet. Check that the sync app is running, then retry.")
+        loadMoreTimeoutRef.current = null
+      }, 45_000)
+    } catch (error) {
+      setLoadMoreOffset(null)
+      setLoadMoreError(error instanceof Error ? error.message : "Could not request older sessions")
+    }
+  }, [loadMoreOffset, sessionLimit])
 
   return {
     projects,
@@ -178,6 +212,8 @@ export function useProjects() {
     listMode,
     sessionsTruncated,
     loadAllSessions,
+    loadingMoreSessions: loadMoreOffset != null,
+    loadMoreError,
   }
 }
 

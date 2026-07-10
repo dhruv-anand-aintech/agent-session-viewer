@@ -35,7 +35,3 @@ database_id = "4a11792f-beb5-4573-ac08-5b0f0a5f0dd9"
 #   GCP_SERVICE_ACCOUNT_EMAIL
 #   GCP_PRIVATE_KEY
 #
-# Optional R2 fallback instead of GCS:
-# [[r2_buckets]]
-# binding = "SESSION_BUCKET"
-# bucket_name = "agent-session-viewer-sessions"

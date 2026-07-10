@@ -9,17 +9,28 @@ public struct TranscriptFallbackScanner: @unchecked Sendable {
         self.fileManager = fileManager
     }
 
-    public func snapshot(maxSessions: Int = 80, tail: Int = 200) throws -> SnapshotPayload {
+    public func snapshot(offset: Int = 0, limit: Int = 80, tail: Int = 200) throws -> SnapshotPayload {
+        let page = SnapshotPage(offset: offset, limit: limit)
         let claudeRoot = homeDirectory.appendingPathComponent(".claude/projects", isDirectory: true)
         let codexRoot = homeDirectory.appendingPathComponent(".codex/sessions", isDirectory: true)
         let files = (jsonlFiles(under: claudeRoot, source: "claude") + jsonlFiles(under: codexRoot, source: "codex"))
             .sorted { $0.modified > $1.modified }
-            .prefix(maxSessions)
 
         var projectsByPath: [String: [[String: Any]]] = [:]
         var payloadSessions: [[String: Any]] = []
+        var validSessionIndex = 0
+        var hasMore = false
         for file in files {
             guard let parsed = parse(file: file, tail: tail), !parsed.messages.isEmpty else { continue }
+            if validSessionIndex < page.offset {
+                validSessionIndex += 1
+                continue
+            }
+            if payloadSessions.count >= page.limit {
+                hasMore = true
+                break
+            }
+            validSessionIndex += 1
             projectsByPath[parsed.projectPath, default: []].append(parsed.metadata)
             payloadSessions.append([
                 "projectPath": parsed.projectPath,
@@ -31,8 +42,9 @@ public struct TranscriptFallbackScanner: @unchecked Sendable {
         let projects = projectsByPath.map { path, sessions in
             ["path": path, "name": URL(fileURLWithPath: path).lastPathComponent, "sessions": sessions] as [String: Any]
         }.sorted { ($0["path"] as? String ?? "") < ($1["path"] as? String ?? "") }
+        let responsePage = SnapshotPage(offset: page.offset, limit: page.limit, hasMore: hasMore)
         return SnapshotPayload(
-            json: ["projects": projects, "sessions": payloadSessions],
+            json: ["projects": projects, "sessions": payloadSessions, "page": responsePage.json],
             counts: SnapshotCounts(projects: projects.count, sessions: payloadSessions.count),
             source: "transcript fallback"
         )
