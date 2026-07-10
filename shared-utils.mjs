@@ -40,6 +40,40 @@ export function parseJsonlStream(fp) {
   }
 }
 
+/** True when a Claude JSONL contains at least one viewable transcript record. */
+export function hasClaudeTranscriptMessage(fp) {
+  let fd = null
+  try {
+    fd = openSync(fp, "r")
+    const CHUNK = 1 << 16
+    const buf = Buffer.alloc(CHUNK)
+    let carry = Buffer.alloc(0)
+    let bytes
+    while ((bytes = readSync(fd, buf, 0, CHUNK, null)) > 0) {
+      const chunk = carry.length ? Buffer.concat([carry, buf.subarray(0, bytes)]) : buf.subarray(0, bytes)
+      let start = 0
+      let nl
+      while ((nl = chunk.indexOf(10, start)) !== -1) {
+        if (nl > start) {
+          try {
+            if (JSON.parse(chunk.toString("utf8", start, nl))?.type !== "file-history-snapshot") return true
+          } catch { /* skip bad line */ }
+        }
+        start = nl + 1
+      }
+      carry = Buffer.from(chunk.subarray(start))
+    }
+    if (carry.length) {
+      try { return JSON.parse(carry.toString("utf8"))?.type !== "file-history-snapshot" } catch { /* skip bad line */ }
+    }
+    return false
+  } catch {
+    return false
+  } finally {
+    if (fd != null) { try { closeSync(fd) } catch { /* ignore */ } }
+  }
+}
+
 export function stripXml(text) {
   return text
     .replace(/<[^>]+>[^<]*<\/[^>]+>/g, " ")  // paired tags with content

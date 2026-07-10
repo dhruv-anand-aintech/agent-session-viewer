@@ -14,7 +14,7 @@ import https from "https"
 import { fileURLToPath } from "url"
 import { Worker } from "worker_threads"
 import { exec, execFile, execFileSync, execSync, spawnSync } from "child_process"
-import { stripXml, trimProjectsByRecentSessionCount, countSessionsInProjects, parseJsonlStream } from "./shared-utils.mjs"
+import { stripXml, trimProjectsByRecentSessionCount, countSessionsInProjects, parseJsonlStream, hasClaudeTranscriptMessage } from "./shared-utils.mjs"
 import { isLegacyCodexProjectPath, loadSessionMessages } from "./lib/session-message-loader.mjs"
 import { isOnDemandSessionPlatform } from "./lib/session-platform-routing.mjs"
 import { normalizeCodexRateLimit, normalizeResetTime, resetDescription } from "./lib/usage-window-normalizer.mjs"
@@ -288,7 +288,7 @@ function initSidebarCache() {
   for (const entry of getAllSidebarEntries()) {
     if (entry.source !== "claude") continue
     const fp = join(entry.projectPath, `${entry.id}.jsonl`)
-    if (existsSync(fp)) continue
+    if (hasClaudeTranscriptMessage(fp)) continue
     if (deleteSidebarEntry(entry.id)) pruned++
   }
   const count = getSidebarSessionCount()
@@ -2128,7 +2128,7 @@ function handleClaudeFileChange(filename) {
       cachedEntry?.firstName ??
       pickClaudeSubagentFirstName(fp, meta)
     const messageCount = countJsonlLines(fp)
-    if (messageCount === 0) {
+    if (!hasClaudeTranscriptMessage(fp)) {
       removeSession(projectPath, sessionId)
       const deleted = deleteSidebarEntry(sessionId)
       if (deleted) sseBroadcastSessionRemove(deleted)
