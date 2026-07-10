@@ -133,6 +133,20 @@ export function useProjects() {
         })
       } catch { /* ignore */ }
     })
+    es.addEventListener("session_remove", e => {
+      try {
+        const o = JSON.parse((e as MessageEvent).data) as {
+          sessionId?: string
+          projectPath?: string
+        }
+        if (!o.sessionId) return
+        setProjects(prev => prev.flatMap(project => {
+          if (o.projectPath && project.path !== o.projectPath) return [project]
+          const sessions = project.sessions.filter(session => session.id !== o.sessionId)
+          return sessions.length ? [{ ...project, sessions }] : []
+        }))
+      } catch { /* ignore */ }
+    })
     es.addEventListener("bootstrap_done", () => {
       setProjectsLoading(false)
       if (listMode === "full") setProjectsUpdating(false)

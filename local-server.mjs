@@ -66,6 +66,7 @@ import {
   getTopSidebarEntries,
   getAllSidebarEntries,
   getSidebarEntry,
+  deleteSidebarEntry,
   upsertSidebarEntry,
   expandSidebarLinkageEntries,
 } from "./lib/sidebar-cache-db.mjs"
@@ -283,6 +284,13 @@ function initSidebarCache() {
   if (_sidebarCacheReady) return
   const _t0 = performance.now()
   const { migrated } = openSidebarCacheDb(APP_CONFIG_DIR)
+  let pruned = 0
+  for (const entry of getAllSidebarEntries()) {
+    if (entry.source !== "claude") continue
+    const fp = join(entry.projectPath, `${entry.id}.jsonl`)
+    if (existsSync(fp)) continue
+    if (deleteSidebarEntry(entry.id)) pruned++
+  }
   const count = getSidebarSessionCount()
   for (const entry of getAllSidebarEntries()) {
     indexSession(entry.projectPath, entry.id, [], {
@@ -297,7 +305,7 @@ function initSidebarCache() {
   if (migrated) {
     debugLog(`${ts()} [sidebar-cache] migrated ${migrated} sessions JSON→SQLite (${ms}ms)`)
   } else {
-    debugLog(`${ts()} [sidebar-cache] opened ${count} sessions from ${SIDEBAR_CACHE_DB} (${ms}ms)`)
+    debugLog(`${ts()} [sidebar-cache] opened ${count} sessions from ${SIDEBAR_CACHE_DB}; pruned ${pruned} missing Claude transcripts (${ms}ms)`)
   }
 }
 
@@ -1235,6 +1243,26 @@ function sseBroadcastSessionUpserts(entries) {
   }
 }
 
+function sseWriteSessionRemove(res, entry) {
+  sseWrite(res, "session_remove", {
+    sessionId: entry.id,
+    projectPath: entry.projectPath,
+  })
+}
+
+function sseBroadcastSessionRemove(entry) {
+  if (!entry || sseClients.size === 0) return
+  const total = getSidebarSessionCount()
+  for (const c of sseClients) {
+    try {
+      sseWriteSessionRemove(c.res, entry)
+      c.res.write(`event: projects_meta\ndata: ${JSON.stringify({ total })}\n\n`)
+    } catch {
+      sseClients.delete(c)
+    }
+  }
+}
+
 function yieldEventLoopTick() {
   return new Promise(r => setTimeout(r, 0))
 }
@@ -1344,6 +1372,9 @@ async function streamRecentSidebarInitial(res, maxSessions, pinSessionId = null,
   if (projects.length) {
     sseWrite(res, "projects", projects)
     sseWrite(res, "projects_meta", { total })
+  }
+  if (pinSessionId && !projects.some(project => project.sessions.some(session => session.id === pinSessionId))) {
+    sseWriteSessionRemove(res, { id: pinSessionId, projectPath: pinProjectPath })
   }
   sseWrite(res, "bootstrap_done", {})
   debugLog(`[perf ${wallClock()}] streamRecent burst: ${projects.length} projects, total=${total}, ${(performance.now() - _tBurst0).toFixed(1)}ms`)
@@ -2083,8 +2114,8 @@ function handleClaudeFileChange(filename) {
   const fp = join(projectPath, `${sessionId}.jsonl`)
   if (!existsSync(fp)) {
     removeSession(projectPath, sessionId)
-    // lancedb removed
-    broadcastProjectsFromCache()
+    const deleted = deleteSidebarEntry(sessionId)
+    if (deleted) sseBroadcastSessionRemove(deleted)
     return
   }
   try {
@@ -2097,6 +2128,12 @@ function handleClaudeFileChange(filename) {
       cachedEntry?.firstName ??
       pickClaudeSubagentFirstName(fp, meta)
     const messageCount = countJsonlLines(fp)
+    if (messageCount === 0) {
+      removeSession(projectPath, sessionId)
+      const deleted = deleteSidebarEntry(sessionId)
+      if (deleted) sseBroadcastSessionRemove(deleted)
+      return
+    }
     const _tRead = performance.now()
     msgCacheDelete(`${projectPath}/${sessionId}`)
     const sessionMeta = {

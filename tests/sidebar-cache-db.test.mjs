@@ -10,6 +10,7 @@ import {
   getTopSidebarEntries,
   getAllSidebarEntries,
   getSidebarEntry,
+  deleteSidebarEntry,
   upsertSidebarEntry,
   upsertSidebarEntries,
   replaceAllSidebarEntries,
@@ -104,6 +105,24 @@ describe("sidebar-cache-db", () => {
     assert.equal(changed, true)
     assert.equal(entry.messageCount, 42)
     assert.equal(getSidebarEntry("sess-0002").messageCount, 42)
+  })
+
+  it("removes an existing Claude row when its transcript becomes empty", () => {
+    openSidebarCacheDb(configDir)
+    const existing = sampleEntry("empty-0001", "2026-06-06T10:00:00.000Z")
+    upsertSidebarEntry(existing)
+    upsertSidebarEntry({ ...existing, messageCount: 0 })
+    assert.equal(getSidebarEntry(existing.id), null)
+    assert.equal(getSidebarSessionCount(), 0)
+  })
+
+  it("deleteSidebarEntry removes a stale row", () => {
+    openSidebarCacheDb(configDir)
+    const existing = sampleEntry("stale-0001", "2026-06-06T10:00:00.000Z")
+    upsertSidebarEntry(existing)
+    assert.equal(deleteSidebarEntry(existing.id)?.id, existing.id)
+    assert.equal(deleteSidebarEntry(existing.id), null)
+    assert.equal(getSidebarSessionCount(), 0)
   })
 
   it("upsertSidebarEntries batches in a transaction", () => {
