@@ -88,6 +88,14 @@ interface SessionSearchMatch {
   highlightQuery: string
 }
 
+type SidebarViewMode = "flat" | "folders" | "agents"
+
+function initialSidebarViewMode(): SidebarViewMode {
+  const saved = localStorage.getItem("sidebarViewMode")
+  if (saved === "flat" || saved === "folders" || saved === "agents") return saved
+  return localStorage.getItem("sidebarGrouped") === "true" ? "folders" : "flat"
+}
+
 function useIsMobile() {
   const [mobile, setMobile] = useState(() => window.matchMedia("(max-width: 640px)").matches)
   useEffect(() => {
@@ -253,7 +261,7 @@ export function Sidebar({ projects: projectsProp, projectsLoading, projectsUpdat
   onMobileClose: () => void
 }) {
   const isMobile = useIsMobile()
-  const [grouped, setGrouped] = useState(() => localStorage.getItem("sidebarGrouped") === "true")
+  const [viewMode, setViewMode] = useState<SidebarViewMode>(initialSidebarViewMode)
   const [expandedParents, setExpandedParents] = useState<Set<string>>(new Set())
   const [platformFilter, setPlatformFilter] = useState<string>("all")
   const [sidebarBottomInView, setSidebarBottomInView] = useState(false)
@@ -382,7 +390,7 @@ export function Sidebar({ projects: projectsProp, projectsLoading, projectsUpdat
     )
     observer.observe(target)
     return () => observer.disconnect()
-  }, [searchBrowseActive, grouped, platformFilter, loadedSessionCount])
+  }, [searchBrowseActive, viewMode, platformFilter, loadedSessionCount])
 
   const filteredSearchHits = (sidebarSearchHits ?? []).filter(h => {
     if (platformFilter !== "all" && (h.meta.source ?? "claude") !== platformFilter) return false
@@ -453,9 +461,10 @@ export function Sidebar({ projects: projectsProp, projectsLoading, projectsUpdat
     return mergeSidebarSearchResultItems(apiRows, titleRows)
   }, [filteredSearchHits, sidebarSearchQuery, titleMatchSessions])
 
-  function toggleGrouped(val: boolean) {
-    setGrouped(val)
-    localStorage.setItem("sidebarGrouped", String(val))
+  function setSidebarViewMode(mode: SidebarViewMode) {
+    setViewMode(mode)
+    localStorage.setItem("sidebarViewMode", mode)
+    localStorage.setItem("sidebarGrouped", String(mode === "folders"))
   }
 
   function toggleParent(id: string) {
@@ -561,6 +570,15 @@ export function Sidebar({ projects: projectsProp, projectsLoading, projectsUpdat
     }
   }
   const orphans = allFlat.filter(({ s }) => s.isSidechain && (!s.parentSessionId || !allIds.has(s.parentSessionId)))
+  const sessionsByAgent = Array.from(
+    allFlat.reduce((groups, item) => {
+      const source = item.s.source ?? "claude"
+      const items = groups.get(source) ?? []
+      items.push(item)
+      groups.set(source, items)
+      return groups
+    }, new Map<string, { s: SessionMeta; projectPath: string }[]>()),
+  )
 
   function handleSelect(p: string, s: string) {
     markSessionClick(s)
@@ -614,8 +632,17 @@ export function Sidebar({ projects: projectsProp, projectsLoading, projectsUpdat
           <div className="sidebar-title">
             Sessions
             <div className="sidebar-view-toggle">
-              <button className={`sidebar-view-btn ${!grouped ? "active" : ""}`} onClick={() => toggleGrouped(false)}>Flat</button>
-              <button className={`sidebar-view-btn ${grouped ? "active" : ""}`} onClick={() => toggleGrouped(true)}>Groups</button>
+              {(["flat", "folders", "agents"] as const).map(mode => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={`sidebar-view-btn ${viewMode === mode ? "active" : ""}`}
+                  onClick={() => setSidebarViewMode(mode)}
+                  aria-pressed={viewMode === mode}
+                >
+                  {mode === "flat" ? "Flat" : mode === "folders" ? "Folders" : "Agents"}
+                </button>
+              ))}
             </div>
           </div>
           {showPlatformFilter && (
@@ -711,7 +738,7 @@ export function Sidebar({ projects: projectsProp, projectsLoading, projectsUpdat
                   />
                 ))}
               </>
-            ) : grouped ? (
+            ) : viewMode === "folders" ? (
               projects
                 .map(project => ({
                   ...project,
@@ -743,6 +770,33 @@ export function Sidebar({ projects: projectsProp, projectsLoading, projectsUpdat
                     </div>
                   )
                 })
+            ) : viewMode === "agents" ? (
+              sessionsByAgent.map(([source, sessions]) => {
+                const agentSubagents = new Map<string, { s: SessionMeta; projectPath: string }[]>()
+                const agentTopLevel: { s: SessionMeta; projectPath: string }[] = []
+                const agentIds = new Set(sessions.map(({ s }) => s.id))
+                for (const item of sessions) {
+                  if (item.s.isSidechain && item.s.parentSessionId) {
+                    const children = agentSubagents.get(item.s.parentSessionId) ?? []
+                    children.push(item)
+                    agentSubagents.set(item.s.parentSessionId, children)
+                  } else {
+                    agentTopLevel.push(item)
+                  }
+                }
+                const agentOrphans = sessions.filter(({ s }) => s.isSidechain && (!s.parentSessionId || !agentIds.has(s.parentSessionId)))
+                return (
+                  <div key={source} className="sidebar-project sidebar-agent-group">
+                    <div className="sidebar-project-name sidebar-agent-name">
+                      <span className="platform-icon-wrap" aria-hidden="true"><AgentIcon source={source} /></span>
+                      <span>{formatPlatformLabel(source)}</span>
+                      <span className="sidebar-agent-count">{sessions.length}</span>
+                    </div>
+                    {agentTopLevel.map(item => renderSessionTree(item, agentSubagents, 0, item.projectPath))}
+                    {agentOrphans.map(item => renderSessionTree(item, agentSubagents, 1, item.projectPath))}
+                  </div>
+                )
+              })
             ) : (
               <>
                 {topLevel.map(({ s, projectPath }) => {

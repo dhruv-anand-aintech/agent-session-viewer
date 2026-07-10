@@ -406,6 +406,22 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   box-shadow: 0 4px 12px rgba(0,0,0,0.45);
   pointer-events: none;
 }
+.sidebar-agent-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-top: 10px;
+  color: var(--text-300);
+  font-weight: 600;
+}
+.sidebar-agent-name .platform-icon-wrap { justify-self: auto; }
+.sidebar-agent-count {
+  margin-left: auto;
+  color: var(--text-500);
+  font-size: 9.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
 
 /* Session items: plain rows like Claude sidebar */
 .sidebar {
