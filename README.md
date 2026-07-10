@@ -4,6 +4,8 @@
 
 A live multi-platform session viewer — browse AI coding assistant conversations across Claude Code, Codex, Cursor, OpenCode, Hermes, Antigravity, and messaging bots (nanoclaw, openclaw, picoclaw, and friends) in a unified dark-mode UI with markdown rendering, tool call cards, fuzzy thread search, and thinking blocks.
 
+The hosted viewer at `agent-session-viewer.ainorthstar.tech` includes a public landing page, Google sign-in, and guided macOS setup. The native companion installs a per-user LaunchAgent that syncs in the background; it uses the local ASV API when available and reads recent Claude Code and Codex transcripts directly when the local viewer is closed.
+
 ## Install
 
 ### npx (no install required)

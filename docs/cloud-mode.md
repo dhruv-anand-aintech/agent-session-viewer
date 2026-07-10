@@ -44,7 +44,27 @@ Create a Google OAuth web client with redirect URI:
 https://agent-session-viewer.ainorthstar.tech/api/auth/google/callback
 ```
 
-## Register a machine
+## Connect the macOS app
+
+The normal setup path is:
+
+1. Open `https://agent-session-viewer.ainorthstar.tech/setup/mac` and sign in with Google.
+2. Download and open the macOS companion.
+3. Create a ten-minute pairing code on the website.
+4. Open the `asv://connect#...` link. The app claims the code once, stores the returned machine credential in an owner-only config file, and installs its per-user LaunchAgent.
+5. The website waits for that specific new Mac to complete its first ingest, then opens `/sessions`.
+
+The long-lived machine token never appears in the browser URL, local LaunchAgent plist, or daemon process arguments. Pairing codes are stored only as SHA-256 hashes in D1 and cannot be replayed.
+
+The beta release ZIP is served at:
+
+```text
+https://agent-session-viewer.ainorthstar.tech/downloads/AgentSessionViewer-macOS.zip
+```
+
+The current beta is ad-hoc signed and locally verified. Public Apple notarization still requires a Developer ID Application identity and notarization credentials.
+
+## Register a machine manually
 
 After signing in, call:
 
