@@ -16,7 +16,7 @@ import { homedir } from "node:os"
 import { join, dirname } from "node:path"
 import { fileURLToPath } from "node:url"
 import { stripXml, trimProjectsByRecentSessionCount } from "./shared-utils.mjs"
-import { openSidebarCacheDb, replaceAllSidebarEntries } from "./lib/sidebar-cache-db.mjs"
+import { openSidebarCacheDb, replaceAllSidebarEntries, isVisibleSidebarEntry } from "./lib/sidebar-cache-db.mjs"
 import {
   normProjectDir,
   readCursorSessions,
@@ -103,7 +103,7 @@ function getClaudeScanRoots() {
 const byId = new Map()
 
 function upsert(entry) {
-  byId.set(entry.id, entry)
+  if (isVisibleSidebarEntry(entry)) byId.set(entry.id, entry)
 }
 
 // ── Claude JSONL sessions ──────────────────────────────────────────────────────
