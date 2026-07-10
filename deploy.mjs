@@ -18,6 +18,7 @@ import path from "node:path"
 
 const root = path.dirname(fileURLToPath(import.meta.url))
 const args = process.argv.slice(2)
+const skipChecks = args.includes("--skip-checks")
 
 function argValue(...names) {
   for (const name of names) {
@@ -100,9 +101,11 @@ const checks = [
   "npm run mobile:updates:stage",
 ]
 
-for (const cmd of checks) {
-  console.log(`\nRunning predeploy check: ${cmd}`)
-  execSync(cmd, { stdio: "inherit", cwd: root })
+if (!skipChecks) {
+  for (const cmd of checks) {
+    console.log(`\nRunning predeploy check: ${cmd}`)
+    execSync(cmd, { stdio: "inherit", cwd: root })
+  }
 }
 
 const tomlPath = new URL("wrangler.toml", import.meta.url).pathname
