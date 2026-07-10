@@ -145,6 +145,7 @@ export function useProjects() {
           const sessions = project.sessions.filter(session => session.id !== o.sessionId)
           return sessions.length ? [{ ...project, sessions }] : []
         }))
+        if (parseUrlSession()?.session === o.sessionId) window.location.replace("/sessions")
       } catch { /* ignore */ }
     })
     es.addEventListener("bootstrap_done", () => {
