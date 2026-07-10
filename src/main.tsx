@@ -1,8 +1,12 @@
+/* eslint-disable react-refresh/only-export-components */
 import { StrictMode, useState, useEffect } from "react"
 import { createRoot } from "react-dom/client"
 import { Router, Redirect } from "wouter"
+import { LoaderCircle } from "lucide-react"
 import PinGate from "./PinGate"
 import GoogleGate from "./GoogleGate"
+import CloudOnboarding from "./CloudOnboarding"
+import { isCloudMachineConnected } from "./cloudOnboardingState"
 import App from "./App"
 import { initDebugTrace } from "./debug-trace"
 import { installSsePagehideCleanup } from "./sse-lifecycle"
@@ -19,16 +23,20 @@ function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit & { timeo
 }
 
 function Root() {
+  const wantsMacSetup = window.location.pathname === "/setup/mac"
   const [authed, setAuthed] = useState<boolean | null>(null) // null = checking
   const [authProvider, setAuthProvider] = useState<"pin" | "google" | "none">("pin")
+  const [user, setUser] = useState<{ email?: string; name?: string; picture?: string } | null>(null)
+  const [cloudConnected, setCloudConnected] = useState<boolean | null>(null)
 
   useEffect(() => {
     fetchWithTimeout("/api/capabilities", { credentials: "include", timeout: 4000 })
       .then(async r => {
         if (!r.ok) { setAuthed(false); return }
         try {
-          const caps = (await r.json()) as { pinRequired?: boolean; authed?: boolean; authProvider?: "pin" | "google" | "none" }
+          const caps = (await r.json()) as { pinRequired?: boolean; authed?: boolean; authProvider?: "pin" | "google" | "none"; user?: { email?: string; name?: string; picture?: string } | null }
           setAuthProvider(caps.authProvider ?? "pin")
+          setUser(caps.user ?? null)
           if (caps.pinRequired === false) { setAuthed(true); return }
           if (typeof caps.authed === "boolean") { setAuthed(caps.authed); return }
           setAuthed(false)
@@ -38,6 +46,16 @@ function Root() {
       })
       .catch(() => setAuthed(false))
   }, [])
+
+  useEffect(() => {
+    if (!authed || authProvider !== "google") return
+    fetchWithTimeout("/api/onboarding/status", { credentials: "include", cache: "no-store", timeout: 4000 })
+      .then(async response => {
+        if (!response.ok) throw new Error("status unavailable")
+        setCloudConnected(isCloudMachineConnected(await response.json()))
+      })
+      .catch(() => setCloudConnected(false))
+  }, [authed, authProvider])
 
   if (authed === null) {
     return (
@@ -55,6 +73,18 @@ function Root() {
     )
   }
   if (!authed) return authProvider === "google" ? <GoogleGate /> : <PinGate onAuth={() => setAuthed(true)} />
+  if (authProvider === "google" && cloudConnected === null) {
+    return <div className="cloud-bootstrap"><LoaderCircle className="spin" size={18} /><span>Loading your workspace…</span></div>
+  }
+  if (authProvider === "google" && (cloudConnected === false || wantsMacSetup)) {
+    return <CloudOnboarding
+      user={user}
+      onConnected={() => {
+        setCloudConnected(true)
+        if (wantsMacSetup) window.location.assign("/sessions")
+      }}
+    />
+  }
   return (
     <Router>
       {/* Redirect bare / to /sessions */}
