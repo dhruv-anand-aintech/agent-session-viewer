@@ -149,6 +149,17 @@ type Env = {
   GOOGLE_CLIENT_SECRET?: string
   SESSION_SECRET?: string
   BUILD_COMMIT?: string
+  MACOS_APP_DOWNLOAD_URL?: string
+  MACOS_APP_VERSION?: string
+  MACOS_APP_SHA256?: string
+  MACOS_APP_MIN_VERSION?: string
+}
+
+type Machine = {
+  id: string
+  label: string
+  created_at?: string
+  last_seen_at?: string | null
 }
 
 const encoder = new TextEncoder()
@@ -323,6 +334,10 @@ async function authStart(request: Request, env: Env): Promise<Response> {
     prompt: "select_account",
   })
   const cookies = [cookie("asv_oauth_state", state, 600)]
+  const returnPath = url.searchParams.get("return")
+  if (returnPath?.startsWith("/") && !returnPath.startsWith("//")) {
+    cookies.push(cookie("asv_auth_return", encodeURIComponent(returnPath), 600))
+  }
   const mobileReturn = url.searchParams.get("mobile") === "1" ? url.searchParams.get("return") : null
   if (mobileReturn?.startsWith("asv://auth")) cookies.push(cookie("asv_mobile_return", encodeURIComponent(mobileReturn), 600))
   return redirectWithCookies(`https://accounts.google.com/o/oauth2/v2/auth?${params}`, cookies)
@@ -380,10 +395,13 @@ async function authCallback(request: Request, env: Env): Promise<Response> {
       ])
     }
   }
-  return redirectWithCookies("/sessions", [
+  const returnPath = decodeURIComponent(cookieValue(request, "asv_auth_return") ?? "")
+  const destination = returnPath.startsWith("/") && !returnPath.startsWith("//") ? returnPath : "/sessions"
+  return redirectWithCookies(destination, [
     cookie("asv_session", signedUser, 60 * 60 * 24 * 14),
     cookie("asv_oauth_state", "", 0),
     cookie("asv_mobile_return", "", 0),
+    cookie("asv_auth_return", "", 0),
   ])
 }
 
@@ -600,12 +618,97 @@ async function machineFromToken(request: Request, env: Env): Promise<{ userId: s
   return row ? { userId: String(row.userId), machineId: String(row.machineId) } : json({ error: "Invalid machine token" }, 401)
 }
 
-async function listMachines(user: User, env: Env): Promise<Array<{ id: string; label: string; created_at?: string; last_seen_at?: string }>> {
+async function listMachines(user: User, env: Env): Promise<Machine[]> {
   if (!env.AUTH_DB) return []
   const rows = await env.AUTH_DB.prepare(
     "select id, label, created_at, last_seen_at from machines where user_id = ? and revoked_at is null order by created_at desc",
   ).bind(user.sub).all()
   return rows.results ?? []
+}
+
+function publicMachine(machine: Machine): Machine & { connected: boolean } {
+  return { ...machine, connected: !!machine.last_seen_at }
+}
+
+function macosDownload(env: Env): {
+  available: boolean
+  platform: "macos"
+  version: string | null
+  url: string | null
+  sha256: string | null
+  minimumSystemVersion: string
+  bundleIdentifier: string
+} {
+  return {
+    available: !!env.MACOS_APP_DOWNLOAD_URL,
+    platform: "macos",
+    version: env.MACOS_APP_VERSION ?? null,
+    url: env.MACOS_APP_DOWNLOAD_URL ?? null,
+    sha256: env.MACOS_APP_SHA256 ?? null,
+    minimumSystemVersion: env.MACOS_APP_MIN_VERSION ?? "14.0",
+    bundleIdentifier: "tech.ainorthstar.AgentSessionViewer",
+  }
+}
+
+async function onboardingStatus(user: User, env: Env): Promise<Response> {
+  const machines = (await listMachines(user, env)).map(publicMachine)
+  return json({
+    user,
+    state: machines.some(machine => machine.connected) ? "connected" : machines.length ? "waiting-for-first-sync" : "needs-app",
+    machines,
+    download: macosDownload(env),
+    pairing: {
+      create: "/api/onboarding/pair",
+      expiresInSeconds: 600,
+    },
+  })
+}
+
+async function createMachinePairing(request: Request, env: Env, user: User): Promise<Response> {
+  if (!env.AUTH_DB) return json({ error: "AUTH_DB is not configured" }, 503)
+  const body = await request.json().catch(() => ({})) as { label?: string }
+  const label = String(body.label ?? "Mac").trim().slice(0, 80) || "Mac"
+  const pairingId = randomId("pair_")
+  const pairingCode = randomId("asv_pair_")
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString()
+  await env.AUTH_DB.prepare(
+    "insert into machine_pairings (id, user_id, label, code_hash, expires_at) values (?, ?, ?, ?, ?)",
+  ).bind(pairingId, user.sub, label, await sha256Hex(pairingCode), expiresAt).run()
+  return json({ pairingCode, expiresAt, claimEndpoint: "/api/cloud/claim" }, 201)
+}
+
+async function claimMachinePairing(request: Request, env: Env): Promise<Response> {
+  if (!env.AUTH_DB) return json({ error: "AUTH_DB is not configured" }, 503)
+  const body = await request.json().catch(() => ({})) as { pairingCode?: string; label?: string }
+  const pairingCode = String(body.pairingCode ?? "").trim()
+  if (!pairingCode.startsWith("asv_pair_") || pairingCode.length > 128) return json({ error: "Invalid pairing code" }, 400)
+  const hash = await sha256Hex(pairingCode)
+  const pairing = await env.AUTH_DB.prepare(
+    "select id, user_id as userId, label from machine_pairings where code_hash = ? and claimed_at is null and datetime(expires_at) > datetime('now')",
+  ).bind(hash).first()
+  if (!pairing) return json({ error: "Pairing code is invalid or expired" }, 404)
+  const claimed = await env.AUTH_DB.prepare(
+    "update machine_pairings set claimed_at = datetime('now') where id = ? and claimed_at is null and datetime(expires_at) > datetime('now')",
+  ).bind(pairing.id).run()
+  if ((claimed.meta?.changes ?? 0) !== 1) return json({ error: "Pairing code has already been claimed" }, 409)
+
+  const machineId = randomId("m_")
+  const token = randomId("asv_")
+  const label = String(body.label ?? pairing.label ?? "Mac").trim().slice(0, 80) || "Mac"
+  await env.AUTH_DB.prepare(
+    "insert into machines (id, user_id, label, token_hash, created_at) values (?, ?, ?, ?, datetime('now'))",
+  ).bind(machineId, pairing.userId, label, await sha256Hex(token)).run()
+  return json({ machineId, token, cloudUrl: originFrom(request) }, 201)
+}
+
+async function machineStatus(request: Request, env: Env): Promise<Response> {
+  const machine = await machineFromToken(request, env)
+  if (machine instanceof Response) return machine
+  const row = await env.AUTH_DB.prepare(
+    "select id, label, created_at, last_seen_at from machines where id = ? and user_id = ? and revoked_at is null",
+  ).bind(machine.machineId, machine.userId).first()
+  if (!row) return json({ error: "Machine not found" }, 404)
+  return json({ ok: true, machine: publicMachine(row as Machine), serverTime: new Date().toISOString() })
 }
 
 async function loadProjects(user: User, env: Env): Promise<unknown[]> {
@@ -662,10 +765,24 @@ async function ingest(request: Request, env: Env): Promise<Response> {
   if (machine instanceof Response) return machine
   const body = await request.json().catch(() => ({})) as { projects?: unknown[]; sessions?: Array<{ projectPath: string; sessionId: string; messages: unknown[]; total?: number }> }
   const projects = Array.isArray(body.projects) ? body.projects : []
-  const sessions = Array.isArray(body.sessions) ? body.sessions : []
-  await putObjectJson(env, manifestKey(machine.userId, machine.machineId), { projects, updatedAt: new Date().toISOString() })
+  const sessions = (Array.isArray(body.sessions) ? body.sessions : []).filter(session =>
+    !!session.projectPath && !!session.sessionId && Array.isArray(session.messages) && session.messages.length > 0,
+  )
+  const acceptedSessions = new Set(sessions.map(session => `${session.projectPath}\u0000${session.sessionId}`))
+  const visibleProjects = projects.flatMap(project => {
+    if (!project || typeof project !== "object") return []
+    const entry = project as { path?: unknown; sessions?: unknown }
+    const projectPath = typeof entry.path === "string" ? entry.path : ""
+    const projectSessions = Array.isArray(entry.sessions) ? entry.sessions.filter(session => {
+      if (!session || typeof session !== "object") return false
+      const id = String((session as { id?: unknown }).id ?? "")
+      const path = String((session as { projectPath?: unknown }).projectPath ?? projectPath)
+      return acceptedSessions.has(`${path}\u0000${id}`)
+    }) : []
+    return projectSessions.length ? [{ ...entry, sessions: projectSessions }] : []
+  })
+  await putObjectJson(env, manifestKey(machine.userId, machine.machineId), { projects: visibleProjects, updatedAt: new Date().toISOString() })
   for (const session of sessions) {
-    if (!session.projectPath || !session.sessionId || !Array.isArray(session.messages)) continue
     await putObjectJson(
       env,
       sessionKey(machine.userId, machine.machineId, session.projectPath, session.sessionId),
@@ -673,7 +790,7 @@ async function ingest(request: Request, env: Env): Promise<Response> {
     )
   }
   await env.AUTH_DB.prepare("update machines set last_seen_at = datetime('now') where id = ?").bind(machine.machineId).run()
-  return json({ ok: true, projects: projects.length, sessions: sessions.length })
+  return json({ ok: true, projects: visibleProjects.length, sessions: sessions.length })
 }
 
 async function pollCommands(request: Request, env: Env): Promise<Response> {
@@ -788,11 +905,14 @@ export default {
     if (url.pathname === "/mobile-auth") return mobileAuthHandoff()
     if (url.pathname === "/api/auth/logout") return redirect("/", { "Set-Cookie": cookie("asv_session", "", 0) })
     if (url.pathname === "/api/auth/me") return json({ user: await readUser(request, env) })
+    if (url.pathname === "/api/downloads/macos/latest" && request.method === "GET") return json(macosDownload(env))
     if (url.pathname === "/mobile-updates/manifest" && request.method === "GET") return serveMobileUpdateManifest(request, env)
+    if (url.pathname === "/api/cloud/claim" && request.method === "POST") return claimMachinePairing(request, env)
+    if (url.pathname === "/api/cloud/status" && request.method === "GET") return machineStatus(request, env)
     if (url.pathname === "/api/cloud/ingest" && request.method === "POST") return ingest(request, env)
     if (url.pathname === "/api/cloud/poll" && request.method === "GET") return pollCommands(request, env)
 
-    const protectedPaths = ["/api/projects", "/api/stream", "/api/machines"]
+    const protectedPaths = ["/api/projects", "/api/stream", "/api/machines", "/api/onboarding"]
     const needsUser = protectedPaths.some(path => url.pathname === path || url.pathname.startsWith(`${path}/`)) || url.pathname.startsWith("/api/session/")
     const userOrResponse = needsUser ? await requireUser(request, env) : null
     if (userOrResponse instanceof Response) return userOrResponse
@@ -802,6 +922,8 @@ export default {
     if (url.pathname === "/api/stream" && request.method === "GET") return streamProjects(user!, env)
     if (url.pathname === "/api/machines" && request.method === "GET") return json({ machines: await listMachines(user!, env) })
     if (url.pathname === "/api/machines" && request.method === "POST") return registerMachine(request, env, user!)
+    if (url.pathname === "/api/onboarding/status" && request.method === "GET") return onboardingStatus(user!, env)
+    if (url.pathname === "/api/onboarding/pair" && request.method === "POST") return createMachinePairing(request, env, user!)
 
     const commandMatch = url.pathname.match(/^\/api\/machines\/([^/]+)\/commands$/)
     if (commandMatch && request.method === "POST") return enqueueCommand(request, env, user!, decodeURIComponent(commandMatch[1]))

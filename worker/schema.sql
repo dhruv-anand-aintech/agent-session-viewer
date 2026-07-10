@@ -19,6 +19,19 @@ create table if not exists machines (
 
 create index if not exists machines_user_idx on machines(user_id, revoked_at);
 
+create table if not exists machine_pairings (
+  id text primary key,
+  user_id text not null references users(id) on delete cascade,
+  label text not null,
+  code_hash text not null unique,
+  created_at text not null default (datetime('now')),
+  expires_at text not null,
+  claimed_at text
+);
+
+create index if not exists machine_pairings_pending_idx
+  on machine_pairings(code_hash, claimed_at, expires_at);
+
 create table if not exists command_queue (
   id text primary key,
   user_id text not null references users(id) on delete cascade,
