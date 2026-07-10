@@ -89,7 +89,7 @@ export default function CloudOnboarding({ user, onConnected }: { user?: User | n
           <section className="onboarding-steps">
             <article className="onboarding-step is-active">
               <span className="onboarding-step-number">1</span>
-              <div><h2>Download the Mac app</h2><p>The app includes the background sync service. Unzip it, move it to Applications, and open it once.</p><a className="onboarding-primary" href={MAC_DOWNLOAD_URL} download><Download size={17} /> Download for macOS</a><small><ShieldCheck size={13} /> macOS 14 or later · Runs in the menu bar</small></div>
+              <div><h2>Download the Mac app</h2><p>The app includes the background sync service. Unzip it, move it to Applications, and open it once.</p><a className="onboarding-primary" href={MAC_DOWNLOAD_URL} download><Download size={17} /> Download for macOS</a><small><ShieldCheck size={13} /> macOS 14+ beta · First launch: Control-click the app, then choose Open</small></div>
             </article>
 
             <article className={`onboarding-step${pairing ? " is-complete" : " is-active"}`}>
