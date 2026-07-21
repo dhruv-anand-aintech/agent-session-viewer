@@ -1714,7 +1714,7 @@ function loadSessionMessagesOndemand(projectPath, sessionId) {
   return null
 }
 
-function loadRecentChatContext(chatLimit = 6, messagesPerChat = 10) {
+function loadRecentChatContext(chatLimit = 4, messagesPerChat = 6) {
   initSidebarCache()
   const requested = Math.max(chatLimit * 3, chatLimit)
   const entries = getTopSidebarEntries(requested)
