@@ -1162,8 +1162,19 @@ function codexAssistantTextFromContent(content) {
 
 function codexReasoningText(payload) {
   if (typeof payload?.content === "string" && payload.content.trim()) return payload.content.trim()
-  if (!Array.isArray(payload?.summary)) return ""
-  return payload.summary
+  const content = Array.isArray(payload?.content) ? payload.content
+    .map(part => {
+      if (typeof part === "string") return part
+      if (typeof part?.text === "string") return part.text
+      if (typeof part?.reasoning_text === "string") return part.reasoning_text
+      return ""
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim()
+    : ""
+  if (content) return content
+  const summary = Array.isArray(payload?.summary) ? payload.summary
     .map(part => {
       if (typeof part === "string") return part
       if (typeof part?.text === "string") return part.text
@@ -1173,6 +1184,18 @@ function codexReasoningText(payload) {
     .filter(Boolean)
     .join("\n")
     .trim()
+    : ""
+  if (summary) return summary
+  return payload?.encrypted_content
+    ? "Reasoning is encrypted by OpenAI and only decryptable server-side; plaintext is not available to this client."
+    : ""
+}
+
+function codexToolInput(payload) {
+  const raw = payload?.arguments ?? payload?.input ?? {}
+  if (raw && typeof raw === "object") return raw
+  if (typeof raw !== "string") return { value: raw }
+  try { return JSON.parse(raw) } catch { return { _raw: raw } }
 }
 
 function pushCodexAssistantBlocks(out, sessionId, seq, ts, blocks) {
@@ -1203,7 +1226,7 @@ function pushCodexToolResults(out, sessionId, seq, ts, blocks) {
   return seq + 1
 }
 
-function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
+export function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
   if (!rows.length) return null
 
   const sessionMetaRows = rows.filter(r => r.type === "session_meta")
@@ -1230,14 +1253,20 @@ function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
   // Codex emits each assistant message twice: once as event_msg agent_message and
   // again as response_item message. Skip the second copy regardless of which
   // stream arrives first; a third occurrence of the same text is a real repeat.
-  const assistantSeen = new Map() // text → source ("event" | "response") of last emission
+  const assistantSeen = new Map() // visible text → source ("event" | "response") of last emission
+  function assistantDedupeSignature(text) {
+    return text
+      .replace(/\n*<oai-mem-citation>[\s\S]*?<\/oai-mem-citation>\s*$/u, "")
+      .trim()
+  }
   function isDuplicateAssistant(text, source) {
-    const prev = assistantSeen.get(text)
+    const signature = assistantDedupeSignature(text)
+    const prev = assistantSeen.get(signature)
     if (prev && prev !== source) {
-      assistantSeen.delete(text)
+      assistantSeen.delete(signature)
       return true
     }
-    assistantSeen.set(text, source)
+    assistantSeen.set(signature, source)
     return false
   }
 
@@ -1331,19 +1360,17 @@ function buildCodexSessionResult(filePath, rows, fileMtimeMs) {
       continue
     }
 
-    if (row.payload.type === "function_call") {
-      let input = {}
-      try { input = JSON.parse(row.payload.arguments ?? "{}") } catch { input = { _raw: row.payload.arguments ?? "" } }
+    if (row.payload.type === "function_call" || row.payload.type === "custom_tool_call") {
       pendingAssistantBlocks.push({
         type: "tool_use",
         id: row.payload.call_id ?? `${sessionId}-tool-${seq}-${pendingAssistantBlocks.length}`,
         name: row.payload.name ?? "tool",
-        input,
+        input: codexToolInput(row.payload),
       })
       continue
     }
 
-    if (row.payload.type === "function_call_output") {
+    if (row.payload.type === "function_call_output" || row.payload.type === "custom_tool_call_output") {
       pendingToolResults.push({
         type: "tool_result",
         tool_use_id: row.payload.call_id ?? undefined,
