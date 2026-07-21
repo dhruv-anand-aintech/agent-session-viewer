@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { useLocation } from "wouter"
-import { canonicalizeSelectedProjectPath } from "./sessionPaneState"
+import { canonicalizeSelectedProjectPath, resolveSessionProject } from "./sessionPaneState"
 import { parseUrlSession } from "./urlSession"
 import { markAppInit, markSessionClick } from "./perf"
 import { useProjects, useCapabilities } from "./useProjects"
@@ -106,10 +106,7 @@ export default function App() {
   const commonDirectories = useMemo(() => commonDirectoriesFromProjects(projects), [projects])
   const activeProjectPath = selected?.project ?? defaultProject
   const activeSessionId = selected?.session ?? defaultSession
-  const activeProject = activeProjectPath
-    ? (projects.find(p => p.path === activeProjectPath) ??
-       (activeSessionId ? projects.find(p => p.sessions.some(s => s.id === activeSessionId)) : undefined))
-    : undefined
+  const activeProject = resolveSessionProject(projects, activeProjectPath, activeSessionId)
   const activeMeta = activeProject?.sessions.find(s => s.id === activeSessionId)
   const canonicalProjectPath = canonicalizeSelectedProjectPath(
     selected?.project ?? null,
@@ -225,7 +222,7 @@ export default function App() {
           <div className="content">
             {effectiveMeta && effectiveProjectPath
               ? <SessionPane
-                  key={effectiveMeta.id}
+                  key={`${effectiveProjectPath}/${effectiveMeta.id}`}
                   projectDir={effectiveProjectPath}
                   sessionMeta={effectiveMeta}
                   onBack={() => setMobileSidebarOpen(true)}

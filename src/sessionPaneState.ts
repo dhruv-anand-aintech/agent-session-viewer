@@ -16,6 +16,28 @@ export interface LoadEarlierControlState {
   label: string
 }
 
+interface ProjectWithSessions<TSession extends { id: string; source?: string }> {
+  path: string
+  sessions: TSession[]
+}
+
+/** Resolve duplicate-UUID deep links to the provider-native project when one exists. */
+export function resolveSessionProject<TSession extends { id: string; source?: string }>(
+  projects: ProjectWithSessions<TSession>[],
+  selectedProjectPath: string | null | undefined,
+  sessionId: string | null | undefined,
+): ProjectWithSessions<TSession> | undefined {
+  if (!sessionId) return selectedProjectPath ? projects.find(project => project.path === selectedProjectPath) : undefined
+  const candidates = projects.filter(project => project.sessions.some(session => session.id === sessionId))
+  const selected = candidates.find(project => project.path === selectedProjectPath)
+  const providerNative = candidates.find(project => {
+    const session = project.sessions.find(item => item.id === sessionId)
+    return session?.source && session.source !== "claude" && project.path.startsWith(`${session.source}:`)
+  })
+  if (selected?.path.includes("/.claude/projects/") && providerNative) return providerNative
+  return selected ?? providerNative ?? candidates[0]
+}
+
 export function createPinnedProjectPath(projectPath: string): PinnedProjectPath {
   const current = projectPath
   return {

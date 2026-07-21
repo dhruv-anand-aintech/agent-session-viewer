@@ -40,6 +40,28 @@ describe("projects-merge", () => {
     expect(out[0].sessions[0].id).toBe("n1")
   })
 
+  it("replaces a stale deep-link placeholder with the canonical provider session", () => {
+    const id = "019f8412-cc2f-7972-a221-93e3c9da9e16"
+    const staleClaudePath = "/Users/dhruvanand/.claude/projects/-Users-dhruvanand-Code-universal-computer-use-mobile"
+    const canonicalCodexPath = "codex:/Users/dhruvanand/Code/universal-computer-use-mobile"
+    const existing = [project(staleClaudePath, [sess(id, "", {
+      projectPath: staleClaudePath,
+      messageCount: 0,
+      source: "claude",
+    })])]
+    const incoming = [project(canonicalCodexPath, [sess(id, "2026-07-21T10:43:18.614Z", {
+      projectPath: canonicalCodexPath,
+      messageCount: 50,
+      source: "codex",
+    })])]
+
+    const out = mergeProjectData(existing, incoming)
+
+    expect(out).toHaveLength(1)
+    expect(out[0].path).toBe(canonicalCodexPath)
+    expect(out[0].sessions[0]).toMatchObject({ id, projectPath: canonicalCodexPath, source: "codex" })
+  })
+
   it("mergeSessionUpsert sorts sessions by lastActivity desc", () => {
     const base = [project("/a", [
       sess("old", "2026-06-01T00:00:00.000Z"),

@@ -98,6 +98,26 @@ export function mergeSessionUpsert(
 export function mergeProjectData(existing: ProjectData[], incoming: ProjectData[]): ProjectData[] {
   const projectsByPath = new Map(existing.map(p => [p.path, { ...p, sessions: [...p.sessions] }]))
 
+  // A deep link is represented immediately by a zero-message placeholder so the
+  // session pane can render before the sidebar stream arrives. If the URL carries
+  // a stale provider/project path, replace that placeholder when the stream
+  // resolves the same UUID to its canonical project (for example, a Codex rollout
+  // linked through a Claude project path).
+  const resolvedIncomingIds = new Set(
+    incoming.flatMap(project => project.sessions)
+      .filter(session => session.messageCount > 0 || Boolean(session.lastActivity))
+      .map(session => session.id),
+  )
+  for (const [path, project] of projectsByPath) {
+    project.sessions = project.sessions.filter(session => !(
+      resolvedIncomingIds.has(session.id) &&
+      session.messageCount === 0 &&
+      !session.lastActivity &&
+      !incoming.some(candidate => candidate.path === path && candidate.sessions.some(next => next.id === session.id))
+    ))
+    if (project.sessions.length === 0) projectsByPath.delete(path)
+  }
+
   for (const project of incoming) {
     const current = projectsByPath.get(project.path)
     if (!current) {
