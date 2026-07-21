@@ -60,6 +60,7 @@ import { rgGlobalSearch } from "./lib/rg-search.mjs"
 import { contentSearchStream } from "./lib/content-search.mjs"
 import { isDebugTrace, debugLog, debugWarn } from "./lib/debug-trace.mjs"
 import { canResumeSessionWithAgl, getAgentProviders, parseConfiguredProviders, runLocalAglChat } from "./lib/agent-chat-core.mjs"
+import { buildLiveSessionPreview, compressLiveSummaryContext, isActivelyUpdating, openAILiveSummaryBody, openAIStreamDelta } from "./lib/live-summary-core.mjs"
 import {
   openSidebarCacheDb,
   getSidebarCacheMap,
@@ -79,10 +80,10 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
-// Load .env file from project root (if not already set in environment)
+// Load .env files from the project and shared ~/Code workspace (without overriding process env).
 try {
-  const envFile = join(__dirname, ".env")
-  if (existsSync(envFile)) {
+  for (const envFile of [join(__dirname, ".env"), join(dirname(__dirname), ".env")]) {
+    if (!existsSync(envFile)) continue
     for (const line of readFileSync(envFile, "utf8").split("\n")) {
       const m = line.match(/^([A-Z_][A-Z0-9_]*)=(.*)$/)
       if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, "")
@@ -1740,6 +1741,88 @@ function loadRecentChatContext(chatLimit = 4, messagesPerChat = 6) {
   return chats
 }
 
+function getActiveSessionEntries(limit = 4) {
+  initSidebarCache()
+  return getTopSidebarEntries(Math.max(limit * 5, limit))
+    .filter(entry => !entry.isSidechain && isActivelyUpdating(entry))
+    .slice(0, limit)
+}
+
+function loadLiveSummaryTail(entry) {
+  const cacheKey = `${entry.projectPath}/${entry.id}`
+  const cached = msgCachePeek(cacheKey)
+  if (cached?.msgs?.length) return cached.msgs
+  if (entry.projectPath.startsWith("codex:")) {
+    const filePath = findCodexSessionFile(entry.id)
+    if (!filePath) return null
+    const rows = readJsonlTail(filePath, 500)
+    return codexTailRowsToMessages(entry.id, rows, entry.lastActivity ?? new Date().toISOString())
+  }
+  if (entry.source === "claude" || entry.projectPath.startsWith("/")) {
+    const filePath = entry.projectPath.startsWith("/")
+      ? join(entry.projectPath, `${entry.id}.jsonl`)
+      : join(CLAUDE_DIR, entry.projectPath, `${entry.id}.jsonl`)
+    return existsSync(filePath) ? readJsonlTail(filePath, 120) : null
+  }
+  return loadSessionMessagesOndemand(entry.projectPath, entry.id)
+}
+
+function collectActiveSessionPreviews(limit = 4) {
+  const startedAt = performance.now()
+  const sessions = []
+  for (const entry of getActiveSessionEntries(limit)) {
+    const messages = loadLiveSummaryTail(entry)
+    if (!Array.isArray(messages) || messages.length === 0) continue
+    sessions.push(buildLiveSessionPreview(entry, messages))
+  }
+  return { sessions, collectionMs: Math.round(performance.now() - startedAt) }
+}
+
+function writeSse(res, event, data) {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+}
+
+async function streamOpenAILiveSummary(res, sessions) {
+  const apiKey = process.env.OPENAI_API_KEY
+  if (!apiKey) throw new Error("OPENAI_API_KEY is not configured on the local transcript server")
+  const context = compressLiveSummaryContext(sessions)
+  const model = process.env.AGENT_SUMMARY_OPENAI_MODEL || "gpt-5.6-luna"
+  const startedAt = performance.now()
+  const response = await fetch("https://api.openai.com/v1/responses", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify(openAILiveSummaryBody(context, model)),
+  })
+  if (!response.ok || !response.body) {
+    const payload = await response.json().catch(() => ({}))
+    throw new Error(payload?.error?.message || `OpenAI summary failed (${response.status})`)
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ""
+  let firstTokenMs = null
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const chunks = buffer.split("\n\n")
+    buffer = chunks.pop() ?? ""
+    for (const chunk of chunks) {
+      const eventName = chunk.split("\n").find(line => line.startsWith("event:"))?.slice(6).trim() || "message"
+      const raw = chunk.split("\n").filter(line => line.startsWith("data:")).map(line => line.replace(/^data:\s?/, "")).join("\n")
+      if (!raw || raw === "[DONE]") continue
+      const payload = JSON.parse(raw)
+      if (eventName === "error" || payload?.error) throw new Error(payload?.error?.message || payload?.message || "OpenAI stream failed")
+      const delta = openAIStreamDelta(eventName, payload)
+      if (delta) {
+        firstTokenMs ??= Math.round(performance.now() - startedAt)
+        writeSse(res, "delta", { text: delta })
+      }
+    }
+  }
+  return { model, contextChars: context.length, firstTokenMs, generationMs: Math.round(performance.now() - startedAt) }
+}
+
 function withTranscriptResearchContext(sessionContext = {}, { includeRecentChats = false } = {}) {
   return {
     ...sessionContext,
@@ -3197,6 +3280,71 @@ const server = http.createServer(async (req, res) => {
     const requested = Number(url.searchParams.get("limit"))
     const limit = Number.isSafeInteger(requested) ? Math.max(1, Math.min(20, requested)) : 8
     json({ plans: loadRecentPlans(limit), generatedAt: new Date().toISOString() })
+    return
+  }
+
+  // GET /api/agent/summary-context — fast deterministic evidence, intentionally separate from AI.
+  if (url.pathname === "/api/agent/summary-context" && req.method === "GET") {
+    const result = collectActiveSessionPreviews(4)
+    if (!result.sessions.length) {
+      json({ ok: false, error: "No actively updating transcript sessions were found in the last five minutes." }, 404)
+      return
+    }
+    json({
+      ok: true,
+      sessions: result.sessions.map(session => ({ ...session, messages: undefined })),
+      chatsCount: result.sessions.length,
+      collectionMs: result.collectionMs,
+      generatedAt: new Date().toISOString(),
+    })
+    return
+  }
+
+  // POST /api/agent/summary-stream — deterministic active evidence first, then streamed AI summary.
+  if (url.pathname === "/api/agent/summary-stream" && req.method === "POST") {
+    await readBody()
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+    })
+    res.flushHeaders()
+    // Force small-chunk proxies/tunnels to deliver the deterministic evidence events immediately.
+    res.write(`: stream-open ${".".repeat(4096)}\n\n`)
+    const collectionStartedAt = performance.now()
+    try {
+      const entries = getActiveSessionEntries(4)
+      if (!entries.length) throw new Error("No actively updating transcript sessions were found in the last five minutes.")
+      for (const entry of entries) writeSse(res, "session_discovered", {
+        sessionId: entry.id,
+        projectPath: entry.projectPath,
+        source: entry.source ?? "claude",
+        title: entry.customName || entry.firstName || entry.id.slice(0, 8),
+        lastActivity: entry.lastActivity ?? entry.mtime ?? null,
+        latestUser: "Loading latest request…",
+        assistantTail: "Loading latest assistant update…",
+      })
+      const sessions = []
+      for (const entry of entries) {
+        const messages = loadLiveSummaryTail(entry)
+        if (!Array.isArray(messages) || messages.length === 0) continue
+        const session = buildLiveSessionPreview(entry, messages)
+        sessions.push(session)
+        writeSse(res, "session", { ...session, messages: undefined })
+      }
+      if (!sessions.length) throw new Error("Active transcripts were found, but their latest messages could not be read.")
+      writeSse(res, "context_complete", {
+        chatsCount: sessions.length,
+        collectionMs: Math.round(performance.now() - collectionStartedAt),
+      })
+      const metrics = await streamOpenAILiveSummary(res, sessions)
+      writeSse(res, "done", { ok: true, chatsCount: sessions.length, ...metrics })
+    } catch (err) {
+      writeSse(res, "error", { error: err instanceof Error ? err.message : String(err) })
+    } finally {
+      res.end()
+    }
     return
   }
 

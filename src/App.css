@@ -937,6 +937,54 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   border-color: var(--border-100);
   background: var(--bg-100);
 }
+.agent-live-evidence {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.agent-live-evidence-heading,
+.agent-live-session-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.agent-live-evidence-heading { color: var(--text-200); font-size: 12px; }
+.agent-live-evidence-heading span,
+.agent-live-session-meta span { color: var(--text-400); font: 10px var(--font-mono); }
+.agent-live-session {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid var(--border-100);
+  border-radius: 9px;
+  background: var(--bg-100);
+}
+.agent-live-session-meta strong { color: var(--text-200); font-size: 12px; }
+.agent-live-snippet span {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text-400);
+  font: 600 9px var(--font-mono);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.agent-live-snippet p {
+  margin: 0;
+  color: var(--text-300);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  max-height: 9em;
+  overflow: auto;
+}
+.agent-live-snippet--assistant {
+  padding: 8px;
+  border-left: 2px solid hsl(140, 52%, 49%);
+  border-radius: 4px;
+  background: hsla(140, 45%, 40%, .1);
+}
+.agent-live-snippet--assistant span { color: hsl(140, 55%, 67%); }
 .agent-chat-text.agentic-markdown { white-space: normal; }
 .agent-chat-text.agentic-markdown > :first-child { margin-top: 0; }
 .agent-chat-text.agentic-markdown > :last-child { margin-bottom: 0; }
@@ -1388,6 +1436,9 @@ body { background: var(--bg-200); color: var(--text-100); height: 100dvh; overfl
   .agent-console-error { margin-left: 10px; margin-right: 10px; }
   .agent-workspace { display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
   .agent-workspace > .agentic-thread-sidebar { min-height: 116px; max-height: 150px; flex: 0 0 auto; border-right: 0; border-bottom: 1px solid var(--border-100); }
+  .agent-workspace--live-summary > .agentic-thread-sidebar { display: none; }
+  .agent-workspace--live-summary .agent-live-snippet p { max-height: 6em; }
+  .agent-workspace--live-summary .agent-live-snippet:not(.agent-live-snippet--assistant) p { max-height: 4.5em; }
   .agent-chat-column { min-height: 390px; overflow: visible; }
   .agent-composer-wrap .agentic-composer { grid-template-columns: minmax(0, 1fr) auto auto; }
   .agent-composer-wrap .agentic-model-select { grid-column: 1 / -1; }

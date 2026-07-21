@@ -79,7 +79,7 @@ const OPENCODE_MODELS = [
 ]
 
 function modelClassForModel(model: string): "fast" | "pro" {
-  return /flash|haiku|mini|nano|lite|fast|free|small/i.test(model) ? "fast" : "pro"
+  return /flash|haiku|mini|nano|lite|fast|free|small|luna/i.test(model) ? "fast" : "pro"
 }
 
 function modelLabel(model: string): string {
@@ -105,7 +105,7 @@ const MODEL_OPTIONS_BY_AGENT: Record<string, ModelOption[]> = {
     { value: "pro", label: "Auto pro", modelClass: "pro" },
     { value: "fast", label: "Auto fast", modelClass: "fast" },
   ],
-  codex: modelOptions(["gpt-5.5", "gpt-5.4-mini", "gpt-5.1-codex", "gpt-5-codex"]),
+  codex: modelOptions(["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini", "gpt-5.1-codex", "gpt-5-codex"]),
   claude: modelOptions(["sonnet", "haiku", "opus"]),
   cursor: modelOptions(["composer-2.5-fast"]),
   gemini: modelOptions(["gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.1-pro-preview", "gemini-3.5-flash"]),
@@ -518,14 +518,14 @@ function publicProvider(provider: Provider): Provider {
   return safe
 }
 
-async function proxyChat(provider: Provider, request: Request, route: "chat" | "summary" = "chat"): Promise<Response> {
+async function proxyChat(provider: Provider, request: Request, route: "chat" | "summary" | "summary-stream" = "chat"): Promise<Response> {
   if (!provider.endpoint) return json({ ok: false, error: `Provider is not configured: ${provider.id}` }, 400)
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (provider.authToken) headers.Authorization = `Bearer ${provider.authToken}`
   if (provider.authPin) headers["X-Auth-Pin"] = provider.authPin
-  const endpoint = route === "summary"
-    ? provider.endpoint.replace(/\/api\/agent\/chat$/, "/api/agent/summary")
-    : provider.endpoint
+  const endpoint = route === "chat"
+    ? provider.endpoint
+    : provider.endpoint.replace(/\/api\/agent\/chat$/, `/api/agent/${route}`)
   const upstream = await fetch(endpoint, {
     method: "POST",
     headers,
@@ -535,6 +535,7 @@ async function proxyChat(provider: Provider, request: Request, route: "chat" | "
     status: upstream.status,
     headers: {
       "Content-Type": upstream.headers.get("Content-Type") ?? "application/json",
+      "Cache-Control": upstream.headers.get("Cache-Control") ?? "no-cache",
       "Access-Control-Allow-Origin": "*",
     },
   })
@@ -553,6 +554,23 @@ async function proxyAgentPlans(provider: Provider, request: Request): Promise<Re
     status: upstream.status,
     headers: {
       "Content-Type": upstream.headers.get("Content-Type") ?? "application/json",
+      "Access-Control-Allow-Origin": "*",
+    },
+  })
+}
+
+async function proxyAgentSummaryContext(provider: Provider): Promise<Response> {
+  if (!provider.endpoint) return json({ error: `Provider is not configured: ${provider.id}` }, 400)
+  const headers: Record<string, string> = {}
+  if (provider.authToken) headers.Authorization = `Bearer ${provider.authToken}`
+  if (provider.authPin) headers["X-Auth-Pin"] = provider.authPin
+  const endpoint = provider.endpoint.replace(/\/api\/agent\/chat$/, "/api/agent/summary-context")
+  const upstream = await fetch(endpoint, { headers })
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: {
+      "Content-Type": upstream.headers.get("Content-Type") ?? "application/json",
+      "Cache-Control": "no-store",
       "Access-Control-Allow-Origin": "*",
     },
   })
@@ -1192,11 +1210,33 @@ export default {
       }
     }
 
+    if (url.pathname === "/api/agent/summary-stream" && request.method === "POST") {
+      const body = await request.clone().json().catch(() => ({})) as { provider?: string }
+      const providerId = body.provider ?? "local"
+      const provider = providers(env).find(entry => entry.id === providerId)
+      if (!provider?.endpoint) return json({ ok: false, error: `Provider is not configured: ${providerId}` }, 400)
+      try {
+        return await proxyChat(provider, request, "summary-stream")
+      } catch (err) {
+        return json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 502)
+      }
+    }
+
     if (url.pathname === "/api/agent/plans" && request.method === "GET") {
       const provider = providers(env).find(entry => entry.id === "local")
       if (!provider?.endpoint) return json({ error: "Local transcript agent is not configured" }, 503)
       try {
         return await proxyAgentPlans(provider, request)
+      } catch (err) {
+        return json({ error: err instanceof Error ? err.message : String(err) }, 502)
+      }
+    }
+
+    if (url.pathname === "/api/agent/summary-context" && request.method === "GET") {
+      const provider = providers(env).find(entry => entry.id === "local")
+      if (!provider?.endpoint) return json({ error: "Local transcript agent is not configured" }, 503)
+      try {
+        return await proxyAgentSummaryContext(provider)
       } catch (err) {
         return json({ error: err instanceof Error ? err.message : String(err) }, 502)
       }
