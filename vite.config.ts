@@ -22,6 +22,10 @@ const disableRocketLoader = {
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), disableRocketLoader],
+  resolve: {
+    // agentic-ai-bar is linked from a sibling package; keep hooks on this app's React instance.
+    dedupe: ["react", "react-dom"],
+  },
   server: {
     proxy: {
       // timeout: 0 avoids hanging SSE (/api/stream) behind the dev proxy

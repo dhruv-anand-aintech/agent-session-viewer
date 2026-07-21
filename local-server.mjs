@@ -53,6 +53,7 @@ import {
   GEMINI_TMP_ROOT,
 } from "./platform-readers.mjs"
 import { buildSidebarSearchDoc, runSidebarSessionSearch, runThreadKeywordSearch } from "./lib/session-search-core.mjs"
+import { extractLatestPlan } from "./lib/plan-status-core.mjs"
 import { inferClaudeCodexParent } from "./lib/codex-claude-lineage.mjs"
 import { indexSession, removeSession, getSearchRows } from "./lib/search-index.mjs"
 import { rgGlobalSearch } from "./lib/rg-search.mjs"
@@ -101,6 +102,22 @@ const CLAUDE_DIR = join(homedir(), ".claude", "projects")
 const APP_CONFIG_DIR = join(homedir(), ".config", "agent-session-viewer")
 const CONFIG_FILE = join(APP_CONFIG_DIR, "config.json")
 const SIDEBAR_CACHE_DB = join(APP_CONFIG_DIR, "sidebar-cache.db")
+
+function getTranscriptReadLocations() {
+  return [
+    join(homedir(), ".claude", "projects"),
+    join(homedir(), "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb"),
+    CURSOR_PROJECTS_ROOT,
+    OPENCODE_DB,
+    OPENCODE_STORAGE,
+    CODEX_SESSIONS_ROOT,
+    ANTIGRAVITY_BRAIN_DIR,
+    ANTIGRAVITY_CLI_DIR,
+    HERMES_DB,
+    GEMINI_TMP_ROOT,
+    OPENCLAW_ROOT,
+  ].filter((location, index, locations) => location && locations.indexOf(location) === index)
+}
 
 function wallClock() {
   return new Date().toLocaleTimeString("en-US", {
@@ -1697,6 +1714,63 @@ function loadSessionMessagesOndemand(projectPath, sessionId) {
   return null
 }
 
+function loadRecentChatContext(chatLimit = 6, messagesPerChat = 10) {
+  initSidebarCache()
+  const requested = Math.max(chatLimit * 3, chatLimit)
+  const entries = getTopSidebarEntries(requested)
+  const primary = entries.filter(entry => !entry.isSidechain)
+  const selected = (primary.length >= chatLimit ? primary : entries).slice(0, chatLimit)
+  const chats = []
+  for (const entry of selected) {
+    const messages = loadSessionMessagesOndemand(entry.projectPath, entry.id)
+    if (!Array.isArray(messages) || messages.length === 0) continue
+    const conversational = messages.filter(message => {
+      const role = message?.message?.role
+      return role === "user" || role === "assistant" || message?.type === "human" || message?.type === "assistant"
+    })
+    chats.push({
+      sessionId: entry.id,
+      projectPath: entry.projectPath,
+      source: entry.source ?? "claude",
+      title: entry.customName || entry.firstName || entry.id.slice(0, 8),
+      lastActivity: entry.lastActivity ?? entry.mtime ?? null,
+      messages: conversational.slice(-messagesPerChat),
+    })
+  }
+  return chats
+}
+
+function withTranscriptResearchContext(sessionContext = {}, { includeRecentChats = false } = {}) {
+  return {
+    ...sessionContext,
+    transcriptScope: "all",
+    transcriptLocations: getTranscriptReadLocations(),
+    ...(includeRecentChats ? { recentChats: loadRecentChatContext() } : {}),
+  }
+}
+
+function loadRecentPlans(limit = 8) {
+  initSidebarCache()
+  const entries = getTopSidebarEntries(Math.max(limit * 3, limit))
+  const plans = []
+  for (const entry of entries) {
+    if (entry.isSidechain || plans.length >= limit) continue
+    const messages = getSessionMessagesAll(entry.projectPath, entry.id)
+    if (!Array.isArray(messages)) continue
+    const plan = extractLatestPlan(messages)
+    if (!plan) continue
+    plans.push({
+      sessionId: entry.id,
+      projectPath: entry.projectPath,
+      source: entry.source ?? "claude",
+      title: entry.customName || entry.firstName || entry.id.slice(0, 8),
+      lastActivity: entry.lastActivity ?? entry.mtime ?? null,
+      ...plan,
+    })
+  }
+  return plans
+}
+
 /** Full message array for a session (no tail windowing). */
 function getSessionMessagesAll(projectPath, sessionId) {
   if (projectPath.startsWith("cursor:")) {
@@ -3114,7 +3188,43 @@ const server = http.createServer(async (req, res) => {
 
   // GET /api/agent/providers — available execution surfaces for the agent console.
   if (url.pathname === "/api/agent/providers" && req.method === "GET") {
-    json(getAgentProviders())
+    json({ ...getAgentProviders(), transcriptLocations: getTranscriptReadLocations() })
+    return
+  }
+
+  // GET /api/agent/plans — latest persisted update_plan/TodoWrite state from recent sessions.
+  if (url.pathname === "/api/agent/plans" && req.method === "GET") {
+    const requested = Number(url.searchParams.get("limit"))
+    const limit = Number.isSafeInteger(requested) ? Math.max(1, Math.min(20, requested)) : 8
+    json({ plans: loadRecentPlans(limit), generatedAt: new Date().toISOString() })
+    return
+  }
+
+  // POST /api/agent/summary — one-click cross-agent update from recent chat tails.
+  if (url.pathname === "/api/agent/summary" && req.method === "POST") {
+    const body = await readBody()
+    const recentChats = loadRecentChatContext()
+    if (!recentChats.length) {
+      json({ ok: false, error: "No recent transcript messages were found." }, 404)
+      return
+    }
+    const result = await runLocalAglChat({
+      ...body,
+      agent: String(body.agent ?? "codex"),
+      mode: "ask",
+      timeoutSeconds: Math.min(180, Number(body.timeoutSeconds) || 120),
+      resumeCurrentSession: false,
+      conversation: [],
+      prompt: [
+        "Give me a concise live work update from the supplied recent chats.",
+        "Use exactly two Markdown headings: Completed and Remaining.",
+        "Under each heading, write short evidence-based bullet points.",
+        "Treat proposed, attempted, unverified, failed, or interrupted work as remaining, not completed.",
+        "If nothing is supported for a section, write one bullet saying so.",
+      ].join("\n"),
+      sessionContext: withTranscriptResearchContext({ recentChats }),
+    })
+    json({ ...result, chatsCount: recentChats.length, generatedAt: new Date().toISOString() }, result.ok ? 200 : 500)
     return
   }
 
@@ -3122,7 +3232,7 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/api/agent/chat" && req.method === "POST") {
     const body = await readBody()
     const provider = String(body.provider ?? "local")
-    const sessionContext = body.sessionContext && typeof body.sessionContext === "object"
+    let sessionContext = body.sessionContext && typeof body.sessionContext === "object"
       ? { ...body.sessionContext }
       : {}
 
@@ -3130,6 +3240,7 @@ const server = http.createServer(async (req, res) => {
       const loaded = loadSessionMessagesOndemand(String(sessionContext.projectPath), String(sessionContext.sessionId))
       if (Array.isArray(loaded)) sessionContext.messages = loaded.slice(-100)
     }
+    sessionContext = withTranscriptResearchContext(sessionContext, { includeRecentChats: true })
 
     if (provider === "local") {
       const requestedAgent = String(body.agent ?? "random")

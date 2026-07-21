@@ -518,16 +518,37 @@ function publicProvider(provider: Provider): Provider {
   return safe
 }
 
-async function proxyChat(provider: Provider, request: Request): Promise<Response> {
+async function proxyChat(provider: Provider, request: Request, route: "chat" | "summary" = "chat"): Promise<Response> {
   if (!provider.endpoint) return json({ ok: false, error: `Provider is not configured: ${provider.id}` }, 400)
   const headers: Record<string, string> = { "Content-Type": "application/json" }
   if (provider.authToken) headers.Authorization = `Bearer ${provider.authToken}`
   if (provider.authPin) headers["X-Auth-Pin"] = provider.authPin
-  const upstream = await fetch(provider.endpoint, {
+  const endpoint = route === "summary"
+    ? provider.endpoint.replace(/\/api\/agent\/chat$/, "/api/agent/summary")
+    : provider.endpoint
+  const upstream = await fetch(endpoint, {
     method: "POST",
     headers,
     body: await request.text(),
   })
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: {
+      "Content-Type": upstream.headers.get("Content-Type") ?? "application/json",
+      "Access-Control-Allow-Origin": "*",
+    },
+  })
+}
+
+async function proxyAgentPlans(provider: Provider, request: Request): Promise<Response> {
+  if (!provider.endpoint) return json({ error: `Provider is not configured: ${provider.id}` }, 400)
+  const headers: Record<string, string> = {}
+  if (provider.authToken) headers.Authorization = `Bearer ${provider.authToken}`
+  if (provider.authPin) headers["X-Auth-Pin"] = provider.authPin
+  const upstreamUrl = new URL(provider.endpoint.replace(/\/api\/agent\/chat$/, "/api/agent/plans"))
+  const requestedUrl = new URL(request.url)
+  if (requestedUrl.searchParams.has("limit")) upstreamUrl.searchParams.set("limit", requestedUrl.searchParams.get("limit") ?? "8")
+  const upstream = await fetch(upstreamUrl, { headers })
   return new Response(upstream.body, {
     status: upstream.status,
     headers: {
@@ -1109,7 +1130,9 @@ export default {
     if (url.pathname === "/api/cloud/poll" && request.method === "GET") return pollCommands(request, env)
 
     const protectedPaths = ["/api/projects", "/api/stream", "/api/machines", "/api/onboarding", "/api/sessions"]
-    const needsUser = protectedPaths.some(path => url.pathname === path || url.pathname.startsWith(`${path}/`)) || url.pathname.startsWith("/api/session/")
+    const needsUser = protectedPaths.some(path => url.pathname === path || url.pathname.startsWith(`${path}/`)) ||
+      url.pathname.startsWith("/api/session/") ||
+      (configuredForGoogle(env) && url.pathname.startsWith("/api/agent/"))
     const userOrResponse = needsUser ? await requireUser(request, env) : null
     if (userOrResponse instanceof Response) return userOrResponse
     const user = userOrResponse as User | null
@@ -1145,7 +1168,38 @@ export default {
           model: "",
         },
         modelOptionsByAgent: MODEL_OPTIONS_BY_AGENT,
+        transcriptLocations: [
+          "~/.claude/projects",
+          "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
+          "~/.cursor/projects/*/agent-transcripts",
+          "~/.local/share/opencode",
+          "~/.codex/sessions",
+          "~/.gemini/antigravity",
+          "~/.hermes/state.db",
+        ],
       })
+    }
+
+    if (url.pathname === "/api/agent/summary" && request.method === "POST") {
+      const body = await request.clone().json().catch(() => ({})) as { provider?: string }
+      const providerId = body.provider ?? "local"
+      const provider = providers(env).find(entry => entry.id === providerId)
+      if (!provider?.endpoint) return json({ ok: false, error: `Provider is not configured: ${providerId}` }, 400)
+      try {
+        return await proxyChat(provider, request, "summary")
+      } catch (err) {
+        return json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 502)
+      }
+    }
+
+    if (url.pathname === "/api/agent/plans" && request.method === "GET") {
+      const provider = providers(env).find(entry => entry.id === "local")
+      if (!provider?.endpoint) return json({ error: "Local transcript agent is not configured" }, 503)
+      try {
+        return await proxyAgentPlans(provider, request)
+      } catch (err) {
+        return json({ error: err instanceof Error ? err.message : String(err) }, 502)
+      }
     }
 
     if (url.pathname === "/api/agent/chat" && request.method === "POST") {

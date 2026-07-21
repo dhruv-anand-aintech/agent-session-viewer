@@ -75,6 +75,7 @@
     "test:prepush": "npm test && npm run test:tunnel-regression"
   },
   "dependencies": {
+    "@ainorthstar/agentic-ai-bar": "file:../agentic-ai-bar",
     "@huggingface/transformers": "^4.2.0",
     "@inquirer/prompts": "^8.4.3",
     "@lancedb/lancedb": "^0.27.2",

@@ -668,15 +668,24 @@ export function SessionPane({
         </div>
       </div>
       {agentConsoleOpen && (
-        <AgentConsole
-          key={`${stableProjectDir}/${sessionMeta.id}`}
-          projectPath={stableProjectDir}
-          sessionMeta={sessionMeta}
-          cwd={agentCwd}
-          messages={agentMessages}
-          commonDirectories={commonDirectories}
-          onTranscriptUpdated={refreshTail}
-        />
+        <>
+          <button
+            type="button"
+            className="agent-console-backdrop"
+            onClick={() => setAgentConsoleOpen(false)}
+            aria-label="Close transcript agent"
+          />
+          <AgentConsole
+            key={`${stableProjectDir}/${sessionMeta.id}`}
+            projectPath={stableProjectDir}
+            sessionMeta={sessionMeta}
+            cwd={agentCwd}
+            messages={agentMessages}
+            commonDirectories={commonDirectories}
+            onTranscriptUpdated={refreshTail}
+            onClose={() => setAgentConsoleOpen(false)}
+          />
+        </>
       )}
       {threadSearchOpen && (
         <>
