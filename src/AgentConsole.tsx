@@ -1,26 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { Bot, Loader2, RefreshCw, Sparkles, X } from "lucide-react"
+import { Bot, Loader2, Plus, RefreshCw, Sparkles, X } from "lucide-react"
 import {
   AgenticComposer,
   AgenticMarkdown,
-  AgenticSessionList,
-  AgenticStageTimeline,
-  AgenticThreadSidebar,
-  AgenticTracePanel,
   useAgenticComposerQueue,
 } from "@ainorthstar/agentic-ai-bar/react"
-import { streamSse, type AgenticMentionOption, type AgenticModelOption } from "@ainorthstar/agentic-ai-bar"
+import type { AgenticMentionOption, AgenticModelOption } from "@ainorthstar/agentic-ai-bar"
 import "@ainorthstar/agentic-ai-bar/react.css"
 import type { SessionMessage, SessionMeta } from "./types"
-
-type Provider = {
-  id: string
-  label: string
-  kind: string
-  status: "available" | "missing" | string
-  agents: string[]
-  detail?: string
-}
 
 type ModelOption = {
   value: string
@@ -28,42 +15,25 @@ type ModelOption = {
   model?: string
   modelClass?: "fast" | "pro"
   noModel?: boolean
-  useExtraModelArg?: boolean
 }
 
 type ProviderResponse = {
-  providers: Provider[]
-  defaults: { provider: string; agent: string; mode: string; modelClass: string; model?: string }
   modelOptionsByAgent?: Record<string, ModelOption[]>
   transcriptLocations?: string[]
+  codexAuth?: {
+    kind?: "chatgpt" | "api-key" | "unknown"
+    authenticated?: boolean
+    label?: string
+  }
 }
 
 type ChatTurn = { role: "user" | "assistant"; content: string; provider?: string; agent?: string }
 type AgentThread = { id: string; title: string; turns: ChatTurn[]; updatedAt: string }
-type PlanItem = { id: string; label: string; status: "idle" | "running" | "complete" | "failed" }
-type SessionPlan = {
-  sessionId: string
-  source: string
-  title: string
-  timestamp?: string | null
-  lastActivity?: string | null
-  items: PlanItem[]
-}
-type LiveSessionPreview = {
-  sessionId: string
-  projectPath: string
-  source: string
-  title: string
-  lastActivity?: string | null
-  latestUser: string
-  assistantTail: string
-}
-type SummaryMetrics = { chatsCount?: number; collectionMs?: number; firstTokenMs?: number; generationMs?: number; model?: string }
 
 const THREADS_KEY = "asv-agentic-transcript-threads-v1"
 const FALLBACK_MODELS: ModelOption[] = [
-  { value: "pro", label: "Pro", modelClass: "pro" },
-  { value: "fast", label: "Fast", modelClass: "fast" },
+  { value: "gpt-5.6", label: "GPT-5.6", model: "gpt-5.6", modelClass: "pro" },
+  { value: "gpt-5.6-luna", label: "GPT-5.6 Luna", model: "gpt-5.6-luna", modelClass: "fast" },
 ]
 
 function makeThread(title = "Transcript question"): AgentThread {
@@ -88,33 +58,6 @@ function messageDirectory(message: SessionMessage): string | null {
   return candidates.find(value => typeof value === "string" && value.startsWith("/")) as string | undefined ?? null
 }
 
-function liveMessageText(message: SessionMessage): string {
-  const content = message.message?.content
-  const text = typeof content === "string"
-    ? content
-    : Array.isArray(content)
-      ? content.filter(block => block.type === "text").map(block => block.text ?? "").join("\n")
-      : ""
-  return text.replace(/\s+/g, " ").trim()
-}
-
-function currentSessionPreview(projectPath: string, meta: SessionMeta, messages: SessionMessage[]): LiveSessionPreview | null {
-  const recentlyActive = meta.isActive || Date.now() - Date.parse(meta.lastActivity) <= 5 * 60_000
-  if (!recentlyActive) return null
-  const latestUser = messages.findLast(message => message.message?.role === "user" && liveMessageText(message))
-  const latestAssistant = messages.findLast(message => message.message?.role === "assistant" && liveMessageText(message))
-  const clip = (text: string) => text.length > 1200 ? `${text.slice(0, 840)} … ${text.slice(-360)}` : text
-  return {
-    sessionId: meta.id,
-    projectPath,
-    source: meta.source ?? "claude",
-    title: meta.customName || meta.firstName || meta.id.slice(0, 8),
-    lastActivity: meta.lastActivity,
-    latestUser: latestUser ? clip(liveMessageText(latestUser)) : "No recent user message",
-    assistantTail: latestAssistant ? clip(liveMessageText(latestAssistant)) : "No assistant response yet",
-  }
-}
-
 export function AgentConsole({
   projectPath,
   sessionMeta,
@@ -132,40 +75,26 @@ export function AgentConsole({
   onTranscriptUpdated: () => Promise<boolean>
   onClose: () => void
 }) {
-  const [providers, setProviders] = useState<Provider[]>([])
-  const [provider, setProvider] = useState("local")
-  const [agent, setAgent] = useState("codex")
-  const [mode, setMode] = useState("ask")
-  const [thinkingLevel, setThinkingLevel] = useState("auto")
-  const [modelOptionsByAgent, setModelOptionsByAgent] = useState<Record<string, ModelOption[]>>({})
-  const [modelChoice, setModelChoice] = useState("pro")
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>(FALLBACK_MODELS)
+  const [modelChoice, setModelChoice] = useState(FALLBACK_MODELS[0].value)
   const [selectedCwd, setSelectedCwd] = useState(cwd ?? "")
   const [transcriptLocations, setTranscriptLocations] = useState<string[]>([])
+  const [codexAuth, setCodexAuth] = useState<ProviderResponse["codexAuth"]>()
   const [threads, setThreads] = useState<AgentThread[]>(loadThreads)
-  const [activeThreadId, setActiveThreadId] = useState("")
+  const [activeThreadId, setActiveThreadId] = useState(() => threads[0]?.id ?? "")
   const [draft, setDraft] = useState("")
   const [sending, setSending] = useState(false)
-  const [summaryLoading, setSummaryLoading] = useState(false)
-  const [summarySessions, setSummarySessions] = useState<LiveSessionPreview[]>([])
-  const [summaryContextReady, setSummaryContextReady] = useState(false)
-  const [summaryMetrics, setSummaryMetrics] = useState<SummaryMetrics | null>(null)
-  const [plans, setPlans] = useState<SessionPlan[]>([])
+  const [workingLabel, setWorkingLabel] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
   const activeThread = threads.find(thread => thread.id === activeThreadId) ?? threads[0]
-  const activeProvider = providers.find(entry => entry.id === provider)
-  const agentOptions = useMemo(
-    () => activeProvider?.agents?.length ? activeProvider.agents : ["codex"],
-    [activeProvider],
-  )
-  const rawModels = modelOptionsByAgent[agent] ?? FALLBACK_MODELS
-  const selectedRawModel = rawModels.find(option => option.value === modelChoice) ?? rawModels[0] ?? FALLBACK_MODELS[0]
-  const models = useMemo<AgenticModelOption[]>(() => rawModels.map(option => ({
+  const selectedRawModel = modelOptions.find(option => option.value === modelChoice) ?? modelOptions[0] ?? FALLBACK_MODELS[0]
+  const models = useMemo<AgenticModelOption[]>(() => modelOptions.map(option => ({
     id: option.value,
     label: option.label,
-    provider: agent,
-  })), [agent, rawModels])
+    provider: "codex",
+  })), [modelOptions])
   const selectedModel = models.find(option => option.id === selectedRawModel.value) ?? models[0]
 
   const directoryOptions = useMemo(() => {
@@ -190,10 +119,6 @@ export function AgentConsole({
   }, [threads])
 
   useEffect(() => {
-    if (!activeThreadId && threads[0]) setActiveThreadId(threads[0].id)
-  }, [activeThreadId, threads])
-
-  useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") onClose()
     }
@@ -205,44 +130,21 @@ export function AgentConsole({
     const controller = new AbortController()
     fetch("/api/agent/providers", { credentials: "include", signal: controller.signal })
       .then(async response => {
-        if (!response.ok) throw new Error(`Provider lookup failed (${response.status})`)
+        if (!response.ok) throw new Error(`Codex lookup failed (${response.status})`)
         return response.json() as Promise<ProviderResponse>
       })
       .then(data => {
-        setProviders(data.providers ?? [])
-        setProvider(data.defaults?.provider ?? "local")
-        setAgent(data.defaults?.agent ?? "codex")
-        setMode(data.defaults?.mode ?? "ask")
-        setModelChoice(data.defaults?.model || data.defaults?.modelClass || "pro")
-        setModelOptionsByAgent(data.modelOptionsByAgent ?? {})
+        const codexModels = data.modelOptionsByAgent?.codex
+        if (codexModels?.length) {
+          setModelOptions(codexModels)
+          setModelChoice(current => codexModels.some(option => option.value === current) ? current : codexModels[0].value)
+        }
         setTranscriptLocations(data.transcriptLocations ?? [])
+        setCodexAuth(data.codexAuth)
       })
       .catch(err => { if (err.name !== "AbortError") setError(err instanceof Error ? err.message : String(err)) })
     return () => controller.abort()
   }, [])
-
-  async function loadPlans() {
-    const response = await fetch("/api/agent/plans?limit=8", { credentials: "include" })
-    if (!response.ok) throw new Error(`Plan status lookup failed (${response.status})`)
-    const data = await response.json() as { plans?: SessionPlan[] }
-    setPlans(data.plans ?? [])
-  }
-
-  useEffect(() => {
-    void loadPlans().catch(err => setError(err instanceof Error ? err.message : String(err)))
-    const timer = window.setInterval(() => {
-      void loadPlans().catch(() => undefined)
-    }, 15_000)
-    return () => window.clearInterval(timer)
-  }, [])
-
-  useEffect(() => {
-    if (!agentOptions.includes(agent)) setAgent(agentOptions[0] ?? "codex")
-  }, [agent, agentOptions])
-
-  useEffect(() => {
-    if (!rawModels.some(option => option.value === modelChoice)) setModelChoice(rawModels[0]?.value ?? "pro")
-  }, [modelChoice, rawModels])
 
   useEffect(() => {
     if (!selectedCwd || (cwd && !directoryOptions.includes(selectedCwd))) setSelectedCwd(cwd ?? directoryOptions[0] ?? "")
@@ -250,6 +152,14 @@ export function AgentConsole({
 
   function updateThread(threadId: string, updater: (thread: AgentThread) => AgentThread) {
     setThreads(current => current.map(thread => thread.id === threadId ? updater(thread) : thread))
+  }
+
+  function addAssistantTurn(threadId: string, content: string, agent = "codex") {
+    updateThread(threadId, thread => ({
+      ...thread,
+      turns: [...thread.turns, { role: "assistant", content, provider: "local", agent }],
+      updatedAt: new Date().toISOString(),
+    }))
   }
 
   async function submitText(text: string) {
@@ -265,6 +175,7 @@ export function AgentConsole({
       updatedAt: new Date().toISOString(),
     }))
     setSending(true)
+    setWorkingLabel("Codex is inspecting live context…")
     setError(null)
     const controller = new AbortController()
     abortRef.current = controller
@@ -275,14 +186,13 @@ export function AgentConsole({
         signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          provider,
-          agent,
-          mode,
+          provider: "local",
+          agent: "codex",
+          mode: "auto",
           modelClass: selectedRawModel.modelClass ?? "pro",
           model: selectedRawModel.model,
-          thinkingLevel,
+          thinkingLevel: "auto",
           noModel: selectedRawModel.noModel,
-          useExtraModelArg: selectedRawModel.useExtraModelArg,
           cwd: selectedCwd || cwd || undefined,
           prompt: trimmed,
           conversation,
@@ -297,17 +207,14 @@ export function AgentConsole({
           },
         }),
       })
-      const data = await response.json().catch(() => ({})) as { ok?: boolean; text?: string; error?: string; provider?: string; agent?: string }
-      if (!response.ok || data.ok === false) throw new Error(data.error ?? `Agent request failed (${response.status})`)
-      updateThread(threadId, thread => ({
-        ...thread,
-        turns: [...thread.turns, { role: "assistant", content: data.text ?? "No response text returned.", provider: data.provider, agent: data.agent }],
-        updatedAt: new Date().toISOString(),
-      }))
+      const data = await response.json().catch(() => ({})) as { ok?: boolean; text?: string; error?: string; agent?: string }
+      if (!response.ok || data.ok === false) throw new Error(data.error ?? `Codex request failed (${response.status})`)
+      addAssistantTurn(threadId, data.text ?? "No response text returned.", data.agent)
     } catch (err) {
       if (!(err instanceof DOMException && err.name === "AbortError")) setError(err instanceof Error ? err.message : String(err))
     } finally {
       abortRef.current = null
+      setWorkingLabel(null)
       setSending(false)
     }
   }
@@ -321,100 +228,37 @@ export function AgentConsole({
   })
 
   async function runLiveSummary() {
-    if (summaryLoading || sending) return
-    const thread = makeThread(`Live update · ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`)
-    setThreads(current => [thread, ...current].slice(0, 20))
-    setActiveThreadId(thread.id)
-    setSummaryLoading(true)
-    setSummarySessions([])
-    setSummaryContextReady(false)
-    setSummaryMetrics(null)
+    if (sending || !activeThread) return
+    const threadId = activeThread.id
     setSending(true)
+    setWorkingLabel("Codex is reading recent transcripts…")
     setError(null)
     const controller = new AbortController()
     abortRef.current = controller
     try {
-      const immediateSession = currentSessionPreview(projectPath, sessionMeta, messages)
-      if (immediateSession) {
-        setSummarySessions([immediateSession])
-        setSummaryContextReady(true)
-        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
-      }
-
-      const contextPromise = fetch("/api/agent/summary-context", {
-        credentials: "include",
-        signal: controller.signal,
-      })
-      const streamPromise = immediateSession ? fetch("/api/agent/summary-stream", {
-        method: "POST",
-        credentials: "include",
-        signal: controller.signal,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider, cwd: selectedCwd || cwd || undefined }),
-      }) : null
-      const contextResponse = await contextPromise
-      const contextData = await contextResponse.json().catch(() => ({})) as SummaryMetrics & { ok?: boolean; error?: string; sessions?: LiveSessionPreview[] }
-      if (!contextResponse.ok || contextData.ok === false) throw new Error(contextData.error ?? `Live evidence failed (${contextResponse.status})`)
-      setSummarySessions(contextData.sessions ?? [])
-      setSummaryMetrics(contextData)
-      setSummaryContextReady(true)
-      updateThread(thread.id, current => ({ ...current, title: `Live update · ${contextData.chatsCount ?? "active"} chats` }))
-      if (!immediateSession) await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
-
-      const response = streamPromise ? await streamPromise : await fetch("/api/agent/summary-stream", {
+      const response = await fetch("/api/agent/summary", {
         method: "POST",
         credentials: "include",
         signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          provider,
+          provider: "local",
+          agent: "codex",
+          modelClass: selectedRawModel.modelClass ?? "pro",
+          model: selectedRawModel.model,
+          thinkingLevel: "low",
           cwd: selectedCwd || cwd || undefined,
         }),
       })
-      let summaryText = ""
-      let paintFrame: number | null = null
-      const paintSummary = () => {
-        paintFrame = null
-        updateThread(thread.id, current => ({
-          ...current,
-          turns: [{ role: "assistant", content: summaryText, provider: "openai", agent: "gpt-5.6-luna" }],
-          updatedAt: new Date().toISOString(),
-        }))
-      }
-      await streamSse(response, async (eventName, payload) => {
-        if (eventName === "session" || eventName === "session_discovered") {
-          const session = payload as LiveSessionPreview
-          setSummarySessions(current => {
-            const index = current.findIndex(item => item.sessionId === session.sessionId)
-            if (index < 0) return [...current, session]
-            const next = [...current]
-            next[index] = session
-            return next
-          })
-          return
-        }
-        if (eventName === "context_complete") {
-          const metrics = payload as SummaryMetrics
-          setSummaryMetrics(current => ({ ...current, ...metrics }))
-          setSummaryContextReady(true)
-          updateThread(thread.id, current => ({ ...current, title: `Live update · ${metrics.chatsCount ?? "active"} chats` }))
-          return
-        }
-        if (eventName === "delta") {
-          summaryText += String((payload as { text?: string }).text ?? "")
-          if (paintFrame == null) paintFrame = requestAnimationFrame(paintSummary)
-          return
-        }
-        if (eventName === "done") setSummaryMetrics(current => ({ ...current, ...(payload as SummaryMetrics) }))
-      })
-      if (paintFrame != null) cancelAnimationFrame(paintFrame)
-      paintSummary()
-      if (!summaryText) throw new Error("The summary stream completed without text.")
+      const data = await response.json().catch(() => ({})) as { ok?: boolean; text?: string; error?: string; agent?: string; chatsCount?: number }
+      if (!response.ok || data.ok === false) throw new Error(data.error ?? `Live update failed (${response.status})`)
+      addAssistantTurn(threadId, data.text ?? "No live update was returned.", data.agent)
+      updateThread(threadId, thread => ({ ...thread, title: `Live update · ${data.chatsCount ?? "recent"} chats` }))
     } catch (err) {
       if (!(err instanceof DOMException && err.name === "AbortError")) setError(err instanceof Error ? err.message : String(err))
     } finally {
       abortRef.current = null
-      setSummaryLoading(false)
+      setWorkingLabel(null)
       setSending(false)
     }
   }
@@ -424,126 +268,67 @@ export function AgentConsole({
     setThreads(current => [thread, ...current].slice(0, 20))
     setActiveThreadId(thread.id)
     setDraft("")
+    setError(null)
   }
 
+  const authLabel = codexAuth?.kind === "chatgpt"
+    ? "ChatGPT subscription"
+    : codexAuth?.kind === "api-key"
+      ? "API key"
+      : "Codex CLI"
+
   return (
-    <section className="agent-console agentic-asv-shell" aria-label="Transcript research agent">
+    <section className="agent-console agentic-asv-shell" aria-label="Codex transcript agent">
       <header className="agent-console-toolbar">
         <div className="agent-console-title">
           <Bot size={16} aria-hidden="true" />
-          <span>Transcript agent</span>
-          <span className="agent-console-context">read-only · {transcriptLocations.length || "all"} sources</span>
+          <span>Codex</span>
+          <span className="agent-console-context">{authLabel} · {transcriptLocations.length || "all"} transcript sources</span>
         </div>
         <div className="agent-console-controls">
           <button className="agent-live-summary-btn" type="button" onClick={() => void runLiveSummary()} disabled={sending}>
-            {summaryLoading && summaryContextReady ? <Loader2 size={15} className="spin-icon" aria-hidden="true" /> : <Sparkles size={15} aria-hidden="true" />}
+            {workingLabel?.startsWith("Codex is reading") ? <Loader2 size={15} className="spin-icon" aria-hidden="true" /> : <Sparkles size={15} aria-hidden="true" />}
             Live update
           </button>
-          <select value={provider} onChange={event => setProvider(event.target.value)} aria-label="Agent provider">
-            {providers.map(entry => <option key={entry.id} value={entry.id} disabled={entry.status !== "available"}>{entry.label}</option>)}
-          </select>
-          <select value={agent} onChange={event => setAgent(event.target.value)} aria-label="Agent">
-            {agentOptions.map(value => <option key={value} value={value}>{value}</option>)}
-          </select>
-          <select value={mode} onChange={event => setMode(event.target.value)} aria-label="Agent mode">
-            {(["ask", "plan", "default"] as const).map(value => <option key={value} value={value}>{value}</option>)}
-          </select>
-          <select value={thinkingLevel} onChange={event => setThinkingLevel(event.target.value)} aria-label="Thinking level">
-            {(["auto", "low", "medium", "high"] as const).map(value => <option key={value} value={value}>{value}</option>)}
-          </select>
-          <select className="agent-directory-select" value={selectedCwd} onChange={event => setSelectedCwd(event.target.value)} aria-label="Working directory">
-            {directoryOptions.map(dir => <option key={dir} value={dir}>{directoryLabel(dir)}</option>)}
-          </select>
-          <button className="agent-icon-btn" type="button" onClick={() => void Promise.all([onTranscriptUpdated(), loadPlans()])} title="Refresh transcript evidence" aria-label="Refresh transcript evidence">
+          {directoryOptions.length > 1 ? (
+            <select className="agent-directory-select" value={selectedCwd} onChange={event => setSelectedCwd(event.target.value)} aria-label="Working directory">
+              {directoryOptions.map(dir => <option key={dir} value={dir}>{directoryLabel(dir)}</option>)}
+            </select>
+          ) : null}
+          <button className="agent-icon-btn" type="button" onClick={newThread} disabled={sending} title="New chat" aria-label="New chat">
+            <Plus size={14} aria-hidden="true" />
+          </button>
+          <button className="agent-icon-btn" type="button" onClick={() => void onTranscriptUpdated()} title="Refresh transcript context" aria-label="Refresh transcript context">
             <RefreshCw size={14} aria-hidden="true" />
           </button>
-          <button className="agent-icon-btn agent-close-btn" type="button" onClick={onClose} title="Close transcript agent" aria-label="Close transcript agent">
+          <button className="agent-icon-btn agent-close-btn" type="button" onClick={onClose} title="Close Codex" aria-label="Close Codex">
             <X size={15} aria-hidden="true" />
           </button>
         </div>
       </header>
 
-      {activeProvider?.detail ? <div className="agent-provider-detail">{activeProvider.detail}</div> : null}
       {error ? <div className="agent-console-error" role="alert">{error}</div> : null}
 
-      <div className={`agent-workspace ${summarySessions.length ? "agent-workspace--live-summary" : ""}`}>
-        <AgenticThreadSidebar
-          title="Research threads"
-          threads={threads.map(thread => ({
-            id: thread.id,
-            title: thread.title,
-            updatedAt: new Date(thread.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-            runCount: thread.turns.filter(turn => turn.role === "assistant").length,
-            status: sending && thread.id === activeThreadId ? "running" : "idle",
-          }))}
-          activeThreadId={activeThreadId}
-          onNewThread={newThread}
-          onSelectThread={setActiveThreadId}
-          onRenameThread={(id, title) => updateThread(id, thread => ({ ...thread, title }))}
-          onArchiveThread={id => {
-            setThreads(current => current.filter(thread => thread.id !== id))
-            if (id === activeThreadId) setActiveThreadId(threads.find(thread => thread.id !== id)?.id ?? "")
-          }}
-        />
-
+      <div className="agent-workspace">
         <div className="agent-chat-column">
-          {!summarySessions.length ? <AgenticSessionList
-            title="Active evidence"
-            activeSessionId={sessionMeta.id}
-            sessions={[{
-              id: sessionMeta.id,
-              label: sessionMeta.customName || sessionMeta.firstName || sessionMeta.id.slice(0, 8),
-              detail: `${sessionMeta.source ?? "claude"} · current chat + ${transcriptLocations.length || "all"} transcript sources`,
-              status: "complete",
-            }]}
-          /> : null}
-          {!summarySessions.length ? <AgenticTracePanel
-            title="Live plan status"
-            subtitle={plans.length ? `${plans.length} recent session${plans.length === 1 ? "" : "s"} · refreshes every 15s` : "No update_plan or TodoWrite records in recent sessions"}
-            events={plans.flatMap(plan => plan.items.map(item => ({
-              id: `${plan.sessionId}-${item.id}`,
-              label: item.label,
-              detail: `${plan.source} · ${plan.title}`,
-              kind: "plan",
-              status: item.status,
-              time: plan.timestamp ? new Date(plan.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : undefined,
-            }))).slice(0, 18)}
-          /> : null}
           <div className="agent-chat-log" aria-live="polite">
-            {summarySessions.length ? (
-              <section className="agent-live-evidence" data-summary-phase={summaryContextReady ? "summarizing" : "collecting"}>
-                <div className="agent-live-evidence-heading">
-                  <strong>Active sessions now</strong>
-                  <span>{summarySessions.length} found{summaryMetrics?.collectionMs != null ? ` · ${summaryMetrics.collectionMs} ms` : ""}{summaryMetrics?.generationMs != null ? ` · ${summaryMetrics.generationMs} ms AI` : ""}</span>
-                </div>
-                {summarySessions.map(session => (
-                  <article className="agent-live-session" key={session.sessionId}>
-                    <div className="agent-live-session-meta"><strong>{session.title}</strong><span>{session.source}</span></div>
-                    <div className="agent-live-snippet"><span>Latest request</span><p>{session.latestUser}</p></div>
-                    <div className="agent-live-snippet agent-live-snippet--assistant"><span>Latest assistant update</span><p>{session.assistantTail}</p></div>
-                  </article>
-                ))}
-              </section>
-            ) : null}
             {activeThread?.turns.length ? activeThread.turns.map((turn, index) => (
               <article key={`${activeThread.id}-${index}`} className={`agent-chat-turn agent-chat-turn--${turn.role}`}>
-                <div className="agent-chat-role">{turn.role === "assistant" ? (turn.agent ?? "agent") : "you"}</div>
+                <div className="agent-chat-role">{turn.role === "assistant" ? "codex" : "you"}</div>
                 {turn.role === "assistant"
                   ? <AgenticMarkdown text={turn.content} className="agent-chat-text" />
                   : <div className="agent-chat-text">{turn.content}</div>}
               </article>
             )) : (
-              <div className="agent-chat-empty">Ask across Claude, Codex, Cursor, OpenCode, Antigravity, Hermes, Gemini, and claw transcripts—or click <strong>Live update</strong> for completed and remaining work.</div>
+              <div className="agent-chat-empty">
+                Ask Codex to search any transcript, inspect this repo, or check current processes and commands. Transcript sources stay read-only.
+              </div>
             )}
-            {sending && (!summaryLoading || summaryContextReady) ? (
-              <AgenticStageTimeline
-                loading
-                title={summaryLoading ? "Building live update" : "Researching transcripts"}
-                stages={[
-                  { id: "collect", label: summaryLoading ? `${summarySessions.length} active sessions loaded` : "Collect recent transcript evidence", status: "complete" },
-                  { id: "research", label: summaryLoading ? `Streaming ${summaryMetrics?.model ?? "GPT-5.6 Luna low"} summary` : "Search relevant transcript sources", status: "running" },
-                ]}
-              />
+            {workingLabel ? (
+              <div className="agent-working" role="status">
+                <Loader2 size={14} className="spin-icon" aria-hidden="true" />
+                {workingLabel}
+              </div>
             ) : null}
           </div>
           <div className="agent-composer-wrap">
@@ -562,7 +347,7 @@ export function AgentConsole({
               onQueuedMessageSteer={queue.steerQueuedMessage}
               onQueuedMessageRemove={queue.removeQueuedMessage}
               mentionOptions={transcriptMentions}
-              placeholder="Ask a detailed question across all transcripts…"
+              placeholder="Ask Codex about transcripts, code, or live processes…"
               submitLabel="Ask"
               stopLabel="Stop"
               queueLabel="Queue"

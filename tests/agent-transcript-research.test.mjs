@@ -30,7 +30,9 @@ test("builds a read-only all-transcript research prompt", () => {
       recentChats: [chat],
     },
   })
-  assert.match(prompt, /read transcript files and databases, but do not modify/)
+  assert.match(prompt, /read and search transcript files and databases with shell and database tools/)
+  assert.match(prompt, /never modify, move, or delete transcript sources/)
+  assert.match(prompt, /running processes, ports, and current commands/)
   assert.match(prompt, /RECENT CHATS ACROSS AGENTS/)
   assert.match(prompt, /READ-ONLY TRANSCRIPT LOCATIONS/)
   assert.match(prompt, /~\/.codex\/sessions/)

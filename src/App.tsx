@@ -222,7 +222,7 @@ export default function App() {
           <div className="content">
             {effectiveMeta && effectiveProjectPath
               ? <SessionPane
-                  key={`${effectiveProjectPath}/${effectiveMeta.id}`}
+                  key={effectiveMeta.id}
                   projectDir={effectiveProjectPath}
                   sessionMeta={effectiveMeta}
                   onBack={() => setMobileSidebarOpen(true)}

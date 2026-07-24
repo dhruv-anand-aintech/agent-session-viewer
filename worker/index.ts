@@ -1176,17 +1176,32 @@ export default {
 
     if (url.pathname === "/api/agent/providers" && request.method === "GET") {
       const list = providers(env)
+      const localProvider = list.find(provider => provider.id === "local" && provider.endpoint)
+      let localCapabilities: {
+        modelOptionsByAgent?: Record<string, ModelOption[]>
+        transcriptLocations?: string[]
+        codexAuth?: { kind?: string; authenticated?: boolean; label?: string }
+      } = {}
+      if (localProvider?.endpoint) {
+        const headers: Record<string, string> = {}
+        if (localProvider.authToken) headers.Authorization = `Bearer ${localProvider.authToken}`
+        if (localProvider.authPin) headers["X-Auth-Pin"] = localProvider.authPin
+        try {
+          const response = await fetch(localProvider.endpoint.replace(/\/api\/agent\/chat$/, "/api/agent/providers"), { headers })
+          if (response.ok) localCapabilities = await response.json() as typeof localCapabilities
+        } catch { /* keep the local-tunnel provider visible while it reconnects */ }
+      }
       return json({
         providers: list.map(publicProvider),
         defaults: {
           provider: list.find(provider => provider.id === "local" && provider.status === "available") ? "local" : "worker-js",
-          agent: "random",
-          mode: "ask",
+          agent: "codex",
+          mode: "auto",
           modelClass: "pro",
-          model: "",
+          model: "gpt-5.6",
         },
-        modelOptionsByAgent: MODEL_OPTIONS_BY_AGENT,
-        transcriptLocations: [
+        modelOptionsByAgent: localCapabilities.modelOptionsByAgent ?? MODEL_OPTIONS_BY_AGENT,
+        transcriptLocations: localCapabilities.transcriptLocations ?? [
           "~/.claude/projects",
           "~/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
           "~/.cursor/projects/*/agent-transcripts",
@@ -1195,6 +1210,7 @@ export default {
           "~/.gemini/antigravity",
           "~/.hermes/state.db",
         ],
+        codexAuth: localCapabilities.codexAuth,
       })
     }
 

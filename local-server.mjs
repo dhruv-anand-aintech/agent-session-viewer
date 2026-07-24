@@ -1838,7 +1838,7 @@ function loadRecentPlans(limit = 8) {
   const plans = []
   for (const entry of entries) {
     if (entry.isSidechain || plans.length >= limit) continue
-    const messages = getSessionMessagesAll(entry.projectPath, entry.id)
+    const messages = loadLiveSummaryTail(entry)
     if (!Array.isArray(messages)) continue
     const plan = extractLatestPlan(messages)
     if (!plan) continue

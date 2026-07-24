@@ -377,9 +377,13 @@ export function SessionPane({
   const virtualRows = rowVirtualizer.getVirtualItems()
   const [autoScroll, setAutoScroll] = useState(true)
   const [prettyMode, setPrettyMode] = useState(true)
-  const [agentConsoleOpen, setAgentConsoleOpen] = useState(false)
+  const [agentConsoleOpen, setAgentConsoleOpen] = useState(() => sessionStorage.getItem("asv-agent-console-open") === "1")
   const pendingPrevNav = useRef(false)
   const initialScrollDone = useRef(false)
+
+  useEffect(() => {
+    sessionStorage.setItem("asv-agent-console-open", agentConsoleOpen ? "1" : "0")
+  }, [agentConsoleOpen])
 
   useEffect(() => {
     if (win && !initialScrollDone.current) {
@@ -669,14 +673,12 @@ export function SessionPane({
       </div>
       {agentConsoleOpen && (
         <>
-          <button
-            type="button"
+          <div
             className="agent-console-backdrop"
-            onClick={() => setAgentConsoleOpen(false)}
-            aria-label="Close transcript agent"
+            aria-hidden="true"
           />
           <AgentConsole
-            key={`${stableProjectDir}/${sessionMeta.id}`}
+            key={sessionMeta.id}
             projectPath={stableProjectDir}
             sessionMeta={sessionMeta}
             cwd={agentCwd}
