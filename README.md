@@ -42,6 +42,29 @@ npm run setup    # detects platforms, builds sidebar cache
 npm run local    # starts at http://localhost:5173
 ```
 
+### Desktop app (macOS, Windows, Linux)
+
+The desktop build uses a thin Electron shell around the existing Vite renderer
+and local Node server. The shell owns the local server process, so the desktop
+app does not depend on CDP or a separately managed browser session.
+
+```bash
+npm run desktop:dev          # Vite renderer + Electron shell
+npm run desktop:package:dir  # unpacked platform build for local smoke tests
+npm run desktop:package      # macOS DMG/ZIP, Windows NSIS, Linux AppImage/DEB
+```
+
+The renderer talks to the typed gateway boundary in `src/gateway/`. Existing
+local mode uses `/api/agent/chat`; development can use a safe in-memory mock or
+the future unified MCP gateway without changing the composer:
+
+```bash
+VITE_AGENT_GATEWAY_TRANSPORT=mock npm run desktop:dev
+VITE_AGENT_GATEWAY_TRANSPORT=mcp \
+  VITE_AGENT_GATEWAY_ENDPOINT=http://127.0.0.1:8787/rpc \
+  npm run desktop:dev
+```
+
 To access from other devices on your network:
 
 ```bash
