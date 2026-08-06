@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect, useRef, memo } from "react"
 import type { ReactNode } from "react"
 import { marked } from "marked"
 import type { SessionMessage, ContentBlock } from "../types"
-import { stripXml, linkifyPaths, classifyTool, TOOL_META, charCount } from "./utils"
+import { stripXml, classifyTool, TOOL_META, charCount } from "./utils"
 import "./pretty.css"
 
 // Configure marked for inline-friendly rendering
@@ -40,31 +40,6 @@ function LazyRender({
   }, [ready])
 
   return <div ref={ref}>{ready ? children : fallback}</div>
-}
-
-function openPath(path: string) {
-  fetch(`/api/open?path=${encodeURIComponent(path)}`, { method: "POST", credentials: "include" }).catch(() => {})
-}
-
-function PathSpan({ text }: { text: string }) {
-  const parts = linkifyPaths(text)
-  return (
-    <>
-      {parts.map((p, i) =>
-        p.type === "path"
-          ? <span key={i} className="pp-path-chip pp-path-chip--link" title={p.value} onClick={() => openPath(p.value)}>{p.value.split("/").pop()}</span>
-          : <span key={i}>{p.value}</span>
-      )}
-    </>
-  )
-}
-
-function TextContent({ text }: { text: string }) {
-  return (
-    <p className="pp-text">
-      <PathSpan text={text} />
-    </p>
-  )
 }
 
 function MarkdownContent({ text }: { text: string }) {
@@ -466,7 +441,8 @@ function UserMessage({ content, timestamp }: { content: string | ContentBlock[];
       <CollapsibleMessage charLen={combined.length}>
         <div className="pp-user-bubble">
           {sender && <span className="pp-sender-chip">{sender}</span>}
-          <TextContent text={body} />
+          {/* User turns are Markdown too: preserve inline/fenced code in prompts. */}
+          <MarkdownContent text={body} />
         </div>
       </CollapsibleMessage>
     </div>

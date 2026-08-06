@@ -14,6 +14,11 @@ import { homedir } from "node:os"
 import { execFileSync } from "node:child_process"
 import { createRequire } from "node:module"
 import { inferClaudeCodexParent } from "./lib/codex-claude-lineage.mjs"
+import {
+  OPENCODE_CORRELATION_FILE,
+  loadOpenCodeCorrelations,
+  resolveOpenCodeCorrelation,
+} from "./lib/opencode-correlation.mjs"
 
 // ── better-sqlite3 (optional native driver, avoids sqlite3 subprocess overhead) ─
 let _BetterSqlite
@@ -845,9 +850,9 @@ export function readCursorAgentSessions(cacheGet, cacheSet) {
 //     message/{sessionId}/{messageId}.json
 //     part/{messageId}/{partId}.json
 
-const OPENCODE_DIR = path.join(homedir(), ".local", "share", "opencode")
-const OPENCODE_DB = path.join(OPENCODE_DIR, "opencode.db")
-const OPENCODE_STORAGE = path.join(OPENCODE_DIR, "storage")
+const OPENCODE_DIR = process.env.ASV_OPENCODE_DIR || path.join(homedir(), ".local", "share", "opencode")
+const OPENCODE_DB = process.env.ASV_OPENCODE_DB || path.join(OPENCODE_DIR, "opencode.db")
+const OPENCODE_STORAGE = process.env.ASV_OPENCODE_STORAGE || path.join(OPENCODE_DIR, "storage")
 const _ocSessionColumnCache = new Map()
 
 function ocSessionHasColumn(dbPath, column) {
@@ -923,7 +928,7 @@ export function readOpenCodeSession(sessionFile, cacheGet, cacheSet) {
   if (!sessionData?.id) return null
 
   const sessionId = sessionData.id
-  const parentSessionId = ocParentSessionId(sessionData)
+  const explicitParentSessionId = ocParentSessionId(sessionData)
   const updatedAt = sessionData.time?.updated ?? sessionData.time?.created ?? 0
 
   // Count total parts for change detection (updatedAt alone isn't enough)
@@ -958,19 +963,30 @@ export function readOpenCodeSession(sessionFile, cacheGet, cacheSet) {
       type: m.role === "assistant" ? "assistant" : "human",
       sessionId,
       timestamp: m.time?.created ? new Date(m.time.created).toISOString() : new Date().toISOString(),
-      isSidechain: !!parentSessionId,
       message: { role: m.role, content },
     }
   })
-
+  const firstUserText = converted.find(m => m.type === "human")?.message?.content
+  const correlation = resolveOpenCodeCorrelation({
+    sessionId,
+    parentId: explicitParentSessionId,
+    metadata: sessionData.metadata,
+    firstUserText,
+    correlations: loadOpenCodeCorrelations(),
+  })
+  const parentSessionId = correlation?.parentSessionId ?? null
+  const convertedWithLineage = converted.map(m => ({
+    ...m,
+    isSidechain: !!parentSessionId,
+  }))
   const projectDir = sessionData.directory ? normProjectDir(sessionData.directory) : "opencode-global"
 
   return {
     meta: {
       id: sessionId,
       projectPath: `opencode:${projectDir}`,
-      messageCount: converted.length,
-      userMessageCount: converted.filter(m => m.message.role === "user").length,
+      messageCount: convertedWithLineage.length,
+      userMessageCount: convertedWithLineage.filter(m => m.message.role === "user").length,
       lastActivity: new Date(updatedAt || sessionData.time?.created || Date.now()).toISOString(),
       isActive: false,
       firstName: sessionData.title ?? null,
@@ -978,72 +994,15 @@ export function readOpenCodeSession(sessionFile, cacheGet, cacheSet) {
       lastUsedModel: opencodeLastModelFromMessageRows(messages),
       parentSessionId: parentSessionId ?? undefined,
       isSidechain: !!parentSessionId,
-      agentType: parentSessionId ? (sessionData.agent ?? "subagent") : undefined,
+      agentType: parentSessionId ? (sessionData.agent ?? correlation?.parentSource ?? "subagent") : undefined,
+      correlationEvidence: correlation?.correlationEvidence,
     },
-    msgs: converted,
+    msgs: convertedWithLineage,
   }
 }
 
-function opencodeLastModelFromMessageRows(messages) {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]
-    const id = m.model_id ?? m.model?.modelID ?? m.modelID
-    if (id) return id
-  }
-  return undefined
-}
-
-/**
- * OpenCode 1.x+ stores live sessions in opencode.db; storage/session JSON may lag.
- * Returns the same shape as readOpenCodeSession, or null if unchanged/invalid.
- */
-export function readOpenCodeSessionFromSqlite(dbPath, sessionId, cacheGet, cacheSet) {
-  if (!dbPath || !fs.existsSync(dbPath) || !sessionId) return null
-  const parentExpr = ocSessionHasColumn(dbPath, "parent_id") ? "parent_id" : "NULL AS parent_id"
-  const agentExpr = ocSessionHasColumn(dbPath, "agent") ? "agent" : "NULL AS agent"
-  const sessRows = bsqliteQuery(
-    dbPath,
-    `SELECT id, directory, title, time_updated, time_created, version, ${parentExpr}, ${agentExpr} FROM session WHERE id = ?`,
-    [sessionId]
-  )
-  if (!sessRows.length) return null
-  const s = sessRows[0]
-  const parentSessionId = s.parent_id ?? null
-  const cnt = bsqliteQuery(
-    dbPath,
-    `SELECT
-      (SELECT COUNT(*) FROM message WHERE session_id = ?) AS messages,
-      (SELECT COUNT(*) FROM part WHERE session_id = ?) AS parts`,
-    [sessionId, sessionId]
-  )[0] ?? { messages: 0, parts: 0 }
-  const cacheVal = `db:${s.time_updated}:${cnt.messages}:${cnt.parts}`
-  if (cacheGet && cacheGet(sessionId) === cacheVal) return null
-  if (cacheSet) cacheSet(sessionId, cacheVal)
-
-  const msgRows = bsqliteQuery(
-    dbPath,
-    `SELECT id,
-       json_extract(data,'$.role') AS role,
-       COALESCE(json_extract(data,'$.id'), id) AS msg_id,
-       COALESCE(json_extract(data,'$.time.created'), time_created) AS ts,
-       json_extract(data,'$.summary.title') AS summary_title,
-       COALESCE(json_extract(data,'$.model.modelID'), json_extract(data,'$.modelID')) AS model_id
-     FROM message WHERE session_id = ? ORDER BY time_created, id`,
-    [sessionId]
-  )
-  const messages = []
-  for (const row of msgRows) {
-    if (row.role === "user" || row.role === "assistant") {
-      messages.push({ id: row.msg_id ?? row.id, role: row.role, _timeCreated: row.ts, summary_title: row.summary_title, model_id: row.model_id })
-    }
-  }
-  messages.sort((a, b) => (a._timeCreated ?? 0) - (b._timeCreated ?? 0))
-
-  const allPartRows = bsqliteQuery(
-    dbPath,
-    `SELECT message_id, data, time_created FROM part WHERE session_id = ? ORDER BY message_id, time_created, id`,
-    [sessionId]
-  )
+function buildOpenCodeSqliteResult(s, messages, allPartRows, correlations) {
+  const sessionId = s.id
   const partsByMessage = new Map()
   for (const row of allPartRows) {
     if (!partsByMessage.has(row.message_id)) partsByMessage.set(row.message_id, [])
@@ -1070,18 +1029,27 @@ export function readOpenCodeSessionFromSqlite(dbPath, sessionId, cacheGet, cache
       type: m.role === "assistant" ? "assistant" : "human",
       sessionId,
       timestamp: m._timeCreated ? new Date(m._timeCreated).toISOString() : new Date().toISOString(),
-      isSidechain: !!parentSessionId,
       message: { role: m.role, content },
     }
   })
 
+  const firstUserText = converted.find(m => m.type === "human")?.message?.content
+  const correlation = resolveOpenCodeCorrelation({
+    sessionId,
+    parentId: s.parent_id,
+    metadata: s.metadata,
+    firstUserText,
+    correlations,
+  })
+  const parentSessionId = correlation?.parentSessionId ?? null
+  const convertedWithLineage = converted.map(m => ({ ...m, isSidechain: !!parentSessionId }))
   const projectDir = s.directory ? normProjectDir(s.directory) : "opencode-global"
   return {
     meta: {
       id: sessionId,
       projectPath: `opencode:${projectDir}`,
-      messageCount: converted.length,
-      userMessageCount: converted.filter(m => m.message.role === "user").length,
+      messageCount: convertedWithLineage.length,
+      userMessageCount: convertedWithLineage.filter(m => m.message.role === "user").length,
       lastActivity: new Date(s.time_updated || s.time_created || Date.now()).toISOString(),
       isActive: false,
       firstName: s.title || null,
@@ -1089,10 +1057,84 @@ export function readOpenCodeSessionFromSqlite(dbPath, sessionId, cacheGet, cache
       lastUsedModel: opencodeLastModelFromMessageRows(messages),
       parentSessionId: parentSessionId ?? undefined,
       isSidechain: !!parentSessionId,
-      agentType: parentSessionId ? (s.agent || "subagent") : undefined,
+      agentType: parentSessionId ? (s.agent || correlation?.parentSource || "subagent") : undefined,
+      correlationEvidence: correlation?.correlationEvidence,
     },
-    msgs: converted,
+    msgs: convertedWithLineage,
   }
+}
+
+/*
+ * SQLite reader is kept separate from the legacy file reader because OpenCode
+ * writes the database before its compatibility JSON files.
+ */
+export function readOpenCodeSessionFromSqlite(dbPath, sessionId, cacheGet, cacheSet) {
+  if (!dbPath || !fs.existsSync(dbPath) || !sessionId) return null
+  const parentExpr = ocSessionHasColumn(dbPath, "parent_id") ? "parent_id" : "NULL AS parent_id"
+  const agentExpr = ocSessionHasColumn(dbPath, "agent") ? "agent" : "NULL AS agent"
+  const metadataExpr = ocSessionHasColumn(dbPath, "metadata") ? "metadata" : "NULL AS metadata"
+  const sessRows = bsqliteQuery(
+    dbPath,
+    `SELECT id, directory, title, time_updated, time_created, version, ${parentExpr}, ${agentExpr}, ${metadataExpr} FROM session WHERE id = ?`,
+    [sessionId]
+  )
+  if (!sessRows.length) return null
+  const s = sessRows[0]
+  const cnt = bsqliteQuery(
+    dbPath,
+    `SELECT
+      (SELECT COUNT(*) FROM message WHERE session_id = ?) AS messages,
+      (SELECT COUNT(*) FROM part WHERE session_id = ?) AS parts`,
+    [sessionId, sessionId]
+  )[0] ?? { messages: 0, parts: 0 }
+  const cacheVal = `db:${s.time_updated}:${cnt.messages}:${cnt.parts}:${s.metadata ?? ""}`
+  if (cacheGet && cacheGet(sessionId) === cacheVal) return null
+  if (cacheSet) cacheSet(sessionId, cacheVal)
+
+  const msgRows = bsqliteQuery(
+    dbPath,
+    `SELECT id,
+       json_extract(data,'$.role') AS role,
+       COALESCE(json_extract(data,'$.id'), id) AS msg_id,
+       COALESCE(json_extract(data,'$.time.created'), time_created) AS ts,
+       json_extract(data,'$.summary.title') AS summary_title,
+       COALESCE(json_extract(data,'$.model.modelID'), json_extract(data,'$.modelID')) AS model_id
+     FROM message WHERE session_id = ? ORDER BY time_created, id`,
+    [sessionId]
+  )
+  const messages = msgRows
+    .filter(row => row.role === "user" || row.role === "assistant")
+    .map(row => ({ id: row.msg_id ?? row.id, role: row.role, _timeCreated: row.ts, summary_title: row.summary_title, model_id: row.model_id }))
+    .sort((a, b) => (a._timeCreated ?? 0) - (b._timeCreated ?? 0))
+
+  const allPartRows = bsqliteQuery(
+    dbPath,
+    `SELECT message_id, data, time_created FROM part WHERE session_id = ? ORDER BY message_id, time_created, id`,
+    [sessionId]
+  )
+  return buildOpenCodeSqliteResult(s, messages, allPartRows, loadOpenCodeCorrelations(OPENCODE_CORRELATION_FILE))
+}
+
+/**
+ * Cheap SQLite index used by the live watcher. It intentionally reads no
+ * messages or parts, so a WAL write can be detected without rescanning the
+ * entire OpenCode history.
+ */
+export function readOpenCodeSessionIndex(dbPath = OPENCODE_DB) {
+  if (!dbPath || !fs.existsSync(dbPath)) return []
+  return bsqliteQuery(
+    dbPath,
+    "SELECT id, time_updated, time_created FROM session ORDER BY time_updated DESC, id",
+  )
+}
+
+function opencodeLastModelFromMessageRows(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    const id = m.model_id ?? m.model?.modelID ?? m.modelID
+    if (id) return id
+  }
+  return undefined
 }
 
 /**
@@ -1126,7 +1168,7 @@ export function* iterOpenCodeSessions(cacheGet, cacheSet) {
   }
 }
 
-export { OPENCODE_DIR, OPENCODE_DB, OPENCODE_STORAGE }
+export { OPENCODE_DIR, OPENCODE_DB, OPENCODE_STORAGE, OPENCODE_CORRELATION_FILE }
 
 // ── Codex ─────────────────────────────────────────────────────────────────────
 //

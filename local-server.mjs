@@ -29,10 +29,12 @@ import {
   CURSOR_PROJECTS_ROOT,
   readOpenCodeSession,
   readOpenCodeSessionFromSqlite,
+  readOpenCodeSessionIndex,
   iterOpenCodeSessions,
   OPENCODE_DIR,
   OPENCODE_DB,
   OPENCODE_STORAGE,
+  OPENCODE_CORRELATION_FILE,
   ANTIGRAVITY_BRAIN_DIR,
   parseAntigravitySessionIndex,
   readAntigravitySession,
@@ -64,6 +66,7 @@ import {
 import { buildSidebarSearchDoc, runSidebarSessionSearch, runThreadKeywordSearch } from "./lib/session-search-core.mjs"
 import { extractLatestPlan } from "./lib/plan-status-core.mjs"
 import { inferClaudeCodexParent } from "./lib/codex-claude-lineage.mjs"
+import { loadOpenCodeCorrelations } from "./lib/opencode-correlation.mjs"
 import { indexSession, removeSession, getSearchRows } from "./lib/search-index.mjs"
 import { rgGlobalSearch } from "./lib/rg-search.mjs"
 import { contentSearchStream } from "./lib/content-search.mjs"
@@ -1580,6 +1583,11 @@ async function loadProjectsBundleRecent(maxSessions) {
 async function loadProjectsBundle(maxSessions) {
   const n = Number(maxSessions)
   if (!Number.isFinite(n) || n <= 0) {
+    // The sidebar cache is maintained by the platform watchers. Serving it
+    // here keeps the browser-facing full-list endpoint bounded instead of
+    // rescanning every transcript (especially the large OpenCode database).
+    const cached = loadProjectsBundleCached(0)
+    if (cached.projects.length) return cached
     const full = await loadProjectsFull()
     return { projects: full, total: countSessionsInProjects(full) }
   }
@@ -1734,6 +1742,16 @@ function loadSessionMessagesOndemand(projectPath, sessionId) {
     return null
   }
   return null
+}
+
+function openCodeSessionSignature(sessionId) {
+  try {
+    const result = readOpenCodeSessionFromSqlite(OPENCODE_DB, sessionId, null, null)
+    if (!result) return "missing"
+    return `${result.meta.lastActivity}:${result.meta.messageCount}:${result.msgs.at(-1)?.uuid ?? ""}`
+  } catch {
+    return "error"
+  }
 }
 
 function loadRecentChatContext(chatLimit = 4, messagesPerChat = 6) {
@@ -2257,6 +2275,67 @@ async function broadcastProjects() {
   broadcastProjectsFromCache()
 }
 
+let openCodeRefreshTimer = null
+let openCodeRefreshRunning = false
+let openCodeIndexState = new Map()
+let pendingOpenCodeSessionIds = new Set()
+
+function readOpenCodeIndexState() {
+  return new Map(readOpenCodeSessionIndex(OPENCODE_DB).map(row => [
+    row.id,
+    `${row.time_updated ?? row.time_created ?? 0}`,
+  ]))
+}
+
+function refreshOpenCodeSessions(sessionIds) {
+  if (!sessionIds.length) return
+  const results = []
+  for (const sessionId of sessionIds) {
+    try {
+      const result = readOpenCodeSessionFromSqlite(OPENCODE_DB, sessionId, null, null)
+      if (result) results.push(result)
+    } catch { /* a concurrent WAL commit will be retried by the next probe */ }
+  }
+  if (!results.length) return
+  const changed = flushSidebarCacheFromProjects(resultsToProjects(results, "opencode"), null)
+  if (changed.length) sseBroadcastSessionUpserts(changed)
+  debugLog(`[opencode-watch ${wallClock()}] refreshed ${changed.length} targeted session deltas`)
+}
+
+function scheduleOpenCodeRefresh(sessionIds = []) {
+  for (const sessionId of sessionIds) if (sessionId) pendingOpenCodeSessionIds.add(sessionId)
+  if (openCodeRefreshTimer) return
+  openCodeRefreshTimer = setTimeout(() => {
+    openCodeRefreshTimer = null
+    if (openCodeRefreshRunning) return
+    openCodeRefreshRunning = true
+    try {
+      const next = readOpenCodeIndexState()
+      const changedIds = []
+      for (const [sessionId, signature] of next) {
+        if (openCodeIndexState.get(sessionId) !== signature) changedIds.push(sessionId)
+      }
+      const forcedIds = [...pendingOpenCodeSessionIds]
+      pendingOpenCodeSessionIds.clear()
+      openCodeIndexState = next
+      refreshOpenCodeSessions([...new Set([...changedIds, ...forcedIds])])
+    } catch (e) {
+      debugLog(`[opencode-watch ${wallClock()}] index refresh failed: ${e.message}`)
+    } finally {
+      openCodeRefreshRunning = false
+    }
+  }, 75)
+}
+
+function opencodeFileSignature() {
+  return [OPENCODE_DB, `${OPENCODE_DB}-wal`].map(filePath => {
+    try {
+      const stat = statSync(filePath)
+      return `${filePath}:${stat.mtimeMs}:${stat.size}`
+    } catch { return `${filePath}:missing` }
+  }).join("|")
+}
+
 // Watch ~/.claude/projects for file changes; update search index for changed JSONL files.
 function handleClaudeFileChange(filename) {
   if (!filename || !filename.endsWith(".jsonl")) { broadcastProjects(); return }
@@ -2374,13 +2453,34 @@ if (existsSync(CURSOR_PROJECTS_ROOT)) {
 
 if (existsSync(OPENCODE_DIR)) {
   try {
-    watch(OPENCODE_DIR, { recursive: true }, () => broadcastProjects())
+    watch(OPENCODE_DIR, { recursive: true }, () => scheduleOpenCodeRefresh())
   } catch {
-    try {
-      watch(OPENCODE_DIR, () => broadcastProjects())
-    } catch { /* ignore */ }
+    try { watch(OPENCODE_DIR, () => scheduleOpenCodeRefresh()) } catch { /* ignore */ }
   }
 }
+
+if (existsSync(OPENCODE_DB)) {
+  try { watch(OPENCODE_DB, () => scheduleOpenCodeRefresh()) } catch { /* directory watcher covers WAL writes */ }
+}
+
+if (existsSync(OPENCODE_CORRELATION_FILE)) {
+  try {
+    watch(OPENCODE_CORRELATION_FILE, () => scheduleOpenCodeRefresh([...loadOpenCodeCorrelations(OPENCODE_CORRELATION_FILE).keys()]))
+  } catch { /* optional ledger */ }
+}
+
+// Reconcile recent sessions once after registering watchers, then use the
+// SQLite/WAL file signature as a low-cost fallback when macOS misses a WAL
+// fs.watch event. Only changed session IDs are fully read.
+openCodeIndexState = readOpenCodeIndexState()
+scheduleOpenCodeRefresh([...openCodeIndexState.keys()].slice(0, 12))
+let openCodeProbeSignature = opencodeFileSignature()
+setInterval(() => {
+  const next = opencodeFileSignature()
+  if (next === openCodeProbeSignature) return
+  openCodeProbeSignature = next
+  scheduleOpenCodeRefresh()
+}, 1000).unref()
 
 if (existsSync(ANTIGRAVITY_BRAIN_DIR)) {
   try {
@@ -3599,6 +3699,7 @@ const server = http.createServer(async (req, res) => {
     // Resolve the watchable file path
     let watchFile = null
     let watchIsDir = false
+    let watchIsOpenCode = false
     if (projectPath.startsWith("openclaw:")) {
       watchFile = findOpenclawSessionFile(sessionId)
     } else if (projectPath.startsWith("codex:")) {
@@ -3612,6 +3713,15 @@ const server = http.createServer(async (req, res) => {
       // Antigravity CLI appends JSONL — watch transcript.jsonl directly (size-based diff)
       const transcriptFile = join(ANTIGRAVITY_CLI_DIR, "brain", sessionId, ".system_generated", "logs", "transcript.jsonl")
       if (existsSync(transcriptFile)) watchFile = transcriptFile
+    } else if (projectPath.startsWith("opencode:")) {
+      // OpenCode persists live writes in SQLite WAL files rather than a
+      // per-session transcript. Watch the directory and compare this session's
+      // database signature before pushing a fresh tail.
+      if (existsSync(OPENCODE_DIR)) {
+        watchFile = OPENCODE_DIR
+        watchIsDir = true
+        watchIsOpenCode = true
+      }
     } else if (!projectPath.startsWith("cursor:") && !projectPath.startsWith("cursor-agent:") &&
                !projectPath.startsWith("opencode:") && !projectPath.startsWith("hermes:")) {
       // Claude JSONL
@@ -3642,10 +3752,12 @@ const server = http.createServer(async (req, res) => {
       } catch { return 0 }
     }
 
-    let lastSig = 0
-    try {
-      lastSig = watchIsDir ? dirMaxMtime(watchFile) : statSync(watchFile).size
-    } catch { /* file may not exist yet */ }
+    let lastSig = watchIsOpenCode ? openCodeSessionSignature(sessionId) : 0
+    if (!watchIsOpenCode) {
+      try {
+        lastSig = watchIsDir ? dirMaxMtime(watchFile) : statSync(watchFile).size
+      } catch { /* file may not exist yet */ }
+    }
 
     function pushUpdate() {
       try {
@@ -3672,7 +3784,9 @@ const server = http.createServer(async (req, res) => {
         // Small debounce: JSONL appends / md rewrites may fire multiple events per write
         debounceTimer = setTimeout(() => {
           try {
-            const newSig = watchIsDir ? dirMaxMtime(watchFile) : statSync(watchFile).size
+            const newSig = watchIsOpenCode
+              ? openCodeSessionSignature(sessionId)
+              : watchIsDir ? dirMaxMtime(watchFile) : statSync(watchFile).size
             if (newSig === lastSig) return
             lastSig = newSig
             // Invalidate mem-cache so fresh parse picks up new lines
