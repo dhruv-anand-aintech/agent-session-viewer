@@ -1,0 +1,42 @@
+const LABELS: Record<string, string> = {
+  aider: "Aider",
+  amazonq: "Amazon Q Developer CLI",
+  amp: "Amp",
+  antigravity: "Antigravity",
+  claude: "Claude Code",
+  cline: "Cline",
+  codex: "OpenAI Codex CLI",
+  "cohere-north": "Cohere North",
+  "command-code": "Command Code",
+  crush: "Crush",
+  cursor: "Cursor",
+  devin: "Devin",
+  droid: "Factory Droid",
+  gemini: "Gemini CLI",
+  "github-copilot-cli": "GitHub Copilot CLI",
+  "github-copilot-coding-agent": "GitHub Copilot",
+  goose: "Goose",
+  grok: "Grok Build",
+  jules: "Google Jules",
+  junie: "JetBrains Junie",
+  kilo: "Kilo Code",
+  kimi: "Kimi CLI",
+  kiro: "Kiro",
+  mimo: "MiMo Code",
+  muse: "Muse Code",
+  opencode: "OpenCode",
+  openhands: "OpenHands",
+  pi: "Pi",
+  pier: "Pier Code",
+  qwen: "Qwen Code",
+  "replit-agent": "Replit Agent",
+  "roo-code": "Roo Code",
+  trae: "Trae Agent",
+  windsurf: "Windsurf Cascade",
+  zcode: "ZCode",
+}
+
+export function agentBrandLabel(source?: string): string {
+  const key = (source ?? "claude").trim().toLowerCase()
+  return LABELS[key] ?? (source ? source : "Claude Code")
+}

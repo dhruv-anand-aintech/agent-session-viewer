@@ -1,4 +1,5 @@
 import { useState } from "react"
+import { agentBrandLabel } from "./agentBrandCatalog"
 
 export function platformIconLabel(source?: string): string {
   switch (source ?? "claude") {
@@ -10,7 +11,7 @@ export function platformIconLabel(source?: string): string {
     case "codex": return "Codex"
     case "gemini": return "Gemini"
     case "openclaw": return "Openclaw"
-    default: return "Claude"
+    default: return agentBrandLabel(source)
   }
 }
 
@@ -39,7 +40,7 @@ export function platformFallbackGlyph(source?: string): string {
     case "gemini": return "♊"
     case "codex": return "{}"
     case "openclaw": return "🐾"
-    default: return "C"
+    default: return agentBrandLabel(source).slice(0, 1).toUpperCase()
   }
 }
 

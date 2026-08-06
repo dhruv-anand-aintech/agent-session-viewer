@@ -30,6 +30,7 @@ import {
   HERMES_DB,
   GEMINI_TMP_ROOT,
 } from "./platform-readers.mjs"
+import { readExtendedAgentSessions } from "./lib/extended-agent-readers.mjs"
 
 const ROOT = dirname(fileURLToPath(import.meta.url))
 const CLAUDE_DIR = join(homedir(), ".claude", "projects")
@@ -313,6 +314,7 @@ try {
   ingestResults(ocResults, "opencode", "OpenCode")
 } catch { /* ignore */ }
 try { if (existsSync(HERMES_DB)) ingestResults(readHermesSessions(null, null), "hermes", "Hermes") } catch { /* ignore */ }
+try { ingestResults(readExtendedAgentSessions("all"), "extended-agents", "Extended coding agents") } catch { /* ignore */ }
 
 // ── Write sorted cache ─────────────────────────────────────────────────────────
 const sessions = Array.from(byId.values())

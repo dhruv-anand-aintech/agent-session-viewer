@@ -76,6 +76,19 @@ All platforms are auto-detected from their standard locations — no configurati
 | **OpenCode** | `~/.local/share/opencode/` | SQLite + JSON |
 | **Hermes** | `~/.hermes/state.db` | SQLite |
 | **Antigravity** | `~/.gemini/antigravity/brain/{uuid}/` | Markdown artifacts |
+| **Pi** | `~/.pi/agent/sessions/` | JSONL |
+| **Goose** | `~/.local/share/goose/sessions/sessions.db` | SQLite |
+| **MiMo Code** | `~/.local/share/mimocode/mimocode.db` | SQLite |
+| **Pier Code** | `~/.pier/state_5.sqlite` + rollout files | SQLite + JSONL event stream |
+| **Devin CLI** | `~/.local/share/devin/cli/sessions.db` | SQLite |
+
+The brand catalog also covers every AGL/matrix surface, including brands whose
+transcripts are hosted or do not expose a stable local path. Those brands can
+be ingested from a sanitized normalized JSONL export by setting
+`ASV_AGENT_TRANSCRIPT_ROOTS` to comma-separated `source=/path` pairs. Each
+file uses one `session` record followed by `message` records with `role`,
+`timestamp`, and `content`; the same title, count, timestamp, status, and
+message rendering path is then used for native and imported sessions.
 
 ### Platform notes
 

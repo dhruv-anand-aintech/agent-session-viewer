@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react"
 import "./GlobalSearch.css"
+import { agentBrandLabel } from "./agentBrandCatalog"
 
 // Module-level cache — persists across modal open/close within the session
 const _cache = new Map<string, { hits: GlobalSearchHit[]; ms: number }>()
@@ -253,7 +254,7 @@ export function GlobalSearch({ onNavigate, onClose, sessionTitles }: Props) {
                 <div className="gs-result-head">
                   <span className={`gs-dot ${SOURCE_DOTS[hit.source] ?? ""}`} />
                   <span className="gs-result-title">{titleFor(hit)}</span>
-                  <span className="gs-result-source">{SOURCE_LABELS[hit.source] ?? hit.source}</span>
+                  <span className="gs-result-source">{SOURCE_LABELS[hit.source] ?? agentBrandLabel(hit.source)}</span>
                 </div>
                 {hit.snippets.length > 0 && (
                   <div className="gs-result-snippets">

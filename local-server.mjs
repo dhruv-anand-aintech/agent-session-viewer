@@ -52,6 +52,15 @@ import {
   readGeminiSessionMsgs,
   GEMINI_TMP_ROOT,
 } from "./platform-readers.mjs"
+import {
+  DEVIN_DB,
+  GOOSE_DB,
+  isExtendedAgentProject,
+  MIMO_DB,
+  PIER_DB,
+  PI_ROOT,
+  readExtendedAgentSessions,
+} from "./lib/extended-agent-readers.mjs"
 import { buildSidebarSearchDoc, runSidebarSessionSearch, runThreadKeywordSearch } from "./lib/session-search-core.mjs"
 import { extractLatestPlan } from "./lib/plan-status-core.mjs"
 import { inferClaudeCodexParent } from "./lib/codex-claude-lineage.mjs"
@@ -94,7 +103,7 @@ try {
 const PLATFORM_LOADER_WORKER = join(__dirname, "lib", "platform-loader-worker.mjs")
 // Priority order: codex first (Claude scans on the main thread), then cursor/opencode;
 // the rest queue behind the MAX_PLATFORM_WORKERS pool.
-const STREAM_PLATFORM_WORKERS = ["codex", "cursor", "cursor-agent", "opencode", "gemini", "hermes", "openclaw", "antigravity", "antigravity-cli"]
+const STREAM_PLATFORM_WORKERS = ["codex", "cursor", "cursor-agent", "opencode", "gemini", "hermes", "openclaw", "antigravity", "antigravity-cli", "extended-agents"]
 const BUNDLE_PLATFORM_WORKERS = STREAM_PLATFORM_WORKERS
 const SERVER_START_TIME = Date.now()
 const SERVER_GIT = readServerGitMetadata()
@@ -117,6 +126,12 @@ function getTranscriptReadLocations() {
     HERMES_DB,
     GEMINI_TMP_ROOT,
     OPENCLAW_ROOT,
+    PI_ROOT,
+    GOOSE_DB,
+    MIMO_DB,
+    PIER_DB,
+    DEVIN_DB,
+    join(homedir(), ".config", "agent-session-viewer", "transcripts"),
   ].filter((location, index, locations) => location && locations.indexOf(location) === index)
 }
 
@@ -1709,6 +1724,12 @@ function loadSessionMessagesOndemand(projectPath, sessionId) {
   if (projectPath.startsWith("openclaw:")) {
     for (const { meta, msgs } of readOpenclawSessions(null, null)) {
       if (meta.id === sessionId) return msgs
+    }
+    return null
+  }
+  if (isExtendedAgentProject(projectPath)) {
+    for (const { meta, msgs } of readExtendedAgentSessions("all")) {
+      if (meta.id === sessionId && meta.projectPath === projectPath) return msgs
     }
     return null
   }

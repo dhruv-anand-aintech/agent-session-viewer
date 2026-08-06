@@ -6,6 +6,7 @@ import { mergeSidebarSearchResultItems } from "./sidebarSearchState"
 import { markSessionClick } from "./perf"
 import { isRecentlyActive, relativeTime } from "./utils"
 import { AgentIcon, platformFilterActiveClass } from "./platformChrome"
+import { agentBrandLabel } from "./agentBrandCatalog"
 import { RECENT_SIDEBAR_SESSIONS } from "./useProjects"
 import { debugLog, debugWarn } from "./debug-trace"
 
@@ -24,9 +25,7 @@ function tokenizeSidebarSearchQuery(query: string): string[] {
 }
 
 function formatPlatformLabel(source?: string): string {
-  const s = (source ?? "claude").trim()
-  if (!s || s === "claude") return "Claude"
-  return s.charAt(0).toUpperCase() + s.slice(1)
+  return agentBrandLabel(source)
 }
 
 function sessionCountLabel(s: SessionMeta): { user: number | null; assistant: number | null; title: string } {
@@ -654,7 +653,7 @@ export function Sidebar({ projects: projectsProp, projectsLoading, projectsUpdat
                   className={`sidebar-platform-btn ${platformFilter === p ? platformFilterActiveClass(p) : ""}`}
                   onClick={() => setPlatformFilter(p)}
                 >
-                  {p === "all" ? "All" : p === "claude" ? "Claude" : p === "cursor" ? "Cursor" : p === "opencode" ? "OpenCode" : p === "antigravity" ? "Antigravity" : p === "hermes" ? "Hermes" : p === "codex" ? "Codex" : p}
+                  {p === "all" ? "All" : formatPlatformLabel(p)}
                 </button>
               ))}
             </div>

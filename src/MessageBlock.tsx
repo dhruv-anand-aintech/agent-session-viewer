@@ -1,5 +1,6 @@
 import { useState, memo } from "react"
 import type { SessionMessage, ContentBlock } from "./types"
+import { agentBrandLabel } from "./agentBrandCatalog"
 
 /** Session platform (e.g. from SessionMeta.source) — drives assistant label in raw mode. */
 function assistantLabelForSource(source?: string): string {
@@ -17,9 +18,7 @@ function assistantLabelForSource(source?: string): string {
     case "claude":
       return "Claude"
     default:
-      return source && source.length > 0
-        ? source.charAt(0).toUpperCase() + source.slice(1)
-        : "Claude"
+      return agentBrandLabel(source)
   }
 }
 
